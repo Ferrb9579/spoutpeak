@@ -4,7 +4,6 @@
 
 use crate::state::{App, spawn, ui};
 use crate::media::addon::http;
-use crate::media::server;
 use crate::media::types::{Meta, Stream, StreamSource, Video};
 use crate::util::data_dir;
 use serde::{Deserialize, Serialize};
@@ -344,7 +343,6 @@ impl App {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let base = self.server_url();
         let part = part_path(&stem);
         let source = stream.source();
         spawn(
@@ -352,7 +350,7 @@ impl App {
                 let url = match source {
                     StreamSource::Url(url) => url,
                     StreamSource::Torrent { info_hash, file_idx, trackers } => {
-                        server::torrent_stream_url(&base, &info_hash, file_idx, &trackers).await?
+                        crate::streaming::stream_url(&info_hash, file_idx, &trackers).await?
                     }
                     _ => return Err("This stream can't be downloaded".to_owned()),
                 };

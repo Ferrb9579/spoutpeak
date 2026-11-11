@@ -8,7 +8,7 @@ use crate::player::PlayerUi;
 use crate::store::{self, Profile};
 use crate::media::addon::{self, CatalogRef};
 use crate::media::types::*;
-use crate::media::{api, server};
+use crate::media::api;
 use incular::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -317,7 +317,6 @@ pub struct Controllers {
     pub player_focus: FocusNode,
     pub email: TextEditingController,
     pub password: TextEditingController,
-    pub server_url: TextEditingController,
     pub player_path: TextEditingController,
     pub download_dir: TextEditingController,
     pub board: ScrollController,
@@ -348,7 +347,6 @@ impl Controllers {
             player_focus: FocusNode::new(),
             email: TextEditingController::new(),
             password: TextEditingController::new(),
-            server_url: TextEditingController::with_text(&profile.settings.server_url),
             player_path: TextEditingController::with_text(&profile.settings.custom_player_path),
             download_dir: TextEditingController::with_text(&profile.settings.download_dir),
             board: ScrollController::new(),
@@ -395,8 +393,8 @@ pub struct App {
     pub season_filter: Signal<String>,
     pub addons: Shared<AddonsState>,
     pub account: Shared<AccountState>,
+    /// Built-in torrent engine: `None` while starting, then whether it runs.
     pub server_online: Signal<Option<bool>>,
-    pub server_settings: Signal<Load<server::ServerSettings>>,
     /// False while the startup screen is up.
     pub booted: Signal<bool>,
     search_typing: Rc<std::cell::Cell<u64>>,
@@ -435,7 +433,6 @@ impl App {
             }),
             account: Shared::new(AccountState::default()),
             server_online: Signal::new(None),
-            server_settings: Signal::new(Load::Idle),
             booted: Signal::new(false),
             search_typing: Rc::new(std::cell::Cell::new(0)),
             downloads: Shared::new(crate::downloads::load()),
@@ -465,7 +462,7 @@ impl App {
             });
         }
         self.sync_account();
-        self.ensure_server(false);
+        self.start_streaming();
         // Never hold the startup screen hostage to a slow network.
         spawn(
             async { tokio::time::sleep(std::time::Duration::from_secs(8)).await },
@@ -533,7 +530,6 @@ impl App {
         match route {
             Route::Discover => self.ensure_discover(),
             Route::Addons => self.ensure_community(),
-            Route::Settings => self.load_server_settings(),
             _ => {}
         }
     }
@@ -1400,87 +1396,27 @@ impl App {
         });
     }
 
-    // ------------------------------------------------------------- server
+    // ------------------------------------------------------------- streaming
 
-    pub fn server_url(&self) -> String {
-        self.profile.peek(|p| p.settings.server_url.clone())
-    }
-
-    pub fn check_server(&self) {
-        let url = self.server_url();
-        spawn(async move { server::is_online(&url).await }, |app, online| {
-            app.server_online.set(Some(online));
+    /// Starts the built-in torrent engine (also the Settings "Retry").
+    pub fn start_streaming(&self) {
+        let settings = self.profile.peek(|p| p.settings.torrent.clone());
+        crate::streaming::configure(&settings);
+        spawn(crate::streaming::start(), |app, result| {
+            if let Err(error) = &result {
+                app.notify(format!("Torrent engine: {error}"));
+            }
+            app.server_online.set(Some(result.is_ok()));
         });
-    }
-
-    /// Checks the streaming server and, if it is local and not running,
-    /// starts the built-in one (at startup only when autostart is on;
-    /// `force` is the Settings page's Start button).
-    pub fn ensure_server(&self, force: bool) {
-        let url = self.server_url();
-        let autostart = force || self.profile.peek(|p| p.settings.autostart_server);
-        spawn(
-            async move {
-                if server::is_online(&url).await {
-                    return Ok(());
-                }
-                if !autostart || !url.contains("127.0.0.1") && !url.contains("localhost") {
-                    return Err(None);
-                }
-                crate::media::local_server::start(&url).await.map_err(Some)?;
-                if server::is_online(&url).await { Ok(()) } else { Err(None) }
-            },
-            |app, result: Result<(), Option<String>>| {
-                if let Err(Some(error)) = &result {
-                    app.notify(format!("Streaming server: {error}"));
-                }
-                app.server_online.set(Some(result.is_ok()));
-            },
-        );
     }
 
     pub fn update_settings(&self, update: impl FnOnce(&mut store::Settings)) {
-        let dir = self.profile.write(|p| {
+        let (dir, torrent) = self.profile.write(|p| {
             update(&mut p.settings);
-            p.settings.download_dir.clone()
+            (p.settings.download_dir.clone(), p.settings.torrent.clone())
         });
         crate::downloads::set_custom_folder(&dir);
+        crate::streaming::configure(&torrent);
         self.save_profile();
-    }
-
-    // ------------------------------------------------- server settings
-
-    /// Fetches the streaming server's own settings for the Settings page.
-    pub fn load_server_settings(&self) {
-        let url = self.server_url();
-        self.server_settings.set(Load::Loading);
-        spawn(async move { server::get_settings(&url).await }, |app, result| {
-            app.server_settings.set(match result {
-                Ok(settings) => Load::Ready(settings),
-                Err(error) => Load::Failed(error),
-            });
-        });
-    }
-
-    /// Changes server settings and saves them; reloads to show what the
-    /// server actually kept.
-    pub fn update_server_settings(
-        &self,
-        change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
-    ) {
-        let Load::Ready(mut settings) = self.server_settings.get_untracked() else {
-            return;
-        };
-        change(&mut settings.values);
-        let values = settings.values.clone();
-        self.server_settings.set(Load::Ready(settings));
-        let url = self.server_url();
-        spawn(async move { server::set_settings(&url, values).await }, |app, result| {
-            match result {
-                Ok(()) => app.notify("Streaming server settings saved"),
-                Err(error) => app.notify(error),
-            }
-            app.load_server_settings();
-        });
     }
 }

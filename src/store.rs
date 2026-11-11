@@ -1,6 +1,5 @@
 //! On-disk profile: account, installed addons, settings and the library.
 
-use crate::media::server::DEFAULT_URL;
 use crate::media::types::{Auth, Descriptor, LibraryItem};
 use crate::util::data_dir;
 use serde::{Deserialize, Serialize};
@@ -89,8 +88,7 @@ impl Default for SubtitleStyle {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub server_url: String,
-    pub autostart_server: bool,
+    pub torrent: TorrentSettings,
     pub player: PlayerKind,
     pub custom_player_path: String,
     pub subtitle_lang: String,
@@ -126,8 +124,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            server_url: DEFAULT_URL.to_owned(),
-            autostart_server: true,
+            torrent: TorrentSettings::default(),
             player: PlayerKind::Builtin,
             custom_player_path: String::new(),
             subtitle_lang: "eng".to_owned(),
@@ -148,6 +145,28 @@ impl Default for Settings {
             volume: 1.0,
             hardware_decoding: true,
             recent_searches: Vec::new(),
+        }
+    }
+}
+
+/// The built-in torrent engine (see `crate::streaming`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TorrentSettings {
+    /// Bytes of torrent data kept on disk for replays; `None` = unlimited.
+    pub cache_size: Option<u64>,
+    /// Peer connections per torrent.
+    pub max_connections: u32,
+    /// Download cap in bytes per second; `None` = unlimited.
+    pub speed_limit: Option<u64>,
+}
+
+impl Default for TorrentSettings {
+    fn default() -> Self {
+        Self {
+            cache_size: Some(2 * 1024 * 1024 * 1024),
+            max_connections: 200,
+            speed_limit: Some(39_321_600),
         }
     }
 }

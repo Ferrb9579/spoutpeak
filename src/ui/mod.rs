@@ -117,9 +117,9 @@ fn sidebar(app: &App, current: Route) -> Widget {
                 .profile
                 .read(|p| p.auth.as_ref().map(|a| a.user.email.clone()));
             let (dot, server) = match app.server_online.get() {
-                Some(true) => (GOOD, "Streaming server online"),
-                Some(false) => (DANGER, "Streaming server offline"),
-                None => (FAINT, "Checking streaming server"),
+                Some(true) => (GOOD, "Torrent engine ready"),
+                Some(false) => (DANGER, "Torrent engine stopped"),
+                None => (FAINT, "Starting torrent engine"),
             };
             let initial = account
                 .as_deref()

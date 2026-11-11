@@ -155,9 +155,9 @@ pub fn screen(app: &App) -> Widget {
                 ),
                 step_row(
                     server_step,
-                    "Streaming server",
+                    "Torrent engine",
                     match server {
-                        Some(true) => "Online".to_owned(),
+                        Some(true) => "Ready".to_owned(),
                         Some(false) => "Offline (torrents unavailable)".to_owned(),
                         None => "Starting…".to_owned(),
                     },

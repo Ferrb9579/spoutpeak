@@ -1,0 +1,606 @@
+//! Built-in torrent streaming engine.
+//!
+//! The app asks [`stream_url`] for a torrent file and gets back a plain HTTP
+//! URL that ffmpeg (or an external player) can read with seeking. Behind it,
+//! librqbit downloads the pieces around the read position first. The HTTP
+//! listener only binds to 127.0.0.1 on a random port, and every URL carries
+//! a random per-run token, so nothing else on the machine or network can use
+//! it. Downloaded pieces stay in a size-limited cache for faster replays.
+
+use crate::store::TorrentSettings;
+use axum::Router;
+use axum::body::Body;
+use axum::extract::{Path, RawQuery, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use librqbit::api::TorrentIdOrHash;
+use librqbit::dht::{DhtPersistenceConfig, Id20};
+use librqbit::limits::LimitsConfig;
+use librqbit::{
+    AddTorrent, AddTorrentOptions, DhtSessionConfig, ManagedTorrent, Session, SessionOptions,
+};
+use std::collections::{HashMap, HashSet};
+use std::io::SeekFrom;
+use std::num::NonZeroU32;
+use std::path::{Path as FsPath, PathBuf};
+use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant, SystemTime};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
+
+/// A torrent nobody has streamed for this long stops downloading.
+const IDLE_AFTER: Duration = Duration::from_secs(5 * 60);
+const HOUSEKEEPING_EVERY: Duration = Duration::from_secs(30);
+/// How long to wait for the torrent's metadata from peers.
+const METADATA_TIMEOUT: Duration = Duration::from_secs(50);
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mkv", "mp4", "avi", "mov", "webm", "m4v", "ts", "wmv", "flv", "mpg", "mpeg", "m2ts",
+];
+
+type Handle = Arc<ManagedTorrent>;
+
+// ------------------------------------------------------------- public API
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TorrentStats {
+    pub peers: u64,
+    /// Bytes per second.
+    pub download_speed: f64,
+    /// Share of the streamed file downloaded so far, 0 to 1.
+    pub progress: f64,
+}
+
+/// Presets for how hard the engine pulls from the swarm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TorrentProfile {
+    Soft,
+    Default,
+    Fast,
+    UltraFast,
+}
+
+impl TorrentProfile {
+    pub const ALL: [TorrentProfile; 4] = [Self::Soft, Self::Default, Self::Fast, Self::UltraFast];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Soft => "Soft",
+            Self::Default => "Default",
+            Self::Fast => "Fast",
+            Self::UltraFast => "Ultra fast",
+        }
+    }
+
+    /// (max peer connections, download cap in bytes/s).
+    fn values(self) -> (u32, Option<u64>) {
+        match self {
+            Self::Soft => (35, Some(1_677_721)),
+            Self::Default => (55, Some(3_145_728)),
+            Self::Fast => (200, Some(39_321_600)),
+            Self::UltraFast => (400, None),
+        }
+    }
+
+    pub fn apply(self, settings: &mut TorrentSettings) {
+        (settings.max_connections, settings.speed_limit) = self.values();
+    }
+
+    /// The preset the settings match, if any (else "custom").
+    pub fn detect(settings: &TorrentSettings) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|p| p.values() == (settings.max_connections, settings.speed_limit))
+    }
+}
+
+/// Starts the engine (idempotent; a failed start can be retried).
+pub async fn start() -> Result<(), String> {
+    engine().await.map(|_| ())
+}
+
+/// Applies changed settings. The speed cap applies at once, the peer limit
+/// to torrents opened from now on, the cache size at the next cleanup.
+pub fn configure(settings: &TorrentSettings) {
+    *config().lock().unwrap() = settings.clone();
+    if let Some(engine) = ENGINE.get() {
+        engine.session.ratelimits.set_download_bps(speed_cap(settings));
+    }
+}
+
+/// Registers the torrent and returns a local HTTP URL for the requested
+/// file, or for its largest video file when `file_idx` is `None`.
+pub async fn stream_url(
+    info_hash: &str,
+    file_idx: Option<u32>,
+    trackers: &[String],
+) -> Result<String, String> {
+    let engine = engine().await?;
+    let (hash, id) = parse_hash(info_hash)?;
+    let wanted = file_idx.map(|i| i as usize);
+    let handle = engine.torrent(&hash, id, trackers.to_vec(), wanted).await?;
+    let files = file_list(&handle);
+    let index = match wanted {
+        Some(index) if index < files.len() => index,
+        Some(_) => return Err("the torrent has no such file".into()),
+        None => guess_video(&files).ok_or("the torrent has no video file")?,
+    };
+    engine.select(&handle, index).await?;
+    let mut url = format!("{}/{hash}/{index}", engine.base);
+    if !trackers.is_empty() {
+        let query = trackers
+            .iter()
+            .map(|t| format!("tr={}", urlencoding::encode(t)))
+            .collect::<Vec<_>>()
+            .join("&");
+        url = format!("{url}?{query}");
+    }
+    Ok(url)
+}
+
+/// Swarm statistics for a URL returned by [`stream_url`].
+pub fn stats(url: &str) -> Option<TorrentStats> {
+    let engine = ENGINE.get()?;
+    let path = url.strip_prefix(&engine.base)?.split('?').next()?;
+    let (hash, file) = path.trim_start_matches('/').split_once('/')?;
+    let file: usize = file.parse().ok()?;
+    let handle = engine.lookup(hash)?;
+    let stats = handle.stats();
+    let live = stats.live.as_ref();
+    let file_len = file_list(&handle).get(file).map_or(0, |f| f.1);
+    let done = stats.file_progress.get(file).copied().unwrap_or(0);
+    Some(TorrentStats {
+        peers: live.map_or(0, |l| u64::from(l.snapshot.peer_stats.live)),
+        download_speed: live.map_or(0.0, |l| l.download_speed.as_bytes() as f64),
+        progress: if file_len > 0 { (done as f64 / file_len as f64).clamp(0.0, 1.0) } else { 0.0 },
+    })
+}
+
+/// Where torrent data is cached.
+pub fn cache_folder() -> PathBuf {
+    crate::util::cache_dir().join("torrents")
+}
+
+// ------------------------------------------------------------- engine
+
+static ENGINE: tokio::sync::OnceCell<Arc<Engine>> = tokio::sync::OnceCell::const_new();
+
+fn config() -> &'static Mutex<TorrentSettings> {
+    static CONFIG: OnceLock<Mutex<TorrentSettings>> = OnceLock::new();
+    CONFIG.get_or_init(|| Mutex::new(TorrentSettings::default()))
+}
+
+async fn engine() -> Result<&'static Arc<Engine>, String> {
+    ENGINE.get_or_try_init(launch).await
+}
+
+struct Entry {
+    handle: Handle,
+    /// Open HTTP responses reading from this torrent.
+    active: Arc<AtomicUsize>,
+    last_used: Arc<Mutex<Instant>>,
+}
+
+struct Engine {
+    session: Arc<Session>,
+    /// One sub-folder per torrent, named by info hash.
+    root: PathBuf,
+    /// `http://127.0.0.1:<port>/<token>`.
+    base: String,
+    torrents: Mutex<HashMap<String, Entry>>,
+    /// Serialises adding the same torrent from concurrent requests.
+    adding: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// 128 random bits from the OS-seeded hasher keys, as hex.
+fn random_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let part = || {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos());
+        hasher.finish()
+    };
+    format!("{:016x}{:016x}", part(), part())
+}
+
+async fn launch() -> Result<Arc<Engine>, String> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| format!("could not open a local port: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let token = random_token();
+
+    let root = cache_folder();
+    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create the torrent cache: {e}"))?;
+    let settings = config().lock().unwrap().clone();
+    let options = SessionOptions {
+        dht: Some(DhtSessionConfig {
+            persistence: Some(DhtPersistenceConfig {
+                config_filename: Some(crate::util::cache_dir().join("dht.json")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ratelimits: LimitsConfig {
+            download_bps: speed_cap(&settings),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let session = Session::new_with_opts(root.clone(), options)
+        .await
+        .map_err(|e| format!("could not start the torrent engine: {e:#}"))?;
+
+    let engine = Arc::new(Engine {
+        session,
+        root,
+        base: format!("http://127.0.0.1:{port}/{token}"),
+        torrents: Mutex::new(HashMap::new()),
+        adding: Mutex::new(HashMap::new()),
+    });
+
+    let router = Router::new()
+        .route(&format!("/{token}/{{hash}}/{{file}}"), get(serve_file))
+        .with_state(engine.clone());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let housekeeper = engine.clone();
+    tokio::spawn(async move {
+        loop {
+            housekeeper.housekeeping().await;
+            tokio::time::sleep(HOUSEKEEPING_EVERY).await;
+        }
+    });
+    Ok(engine)
+}
+
+fn speed_cap(settings: &TorrentSettings) -> Option<NonZeroU32> {
+    settings
+        .speed_limit
+        .and_then(|bps| NonZeroU32::new(bps.min(u64::from(u32::MAX)) as u32))
+}
+
+fn parse_hash(hash: &str) -> Result<(String, Id20), String> {
+    let hash = hash.to_ascii_lowercase();
+    if hash.len() != 40 {
+        return Err("expected a 40-character info hash".into());
+    }
+    Id20::from_str(&hash).map(|id| (hash, id)).map_err(|_| "invalid info hash".into())
+}
+
+impl Engine {
+    fn lookup(&self, hash: &str) -> Option<Handle> {
+        let torrents = self.torrents.lock().unwrap();
+        let entry = torrents.get(&hash.to_ascii_lowercase())?;
+        *entry.last_used.lock().unwrap() = Instant::now();
+        Some(entry.handle.clone())
+    }
+
+    /// The torrent for `hash`, adding it (and resolving metadata from
+    /// peers) if needed. Without a file in mind it starts paused, so nothing
+    /// downloads until [`Engine::select`] picks one.
+    async fn torrent(
+        &self,
+        hash: &str,
+        id: Id20,
+        trackers: Vec<String>,
+        file: Option<usize>,
+    ) -> Result<Handle, String> {
+        if let Some(handle) = self.lookup(hash) {
+            return Ok(handle);
+        }
+        let lock = self.adding.lock().unwrap().entry(hash.to_owned()).or_default().clone();
+        let _adding = lock.lock().await;
+        if let Some(handle) = self.lookup(hash) {
+            return Ok(handle);
+        }
+        if let Some(handle) = self.session.get(TorrentIdOrHash::Hash(id)) {
+            return Ok(self.remember(hash, handle));
+        }
+        let settings = config().lock().unwrap().clone();
+        let options = AddTorrentOptions {
+            paused: file.is_none(),
+            only_files: file.map(|f| vec![f]),
+            // Reuse pieces already in the cache from an earlier session.
+            overwrite: true,
+            output_folder: Some(self.root.join(hash).to_string_lossy().into_owned()),
+            trackers: (!trackers.is_empty()).then_some(trackers),
+            peer_limit: (settings.max_connections > 0).then_some(settings.max_connections as usize),
+            ..Default::default()
+        };
+        let magnet = format!("magnet:?xt=urn:btih:{hash}");
+        let added = tokio::time::timeout(
+            METADATA_TIMEOUT,
+            self.session.add_torrent(AddTorrent::from_url(magnet), Some(options)),
+        )
+        .await
+        .map_err(|_| "no peers sent the torrent's details in time".to_owned())?
+        .map_err(|e| format!("could not open the torrent: {e:#}"))?;
+        let handle = added.into_handle().ok_or("the torrent was not added")?;
+        Ok(self.remember(hash, handle))
+    }
+
+    fn remember(&self, hash: &str, handle: Handle) -> Handle {
+        self.torrents.lock().unwrap().insert(
+            hash.to_owned(),
+            Entry {
+                handle: handle.clone(),
+                active: Arc::new(AtomicUsize::new(0)),
+                last_used: Arc::new(Mutex::new(Instant::now())),
+            },
+        );
+        handle
+    }
+
+    /// Makes sure `file` is being downloaded and the torrent is running.
+    async fn select(&self, handle: &Handle, file: usize) -> Result<(), String> {
+        handle.wait_until_initialized().await.map_err(|e| format!("{e:#}"))?;
+        let current = handle.only_files();
+        if current.as_ref().is_none_or(|files| !files.contains(&file)) {
+            let mut files: HashSet<usize> = current.unwrap_or_default().into_iter().collect();
+            files.insert(file);
+            self.session
+                .update_only_files(handle, &files)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+        }
+        if handle.is_paused() {
+            self.session.unpause(handle).await.map_err(|e| format!("{e:#}"))?;
+        }
+        Ok(())
+    }
+
+    fn counters(&self, hash: &str) -> Option<(Arc<AtomicUsize>, Arc<Mutex<Instant>>)> {
+        let torrents = self.torrents.lock().unwrap();
+        let entry = torrents.get(hash)?;
+        Some((entry.active.clone(), entry.last_used.clone()))
+    }
+
+    /// Stops torrents nobody is watching and trims the cache to its limit.
+    async fn housekeeping(&self) {
+        let idle: Vec<Handle> = {
+            let mut torrents = self.torrents.lock().unwrap();
+            let hashes: Vec<String> = torrents
+                .iter()
+                .filter(|(_, e)| {
+                    e.active.load(Ordering::SeqCst) == 0
+                        && e.last_used.lock().unwrap().elapsed() > IDLE_AFTER
+                })
+                .map(|(hash, _)| hash.clone())
+                .collect();
+            hashes.iter().filter_map(|h| torrents.remove(h)).map(|e| e.handle).collect()
+        };
+        for handle in idle {
+            // Keep the files: they are the cache.
+            let _ = self.session.delete(TorrentIdOrHash::Id(handle.id()), false).await;
+        }
+        let Some(limit) = config().lock().unwrap().cache_size else { return };
+        let in_use: HashSet<String> = self.torrents.lock().unwrap().keys().cloned().collect();
+        let root = self.root.clone();
+        let _ = tokio::task::spawn_blocking(move || trim_cache(&root, limit, &in_use)).await;
+    }
+}
+
+/// Deletes the least recently written torrent folders until the cache fits
+/// in `limit` bytes. Folders of torrents in use are never touched.
+fn trim_cache(root: &FsPath, limit: u64, in_use: &HashSet<String>) {
+    fn walk(path: &FsPath, size: &mut u64, newest: &mut SystemTime) {
+        let Ok(entries) = std::fs::read_dir(path) else { return };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                walk(&entry.path(), size, newest);
+            } else {
+                *size += meta.len();
+                if let Ok(modified) = meta.modified() {
+                    *newest = (*newest).max(modified);
+                }
+            }
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    let mut folders: Vec<(PathBuf, u64, SystemTime, bool)> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| {
+            let (mut size, mut newest) = (0, SystemTime::UNIX_EPOCH);
+            walk(&e.path(), &mut size, &mut newest);
+            let busy = in_use.contains(&e.file_name().to_string_lossy().to_ascii_lowercase());
+            (e.path(), size, newest, busy)
+        })
+        .collect();
+    let mut total: u64 = folders.iter().map(|f| f.1).sum();
+    folders.sort_by_key(|f| f.2);
+    for (path, size, _, busy) in folders {
+        if total <= limit {
+            break;
+        }
+        if !busy && std::fs::remove_dir_all(&path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+// ------------------------------------------------------------- files
+
+/// (name with `/` separators, length, is padding) for every file.
+fn file_list(handle: &Handle) -> Vec<(String, u64, bool)> {
+    let Some(metadata) = handle.metadata.load_full() else {
+        return Vec::new();
+    };
+    metadata
+        .file_infos
+        .iter()
+        .map(|f| {
+            let name = f
+                .relative_filename
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            (name, f.len, f.attrs.padding)
+        })
+        .collect()
+}
+
+fn guess_video(files: &[(String, u64, bool)]) -> Option<usize> {
+    files
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _, padding))| {
+            let lower = name.to_ascii_lowercase();
+            !padding && VIDEO_EXTENSIONS.iter().any(|ext| lower.ends_with(&format!(".{ext}")))
+        })
+        .max_by_key(|(_, (_, len, _))| *len)
+        .map(|(i, _)| i)
+}
+
+fn mime_type(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "mkv" => "video/x-matroska",
+        "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
+        "mov" => "video/quicktime",
+        "ts" | "m2ts" => "video/mp2t",
+        "wmv" => "video/x-ms-wmv",
+        "flv" => "video/x-flv",
+        "mpg" | "mpeg" => "video/mpeg",
+        _ => "application/octet-stream",
+    }
+}
+
+// ------------------------------------------------------------- HTTP
+
+fn fail(status: StatusCode, message: String) -> Response {
+    (status, message).into_response()
+}
+
+/// Repeated `tr=` query parameters, as [`stream_url`] appends them.
+fn trackers_from_query(query: Option<&str>) -> Vec<String> {
+    query
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|pair| pair.strip_prefix("tr="))
+        .filter_map(|value| urlencoding::decode(value).ok().map(|v| v.into_owned()))
+        .collect()
+}
+
+/// `bytes=a-b`, `bytes=a-` or `bytes=-n` as a half-open range.
+fn parse_range(header: Option<&HeaderValue>, len: u64) -> Option<Result<(u64, u64), ()>> {
+    let spec = header?.to_str().ok()?.strip_prefix("bytes=")?;
+    let spec = spec.split(',').next()?.trim();
+    let (start, end) = spec.split_once('-')?;
+    let range = if start.is_empty() {
+        let suffix: u64 = end.parse().ok()?;
+        (len.saturating_sub(suffix), len)
+    } else {
+        let start: u64 = start.parse().ok()?;
+        let end = if end.is_empty() {
+            len
+        } else {
+            end.parse::<u64>().ok()?.saturating_add(1).min(len)
+        };
+        (start, end)
+    };
+    Some(if range.0 < range.1 { Ok(range) } else { Err(()) })
+}
+
+/// Counts an open response against its torrent so it is not stopped or
+/// evicted mid-stream.
+struct Tracked {
+    inner: Box<dyn AsyncRead + Send + Unpin>,
+    active: Arc<AtomicUsize>,
+    last_used: Arc<Mutex<Instant>>,
+}
+
+impl AsyncRead for Tracked {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        *self.last_used.lock().unwrap() = Instant::now();
+    }
+}
+
+async fn serve_file(
+    State(engine): State<Arc<Engine>>,
+    Path((hash, file)): Path<(String, usize)>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let (hash, id) = match parse_hash(&hash) {
+        Ok(parsed) => parsed,
+        Err(error) => return fail(StatusCode::BAD_REQUEST, error),
+    };
+    // The torrent may have been stopped while idle (e.g. a long pause):
+    // reopen it with the trackers carried in the URL.
+    let trackers = trackers_from_query(query.as_deref());
+    let handle = match engine.torrent(&hash, id, trackers, Some(file)).await {
+        Ok(handle) => handle,
+        Err(error) => return fail(StatusCode::BAD_GATEWAY, error),
+    };
+    let files = file_list(&handle);
+    let Some((name, _, _)) = files.get(file) else {
+        return fail(StatusCode::NOT_FOUND, "the torrent has no such file".into());
+    };
+    if let Err(error) = engine.select(&handle, file).await {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, error);
+    }
+    let Some((active, last_used)) = engine.counters(&hash) else {
+        return fail(StatusCode::NOT_FOUND, "the torrent is no longer open".into());
+    };
+    let mut reader = match handle.clone().stream(file).await {
+        Ok(reader) => reader,
+        Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    };
+    let len = reader.len();
+
+    let mut out = HeaderMap::new();
+    out.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    out.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime_type(name)));
+    let (status, body): (StatusCode, Box<dyn AsyncRead + Send + Unpin>) =
+        match parse_range(headers.get(header::RANGE), len) {
+            Some(Err(())) => {
+                out.insert(
+                    header::CONTENT_RANGE,
+                    HeaderValue::from_str(&format!("bytes */{len}")).unwrap(),
+                );
+                return (StatusCode::RANGE_NOT_SATISFIABLE, out).into_response();
+            }
+            Some(Ok((start, end))) => {
+                if let Err(e) = reader.seek(SeekFrom::Start(start)).await {
+                    return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("seek failed: {e}"));
+                }
+                out.insert(header::CONTENT_LENGTH, HeaderValue::from(end - start));
+                out.insert(
+                    header::CONTENT_RANGE,
+                    HeaderValue::from_str(&format!("bytes {start}-{}/{len}", end - 1)).unwrap(),
+                );
+                (StatusCode::PARTIAL_CONTENT, Box::new(reader.take(end - start)))
+            }
+            None => {
+                out.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+                (StatusCode::OK, Box::new(reader))
+            }
+        };
+
+    active.fetch_add(1, Ordering::SeqCst);
+    let tracked = Tracked { inner: body, active, last_used };
+    let chunks = tokio_util::io::ReaderStream::with_capacity(tracked, 64 * 1024);
+    (status, out, Body::from_stream(chunks)).into_response()
+}

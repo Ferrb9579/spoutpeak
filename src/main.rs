@@ -10,6 +10,7 @@ mod images;
 mod player;
 mod state;
 mod store;
+mod streaming;
 mod media;
 mod theme;
 mod ui;

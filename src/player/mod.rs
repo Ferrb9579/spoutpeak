@@ -7,7 +7,7 @@ pub mod subtitles;
 use crate::state::{App, Route, Shared, spawn, ui};
 use crate::store::{PlayerKind, Settings, SubtitleStyle};
 use crate::media::addon::{self, http};
-use crate::media::server::{self, TorrentStats};
+use crate::streaming::{self, TorrentStats};
 use crate::media::types::*;
 use crate::util::same_language;
 use engine::{Engine, Event, MediaInfo, OpenRequest, Track};
@@ -321,7 +321,7 @@ impl App {
                         s.title = title;
                         s.subtitle = subtitle;
                         s.status = Status::Opening;
-                        s.stage = "Asking the streaming server to join the swarm…".into();
+                        s.stage = "Joining the swarm…".into();
                         s.live = false;
                         s.duration = 0.0;
                         s.torrent = None;
@@ -335,12 +335,9 @@ impl App {
                     self.notify("Preparing torrent…");
                     None
                 };
-                let base = self.server_url();
                 let stream = stream.clone();
                 spawn(
-                    async move {
-                        server::torrent_stream_url(&base, &info_hash, file_idx, &trackers).await
-                    },
+                    async move { streaming::stream_url(&info_hash, file_idx, &trackers).await },
                     move |app, result| {
                         if let Some(ticket) = ticket {
                             let still_waiting = app.player.session_id.get() == ticket
@@ -525,7 +522,7 @@ impl App {
         spawn(
             async move {
                 tokio::time::sleep(std::time::Duration::from_millis(900)).await;
-                let stats = server::torrent_stats(&url).await;
+                let stats = streaming::stats(&url);
                 (url, stats)
             },
             move |app, (url, stats)| {
@@ -759,15 +756,9 @@ impl App {
             self.record_player_progress(seconds, false, push);
         }
         if let Some(url) = stats_url {
-            let session_id = self.player.session_id.get();
-            spawn(
-                async move { server::torrent_stats(&url).await },
-                move |app, stats| {
-                    if app.player.session_id.get() == session_id && stats.is_some() {
-                        app.player.state.write(|s| s.torrent = stats);
-                    }
-                },
-            );
+            if let Some(stats) = streaming::stats(&url) {
+                self.player.state.write(|s| s.torrent = Some(stats));
+            }
         }
     }
 

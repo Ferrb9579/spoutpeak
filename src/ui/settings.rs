@@ -1,10 +1,9 @@
-//! Settings: Media account, playback, streaming server.
+//! Settings: Media account, playback, streaming.
 
 use super::widgets::*;
-use crate::state::{App, Load};
+use crate::state::App;
 use crate::store::{PlayerKind, Settings};
-use crate::media::server::TorrentProfile;
-use serde_json::{Value, json};
+use crate::streaming::TorrentProfile;
 use crate::theme::*;
 use crate::util::language_name;
 use incular::prelude::*;
@@ -357,7 +356,7 @@ fn playback_card(app: &App, settings: &Settings) -> Widget {
     ));
     if settings.player == PlayerKind::Builtin && !ffmpeg_ok {
         children.push(text(
-            "ffmpeg was not found on this computer. Install ffmpeg (or Media) or pick an external player.",
+            "ffmpeg is missing from the Spoutpeak folder. Reinstall Spoutpeak or pick an external player.",
             13.0,
             FontWeight::W500,
             DANGER,
@@ -407,145 +406,81 @@ fn playback_card(app: &App, settings: &Settings) -> Widget {
     card(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
 }
 
-fn server_card(app: &App, settings: &Settings) -> Widget {
-    let (color, status) = match app.server_online.get() {
-        Some(true) => (GOOD, "Online"),
-        Some(false) => (DANGER, "Offline - torrents will not play"),
-        None => (FAINT, "Checking…"),
-    };
-    let (save, check, start) = (app.clone(), app.clone(), app.clone());
-    let children: Vec<Widget> = vec![
-        section("Streaming server"),
-        gap(6.0),
-        muted("Torrent streams are served by Spoutpeak's built-in streaming server. You can also point it at a Media streaming server running elsewhere."),
-        gap(8.0),
-        setting_row(
-            "Server address",
-            status,
-            row(vec![
-                input(&app.controllers.server_url, "http://127.0.0.1:11470", 300.0, |_| {})
-                    .on_changed(move |value| {
-                        save.update_settings(|s| s.server_url = value.trim().to_owned())
-                    })
-                    .into(),
-                hgap(10.0),
-                Container::new().width(9.0).height(9.0).radius(4.5).color(color).into(),
-                hgap(12.0),
-                small_button("Check", Tone::Neutral, move || {
-                    check.server_online.set(None);
-                    check.check_server();
-                }),
-                hgap(8.0),
-                small_button("Start", Tone::Neutral, move || {
-                    start.server_online.set(None);
-                    start.ensure_server(true);
-                }),
-            ])
-            .into(),
-        ),
-        setting_row(
-            "Start automatically",
-            "Start the built-in server when Spoutpeak opens",
-            toggle(app, settings.autostart_server, |s, v| s.autostart_server = v),
-        ),
-    ];
-    let mut children = children;
-    children.push(gap(8.0));
-    children.extend(server_options(app));
-    card(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
-}
-
-/// Chips that write one server value.
-fn server_choices(app: &App, key: &'static str, options: Vec<(String, Value)>, current: &Value) -> Widget {
-    Wrap::new(options.into_iter().map(|(label, value)| {
-        let app = app.clone();
-        let selected = &value == current;
-        chip(label, selected, move || {
-            let value = value.clone();
-            app.update_server_settings(|values| {
-                values.insert(key.to_owned(), value);
-            })
-        })
-    }))
-    .spacing(8.0)
-    .run_spacing(8.0)
-    .into()
-}
-
 fn gib(bytes: u64) -> String {
     format!("{} GB", bytes / 1_073_741_824)
 }
 
-/// Settings the streaming server itself keeps: cache, torrent tuning,
-/// transcoding, remote access.
-fn server_options(app: &App) -> Vec<Widget> {
-    let reload = app.clone();
-    let header = row(vec![
-        text("Server options", 14.0, FontWeight::W600, TEXT).into(),
-        hgap(10.0),
-        small_icon_button(icons::rotate_ccw(), Some("Reload"), Tone::Ghost, move || {
-            reload.load_server_settings()
-        }),
-    ])
-    .into();
-    let settings = match app.server_settings.get() {
-        Load::Ready(settings) => settings,
-        Load::Failed(error) => return vec![header, gap(6.0), text(error, 13.0, FontWeight::W500, DANGER).into()],
-        _ => return vec![header, gap(6.0), muted("Loading the server's settings…")],
-    };
-    let mut rows = vec![header, gap(4.0)];
+fn mib_per_second(bytes: u64) -> String {
+    format!("{:.0} MB/s", bytes as f64 / 1_048_576.0)
+}
 
-    // Cache size: the server's own list plus larger sizes.
-    let mut sizes: Vec<(String, Value)> = Vec::new();
-    for bytes in [0u64, 2, 5, 10, 20, 50, 100].map(|g| g * 1_073_741_824) {
-        let label = if bytes == 0 { "No cache".to_owned() } else { gib(bytes) };
-        sizes.push((label, json!(bytes)));
+/// The built-in torrent engine: status, cache and swarm tuning.
+fn streaming_card(app: &App, settings: &Settings) -> Widget {
+    let torrent = &settings.torrent;
+    let online = app.server_online.get();
+    let (color, status) = match online {
+        Some(true) => (GOOD, "Running"),
+        Some(false) => (DANGER, "Not running - torrents will not play"),
+        None => (FAINT, "Starting…"),
+    };
+    let mut status_row: Vec<Widget> = vec![
+        Container::new().width(9.0).height(9.0).radius(4.5).color(color).into(),
+        hgap(10.0),
+        text(status, 13.0, FontWeight::W500, MUTED).into(),
+    ];
+    if online == Some(false) {
+        let retry = app.clone();
+        status_row.push(hgap(12.0));
+        status_row.push(small_button("Retry", Tone::Neutral, move || {
+            retry.server_online.set(None);
+            retry.start_streaming();
+        }));
     }
-    sizes.push(("Unlimited".to_owned(), Value::Null));
-    let current_size = settings.value("cacheSize");
-    if !sizes.iter().any(|(_, v)| *v == current_size) {
-        if let Some(bytes) = current_size.as_u64() {
-            sizes.push((gib(bytes), current_size.clone()));
+    let mut rows: Vec<Widget> = vec![
+        section("Streaming"),
+        gap(6.0),
+        muted("Torrents stream through Spoutpeak's built-in engine. Nothing else needs to be installed."),
+        gap(8.0),
+        setting_row("Torrent engine", "", row(status_row).into()),
+    ];
+
+    // Cache size.
+    let mut sizes: Vec<(String, Option<u64>)> = [0u64, 2, 5, 10, 20, 50, 100]
+        .iter()
+        .map(|g| {
+            let bytes = g * 1_073_741_824;
+            (if bytes == 0 { "No cache".to_owned() } else { gib(bytes) }, Some(bytes))
+        })
+        .collect();
+    sizes.push(("Unlimited".to_owned(), None));
+    if !sizes.iter().any(|(_, v)| *v == torrent.cache_size) {
+        if let Some(bytes) = torrent.cache_size {
+            sizes.push((gib(bytes), Some(bytes)));
         }
     }
     rows.push(setting_row(
         "Cache size",
         "Torrent data kept on disk for faster replays",
-        server_choices(app, "cacheSize", sizes, &current_size),
+        choices(app, sizes, torrent.cache_size, |s, v| s.torrent.cache_size = v),
     ));
-
-    if !settings.cache_roots.is_empty() {
-        rows.push(setting_row(
-            "Caching drive",
-            "Where the cache is stored",
-            server_choices(
-                app,
-                "cacheRoot",
-                settings
-                    .cache_roots
-                    .iter()
-                    .map(|c| (c.name.clone(), c.value.clone()))
-                    .collect(),
-                &settings.value("cacheRoot"),
-            ),
-        ));
-        rows.push(text(
-            format!("Current: {}", settings.value("cacheRoot").as_str().unwrap_or("default")),
+    rows.push(
+        text(
+            format!("Stored in {}", crate::streaming::cache_folder().display()),
             12.0,
             FontWeight::W400,
             FAINT,
         )
-        .into());
-    }
+        .into(),
+    );
 
-    // Torrent profile.
-    let detected = TorrentProfile::detect(&settings);
+    // Swarm profile: a preset for the two settings below.
+    let detected = TorrentProfile::detect(torrent);
     let mut profiles: Vec<Widget> = TorrentProfile::ALL
         .into_iter()
         .map(|profile| {
             let app = app.clone();
             chip(profile.label(), detected == Some(profile), move || {
-                app.update_server_settings(|values| profile.apply(values))
+                app.update_settings(|s| profile.apply(&mut s.torrent))
             })
         })
         .collect();
@@ -554,104 +489,37 @@ fn server_options(app: &App) -> Vec<Widget> {
     }
     rows.push(setting_row(
         "Torrent profile",
-        "How hard the server pulls from peers",
+        "How hard the engine pulls from peers",
         Wrap::new(profiles).spacing(8.0).run_spacing(8.0).into(),
     ));
 
-    // Finer control than Media offers: connections and speed cap directly.
-    let connections = settings.u64("btMaxConnections").unwrap_or(0);
-    let mut connection_options: Vec<(String, Value)> =
-        [35u64, 55, 100, 200, 400, 800].iter().map(|n| (n.to_string(), json!(n))).collect();
-    if !connection_options.iter().any(|(_, v)| v.as_u64() == Some(connections)) {
-        connection_options.push((connections.to_string(), json!(connections)));
+    let mut connections: Vec<(String, u32)> =
+        [35u32, 55, 100, 200, 400, 800].iter().map(|n| (n.to_string(), *n)).collect();
+    if !connections.iter().any(|(_, v)| *v == torrent.max_connections) {
+        connections.push((torrent.max_connections.to_string(), torrent.max_connections));
     }
     rows.push(setting_row(
         "Max peer connections",
         "More peers: faster starts, more bandwidth",
-        server_choices(app, "btMaxConnections", connection_options, &json!(connections)),
+        choices(app, connections, torrent.max_connections, |s, v| s.torrent.max_connections = v),
     ));
-    let hard = settings.values.get("btDownloadSpeedHardLimit").and_then(Value::as_f64).unwrap_or(0.0);
-    let mut caps: Vec<(String, Value)> = [2u64, 5, 10, 25, 50, 75]
+
+    let mut caps: Vec<(String, Option<u64>)> = [2u64, 5, 10, 25, 50, 75]
         .iter()
-        .map(|mb| (format!("{mb} MB/s"), json!(mb * 1_048_576)))
+        .map(|mb| (format!("{mb} MB/s"), Some(mb * 1_048_576)))
         .collect();
-    let current_cap = caps
-        .iter()
-        .find(|(_, v)| v.as_f64().is_some_and(|c| (c - hard).abs() < 1024.0))
-        .map(|(_, v)| v.clone())
-        .unwrap_or_else(|| {
-            let value = json!(hard);
-            caps.push((format!("{:.1} MB/s", hard / 1_048_576.0), value.clone()));
-            value
-        });
+    caps.push(("Unlimited".to_owned(), None));
+    if !caps.iter().any(|(_, v)| *v == torrent.speed_limit) {
+        if let Some(bps) = torrent.speed_limit {
+            caps.push((mib_per_second(bps), Some(bps)));
+        }
+    }
     rows.push(setting_row(
         "Download speed limit",
         "Upper bound on torrent download speed",
-        server_choices(app, "btDownloadSpeedHardLimit", caps, &current_cap),
+        choices(app, caps, torrent.speed_limit, |s, v| s.torrent.speed_limit = v),
     ));
-
-    // Transcoding (only servers that support it report these keys; the
-    // built-in one does not).
-    if settings.values.contains_key("transcodeProfile") {
-        let mut transcode: Vec<(String, Value)> = vec![("Disabled".to_owned(), Value::Null)];
-        transcode.extend(
-            settings
-                .transcode_profiles
-                .iter()
-                .map(|p| (p.to_uppercase(), json!(p))),
-        );
-        rows.push(setting_row(
-            "Transcode profile",
-            "GPU encoder the server uses when it must convert",
-            server_choices(app, "transcodeProfile", transcode, &settings.value("transcodeProfile")),
-        ));
-    }
-    if settings.values.contains_key("transcodeHardwareAccel") {
-        rows.push(setting_row(
-            "Hardware transcoding",
-            "Let the server use the GPU to transcode",
-            server_choices(
-                app,
-                "transcodeHardwareAccel",
-                vec![("On".to_owned(), json!(true)), ("Off".to_owned(), json!(false))],
-                &settings.value("transcodeHardwareAccel"),
-            ),
-        ));
-    }
-
-    if !settings.https_endpoints.is_empty() {
-        rows.push(setting_row(
-            "HTTPS endpoint",
-            "Lets other devices on your network stream",
-            server_choices(
-                app,
-                "remoteHttps",
-                settings
-                    .https_endpoints
-                    .iter()
-                    .map(|c| (c.name.clone(), c.value.clone()))
-                    .collect(),
-                &settings.value("remoteHttps"),
-            ),
-        ));
-    }
-    if settings.values.contains_key("proxyStreamsEnabled") {
-        rows.push(setting_row(
-            "Proxy streams",
-            "Route direct HTTP streams through the server",
-            server_choices(
-                app,
-                "proxyStreamsEnabled",
-                vec![("On".to_owned(), json!(true)), ("Off".to_owned(), json!(false))],
-                &settings.value("proxyStreamsEnabled"),
-            ),
-        ));
-    }
-    if let Some(version) = settings.values.get("serverVersion").and_then(Value::as_str) {
-        rows.push(gap(4.0));
-        rows.push(text(format!("Server version {version}"), 12.0, FontWeight::W400, FAINT).into());
-    }
-    rows
+    card(col(rows).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
 }
 
 fn open_card(app: &App) -> Widget {
@@ -719,7 +587,7 @@ pub fn screen(app: &App) -> Widget {
                 gap(16.0),
                 autoplay_card(app, &settings),
                 gap(16.0),
-                server_card(app, &settings),
+                streaming_card(app, &settings),
                 gap(16.0),
                 downloads_card(app),
                 gap(16.0),
