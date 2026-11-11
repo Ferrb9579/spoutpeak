@@ -128,7 +128,7 @@ pub struct Engine {
 }
 
 /// Locates `ffmpeg`/`ffprobe`: bundled next to the app (in `ffmpeg\`, as the
-/// installer lays it out), else on PATH, else next to an installed Media.
+/// installer lays it out), else on PATH.
 pub fn tools() -> Option<(PathBuf, PathBuf)> {
     static TOOLS: OnceLock<Option<(PathBuf, PathBuf)>> = OnceLock::new();
     TOOLS
@@ -159,13 +159,7 @@ pub fn tools() -> Option<(PathBuf, PathBuf)> {
                 }
             }
             let on_path = (PathBuf::from("ffmpeg"), PathBuf::from("ffprobe"));
-            if works(&on_path.0) && works(&on_path.1) {
-                return Some(on_path);
-            }
-            let (_, script) = crate::media::server::find_local_server()?;
-            let dir = script.parent()?;
-            let media = in_dir(dir);
-            (works(&media.0) && works(&media.1)).then_some(media)
+            (works(&on_path.0) && works(&on_path.1)).then_some(on_path)
         })
         .clone()
 }

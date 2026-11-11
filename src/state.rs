@@ -465,7 +465,7 @@ impl App {
             });
         }
         self.sync_account();
-        self.ensure_server();
+        self.ensure_server(false);
         // Never hold the startup screen hostage to a slow network.
         spawn(
             async { tokio::time::sleep(std::time::Duration::from_secs(8)).await },
@@ -1413,31 +1413,28 @@ impl App {
         });
     }
 
-    /// Checks the streaming server and, if allowed, starts a local one.
-    pub fn ensure_server(&self) {
+    /// Checks the streaming server and, if it is local and not running,
+    /// starts the built-in one (at startup only when autostart is on;
+    /// `force` is the Settings page's Start button).
+    pub fn ensure_server(&self, force: bool) {
         let url = self.server_url();
-        let autostart = self.profile.peek(|p| p.settings.autostart_server);
+        let autostart = force || self.profile.peek(|p| p.settings.autostart_server);
         spawn(
             async move {
                 if server::is_online(&url).await {
-                    return true;
+                    return Ok(());
                 }
                 if !autostart || !url.contains("127.0.0.1") && !url.contains("localhost") {
-                    return false;
+                    return Err(None);
                 }
-                if server::launch_local_server().is_err() {
-                    return false;
-                }
-                for _ in 0..20 {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if server::is_online(&url).await {
-                        return true;
-                    }
-                }
-                false
+                crate::media::local_server::start(&url).await.map_err(Some)?;
+                if server::is_online(&url).await { Ok(()) } else { Err(None) }
             },
-            |app, online| {
-                app.server_online.set(Some(online));
+            |app, result: Result<(), Option<String>>| {
+                if let Err(Some(error)) = &result {
+                    app.notify(format!("Streaming server: {error}"));
+                }
+                app.server_online.set(Some(result.is_ok()));
             },
         );
     }

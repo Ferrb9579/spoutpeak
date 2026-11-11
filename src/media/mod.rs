@@ -3,5 +3,6 @@
 
 pub mod addon;
 pub mod api;
+pub mod local_server;
 pub mod server;
 pub mod types;

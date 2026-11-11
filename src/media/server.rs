@@ -1,12 +1,11 @@
-//! Client for the Media streaming server (the `server.js` service that
-//! normally listens on 127.0.0.1:11470). It turns torrents into plain HTTP
-//! streams, which is all the player needs.
+//! Client for a addon-based streaming server, which turns torrents
+//! into plain HTTP streams. By default that is the built-in one in
+//! [`super::local_server`] on 127.0.0.1:11470; a Media server or a remote
+//! one speaks the same API.
 
 use super::addon::http;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:11470";
@@ -311,47 +310,3 @@ pub async fn opensub_hash(base: &str, video_url: &str) -> Option<(String, u64)> 
     ))
 }
 
-/// A `server.js` from an existing Media installation, with a runtime
-/// that can execute it.
-pub fn find_local_server() -> Option<(PathBuf, PathBuf)> {
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Some(local) = dirs::data_local_dir() {
-        roots.push(local.join("Programs").join("Media"));
-        roots.push(local.join("Programs").join("LNV").join("Media-4"));
-        roots.push(local.join("Programs").join("LNV").join("Media-5"));
-    }
-    roots.push(PathBuf::from("/opt/media"));
-    roots.push(PathBuf::from("/Applications/Media.app/Contents/MacOS"));
-    for root in roots {
-        let script = root.join("server.js");
-        if !script.is_file() {
-            continue;
-        }
-        for runtime in ["media-runtime.exe", "media-runtime", "node.exe", "node"] {
-            let runtime = root.join(runtime);
-            if runtime.is_file() {
-                return Some((runtime, script));
-            }
-        }
-        return Some((PathBuf::from("node"), script));
-    }
-    None
-}
-
-/// Starts the user's own installed streaming server in the background.
-pub fn launch_local_server() -> Result<std::process::Child, String> {
-    let (runtime, script) =
-        find_local_server().ok_or("no Media streaming server (server.js) was found")?;
-    let mut command = Command::new(runtime);
-    command
-        .arg(&script)
-        .current_dir(script.parent().unwrap_or(std::path::Path::new(".")))
-        .env("NO_CORS", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    crate::util::hide_console(&mut command);
-    command
-        .spawn()
-        .map_err(|e| format!("could not start the streaming server: {e}"))
-}

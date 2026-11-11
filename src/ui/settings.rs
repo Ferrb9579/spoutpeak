@@ -417,7 +417,7 @@ fn server_card(app: &App, settings: &Settings) -> Widget {
     let children: Vec<Widget> = vec![
         section("Streaming server"),
         gap(6.0),
-        muted("Torrent streams are served by Media's streaming server. Spoutpeak uses one that is already running, or starts the one from your Media installation."),
+        muted("Torrent streams are served by Spoutpeak's built-in streaming server. You can also point it at a Media streaming server running elsewhere."),
         gap(8.0),
         setting_row(
             "Server address",
@@ -438,14 +438,14 @@ fn server_card(app: &App, settings: &Settings) -> Widget {
                 hgap(8.0),
                 small_button("Start", Tone::Neutral, move || {
                     start.server_online.set(None);
-                    start.ensure_server();
+                    start.ensure_server(true);
                 }),
             ])
             .into(),
         ),
         setting_row(
             "Start automatically",
-            "Launch the local server when it is not running",
+            "Start the built-in server when Spoutpeak opens",
             toggle(app, settings.autostart_server, |s, v| s.autostart_server = v),
         ),
     ];
@@ -590,29 +590,34 @@ fn server_options(app: &App) -> Vec<Widget> {
         server_choices(app, "btDownloadSpeedHardLimit", caps, &current_cap),
     ));
 
-    // Transcoding.
-    let mut transcode: Vec<(String, Value)> = vec![("Disabled".to_owned(), Value::Null)];
-    transcode.extend(
-        settings
-            .transcode_profiles
-            .iter()
-            .map(|p| (p.to_uppercase(), json!(p))),
-    );
-    rows.push(setting_row(
-        "Transcode profile",
-        "GPU encoder the server uses when it must convert",
-        server_choices(app, "transcodeProfile", transcode, &settings.value("transcodeProfile")),
-    ));
-    rows.push(setting_row(
-        "Hardware transcoding",
-        "Let the server use the GPU to transcode",
-        server_choices(
-            app,
-            "transcodeHardwareAccel",
-            vec![("On".to_owned(), json!(true)), ("Off".to_owned(), json!(false))],
-            &settings.value("transcodeHardwareAccel"),
-        ),
-    ));
+    // Transcoding (only servers that support it report these keys; the
+    // built-in one does not).
+    if settings.values.contains_key("transcodeProfile") {
+        let mut transcode: Vec<(String, Value)> = vec![("Disabled".to_owned(), Value::Null)];
+        transcode.extend(
+            settings
+                .transcode_profiles
+                .iter()
+                .map(|p| (p.to_uppercase(), json!(p))),
+        );
+        rows.push(setting_row(
+            "Transcode profile",
+            "GPU encoder the server uses when it must convert",
+            server_choices(app, "transcodeProfile", transcode, &settings.value("transcodeProfile")),
+        ));
+    }
+    if settings.values.contains_key("transcodeHardwareAccel") {
+        rows.push(setting_row(
+            "Hardware transcoding",
+            "Let the server use the GPU to transcode",
+            server_choices(
+                app,
+                "transcodeHardwareAccel",
+                vec![("On".to_owned(), json!(true)), ("Off".to_owned(), json!(false))],
+                &settings.value("transcodeHardwareAccel"),
+            ),
+        ));
+    }
 
     if !settings.https_endpoints.is_empty() {
         rows.push(setting_row(
@@ -630,16 +635,18 @@ fn server_options(app: &App) -> Vec<Widget> {
             ),
         ));
     }
-    rows.push(setting_row(
-        "Proxy streams",
-        "Route direct HTTP streams through the server",
-        server_choices(
-            app,
-            "proxyStreamsEnabled",
-            vec![("On".to_owned(), json!(true)), ("Off".to_owned(), json!(false))],
-            &settings.value("proxyStreamsEnabled"),
-        ),
-    ));
+    if settings.values.contains_key("proxyStreamsEnabled") {
+        rows.push(setting_row(
+            "Proxy streams",
+            "Route direct HTTP streams through the server",
+            server_choices(
+                app,
+                "proxyStreamsEnabled",
+                vec![("On".to_owned(), json!(true)), ("Off".to_owned(), json!(false))],
+                &settings.value("proxyStreamsEnabled"),
+            ),
+        ));
+    }
     if let Some(version) = settings.values.get("serverVersion").and_then(Value::as_str) {
         rows.push(gap(4.0));
         rows.push(text(format!("Server version {version}"), 12.0, FontWeight::W400, FAINT).into());
