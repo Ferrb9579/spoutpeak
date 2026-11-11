@@ -215,6 +215,24 @@ pub fn poster_card(
     )
 }
 
+/// A sideways-scrolling strip that also follows a regular (vertical) mouse
+/// wheel. Incular's horizontal viewports only read the wheel's x delta, which
+/// a plain mouse never produces.
+pub fn horizontal_scroller(controller: &ScrollController, child: impl Into<Widget>) -> Widget {
+    let wheel = controller.clone();
+    Listener::new(
+        SingleChildScrollView::new(child)
+            .scroll_direction(Axis::Horizontal)
+            .controller(controller.clone()),
+    )
+    .on_pointer_signal(move |event| {
+        if event.scroll_delta.y != 0.0 {
+            wheel.scroll_by(event.scroll_delta.y);
+        }
+    })
+    .into()
+}
+
 /// A status line for loading / empty / failed states.
 pub fn notice(message: impl Into<String>, color: Color) -> Widget {
     Container::new()

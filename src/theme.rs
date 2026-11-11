@@ -495,3 +495,42 @@ pub fn hrow(children: Vec<Widget>) -> Row {
 pub fn layers(children: Vec<Widget>) -> Stack {
     Stack::new(children)
 }
+
+/// The app logo (`assets/logo@2x.png`, 128x100), embedded in the binary.
+const LOGO_PNG: &[u8] = include_bytes!("../assets/logo@2x.png");
+
+fn logo_pixels() -> Option<&'static (u32, u32, Vec<u8>)> {
+    static PIXELS: std::sync::OnceLock<Option<(u32, u32, Vec<u8>)>> = std::sync::OnceLock::new();
+    PIXELS
+        .get_or_init(|| {
+            let rgba = image::load_from_memory(LOGO_PNG).ok()?.into_rgba8();
+            Some((rgba.width(), rgba.height(), rgba.into_raw()))
+        })
+        .as_ref()
+}
+
+/// Logo pixels for the window/taskbar icon.
+pub fn logo_rgba() -> Option<(u32, u32, Vec<u8>)> {
+    logo_pixels().cloned()
+}
+
+/// The logo at `height` logical pixels, keeping its aspect ratio.
+pub fn logo(height: f32) -> Widget {
+    thread_local! {
+        static HANDLE: Option<ImageHandle> = logo_pixels().and_then(|(w, h, px)| {
+            ImageHandle::from_rgba8(*w, *h, px.clone()).ok()
+        });
+    }
+    let Some((w, h, _)) = logo_pixels() else {
+        return SizedBox::new().width(height).height(height).into();
+    };
+    let width = height * *w as f32 / *h as f32;
+    match HANDLE.with(Clone::clone) {
+        Some(handle) => Image::new(handle)
+            .width(width)
+            .height(height)
+            .fit(BoxFit::Contain)
+            .into(),
+        None => SizedBox::new().width(width).height(height).into(),
+    }
+}

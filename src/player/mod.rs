@@ -64,6 +64,8 @@ pub struct PlayerState {
     pub speed: f64,
     pub audio_tracks: Vec<Track>,
     pub audio_index: usize,
+    /// Seconds the sound lags the picture (negative: plays earlier).
+    pub audio_delay: f64,
     pub embedded_subs: Vec<Track>,
     pub addon_subs: Vec<Subtitle>,
     pub sub_choice: SubChoice,
@@ -131,6 +133,7 @@ impl PlayerUi {
                 speed: 1.0,
                 audio_tracks: Vec::new(),
                 audio_index: 0,
+                audio_delay: 0.0,
                 embedded_subs: Vec::new(),
                 addon_subs: Vec::new(),
                 sub_choice: SubChoice::Off,
@@ -470,6 +473,7 @@ impl App {
             s.speed = 1.0;
             s.audio_tracks.clear();
             s.audio_index = 0;
+            s.audio_delay = 0.0;
             s.embedded_subs.clear();
             s.addon_subs = stream.subtitles.clone();
             s.sub_choice = SubChoice::Off;
@@ -1034,6 +1038,21 @@ impl App {
         self.player
             .state
             .write(|s| s.sub_delay = ((s.sub_delay + delta) * 4.0).round() / 4.0);
+    }
+
+    pub fn adjust_audio_delay(&self, delta: f64) {
+        let delay = self.player.state.write(|s| {
+            s.audio_delay = ((s.audio_delay + delta).clamp(-10.0, 10.0) * 20.0).round() / 20.0;
+            s.audio_delay
+        });
+        self.player.with_engine(|e| e.set_audio_delay(delay));
+        self.player_activity();
+    }
+
+    pub fn reset_audio_delay(&self) {
+        self.player.state.write(|s| s.audio_delay = 0.0);
+        self.player.with_engine(|e| e.set_audio_delay(0.0));
+        self.player_activity();
     }
 
     pub fn adjust_subtitle_size(&self, delta: f32) {

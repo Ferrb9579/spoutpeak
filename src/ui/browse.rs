@@ -17,7 +17,7 @@ fn capitalized(value: &str) -> String {
 }
 
 /// A single line of chips that scrolls sideways when it does not fit.
-fn chip_bar(chips: Vec<Widget>) -> Widget {
+fn chip_bar(app: &App, key: &str, chips: Vec<Widget>) -> Widget {
     let mut spaced = Vec::with_capacity(chips.len() * 2);
     for chip in chips {
         spaced.push(chip);
@@ -26,9 +26,7 @@ fn chip_bar(chips: Vec<Widget>) -> Widget {
     Container::new()
         .height(42.0)
         .padding(EdgeInsets::only(32.0, 0.0, 32.0, 12.0))
-        .child(
-            SingleChildScrollView::new(row(spaced)).scroll_direction(Axis::Horizontal),
-        )
+        .child(horizontal_scroller(&app.controllers.row(key), row(spaced)))
         .into()
 }
 
@@ -260,7 +258,10 @@ pub fn discover(app: &App) -> Widget {
         .collect();
 
     let current = catalogs.iter().find(|c| c.key() == catalog_key);
-    let mut bars = vec![chip_bar(kind_chips), chip_bar(catalog_chips)];
+    let mut bars = vec![
+        chip_bar(app, "chips:discover-kind", kind_chips),
+        chip_bar(app, "chips:discover-catalog", catalog_chips),
+    ];
     if let Some(current) = current {
         let options = current.catalog.genre_options();
         if !options.is_empty() {
@@ -280,7 +281,7 @@ pub fn discover(app: &App) -> Widget {
                     move || app.select_discover(kind.clone(), key.clone(), Some(value.clone())),
                 ));
             }
-            bars.push(chip_bar(chips));
+            bars.push(chip_bar(app, "chips:discover-genre", chips));
         }
     }
 
@@ -415,8 +416,8 @@ pub fn library(app: &App) -> Widget {
         "Library",
         vec![],
         vcol(vec![
-            chip_bar(kind_chips),
-            chip_bar(sort_chips),
+            chip_bar(app, "chips:library-kind", kind_chips),
+            chip_bar(app, "chips:library-sort", sort_chips),
             Expanded::new(body).into(),
         ])
         .cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -481,9 +482,7 @@ pub fn search(app: &App) -> Widget {
             sections.push(
                 SizedBox::new()
                     .height(34.0)
-                    .child(
-                        SingleChildScrollView::new(row(chips)).scroll_direction(Axis::Horizontal),
-                    )
+                    .child(horizontal_scroller(&app.controllers.row("chips:search"), row(chips)))
                     .into(),
             );
         }

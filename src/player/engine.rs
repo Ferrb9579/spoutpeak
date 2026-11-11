@@ -83,6 +83,9 @@ struct Config {
     audio_track: usize,
     subtitle_track: Option<usize>,
     speed: f64,
+    /// Seconds the sound is held back against the picture (negative plays
+    /// it earlier).
+    audio_delay: f64,
 }
 
 struct ClockState {
@@ -183,6 +186,7 @@ impl Engine {
                 audio_track: 0,
                 subtitle_track: None,
                 speed: 1.0,
+                audio_delay: 0.0,
             }),
             last_error: Mutex::new(String::new()),
             last_restart: Mutex::new(Instant::now()),
@@ -235,6 +239,14 @@ impl Engine {
     pub fn set_audio_track(&self, index: usize) {
         self.inner.config.lock().unwrap().audio_track = index;
         self.seek(self.position());
+    }
+
+    /// Shifts the sound against the picture; restarts decoding in place.
+    pub fn set_audio_delay(&self, seconds: f64) {
+        self.inner.config.lock().unwrap().audio_delay = seconds;
+        if !self.inner.is_live() {
+            self.seek(self.position());
+        }
     }
 
     /// Selects an embedded subtitle track to extract, or none.
@@ -586,11 +598,16 @@ impl Inner {
         }
 
         if use_audio {
+            // The clock counts played samples from `position`; decoding the
+            // sound from `position - delay` makes it lag (or lead) the picture
+            // by `delay`. Before the start of the file, silence fills in.
+            let audio_from = position - config.audio_delay;
+            let lead_silence = if live { 0.0 } else { (-audio_from).max(0.0) };
             let mut command = self.ffmpeg(&ffmpeg);
             if live {
                 command.args(["-loglevel", "info", "-copyts"]).stderr(Stdio::piped());
             } else {
-                command.args(["-ss", &seek]);
+                command.args(["-ss", &format!("{:.3}", audio_from.max(0.0))]);
             }
             self.input_args(&mut command);
             let audio_map = info
@@ -623,7 +640,11 @@ impl Inner {
                 if let Some(stdout) = stdout {
                     let inner = self.clone();
                     let has_video = info.has_video;
-                    std::thread::spawn(move || inner.audio_loop(generation, stdout, has_video));
+                    // Silence is in output time, so it scales with the tempo.
+                    let frames = (lead_silence / config.speed * SAMPLE_RATE as f64) as usize;
+                    std::thread::spawn(move || {
+                        inner.audio_loop(generation, stdout, has_video, frames)
+                    });
                 }
             }
         }
@@ -760,7 +781,30 @@ impl Inner {
         }
     }
 
-    fn audio_loop(self: Arc<Self>, generation: u64, mut stdout: ChildStdout, has_video: bool) {
+    fn audio_loop(
+        self: Arc<Self>,
+        generation: u64,
+        mut stdout: ChildStdout,
+        has_video: bool,
+        silence_frames: usize,
+    ) {
+        // Stereo: two samples per frame.
+        let mut silence = silence_frames * 2;
+        while silence > 0 {
+            if !self.current(generation) {
+                return;
+            }
+            {
+                let mut queue = self.audio_queue.lock().unwrap();
+                if queue.len() < AUDIO_QUEUE_TARGET {
+                    let chunk = silence.min(4096);
+                    queue.extend(std::iter::repeat_n(0i16, chunk));
+                    silence -= chunk;
+                    continue;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(8));
+        }
         let mut bytes = vec![0u8; 16_384];
         let mut carry: Option<u8> = None;
         let mut decoded_any = false;

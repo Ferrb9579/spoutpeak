@@ -328,6 +328,8 @@ pub struct Controllers {
     pub sync_list: ScrollController,
     /// The player's audio / subtitle / speed panels.
     pub player_menu: ScrollController,
+    pub season_search: TextEditingController,
+    pub season_list: ScrollController,
     pub downloads: ScrollController,
     pub addons: ScrollController,
     pub settings: ScrollController,
@@ -355,6 +357,8 @@ impl Controllers {
             streams: ScrollController::new(),
             sync_list: ScrollController::new(),
             player_menu: ScrollController::new(),
+            season_search: TextEditingController::new(),
+            season_list: ScrollController::new(),
             downloads: ScrollController::new(),
             addons: ScrollController::new(),
             settings: ScrollController::new(),
@@ -383,6 +387,10 @@ pub struct App {
     pub discover: Shared<DiscoverState>,
     pub search: Shared<SearchState>,
     pub detail: Shared<DetailState>,
+    /// Season combobox on the detail page. Separate signals so typing in
+    /// its search field rebuilds only the result list, not the field.
+    pub season_open: Signal<bool>,
+    pub season_filter: Signal<String>,
     pub addons: Shared<AddonsState>,
     pub account: Shared<AccountState>,
     pub server_online: Signal<Option<bool>>,
@@ -413,6 +421,8 @@ impl App {
             discover: Shared::new(DiscoverState::default()),
             search: Shared::new(SearchState::default()),
             detail: Shared::new(DetailState::default()),
+            season_open: Signal::new(false),
+            season_filter: Signal::new(String::new()),
             addons: Shared::new(AddonsState {
                 tab: AddonsTab::Installed,
                 community: Load::Idle,
@@ -850,6 +860,7 @@ impl App {
             return;
         }
         self.player.pending_binge.borrow_mut().take();
+        self.close_season_picker();
         // Opening a result is what makes a typed query worth remembering.
         if self.route.get_untracked().first() == Some(&Route::Search) {
             let query = self.search.peek(|s| s.query.clone());
@@ -934,7 +945,32 @@ impl App {
     }
 
     pub fn select_season(&self, season: u32) {
+        self.close_season_picker();
         self.detail.write(|d| d.season = Some(season));
+        self.controllers.streams.jump_to(0.0);
+    }
+
+    pub fn toggle_season_picker(&self) {
+        let open = !self.season_open.get_untracked();
+        if open {
+            // The dropdown is placed under the trigger at the list's top.
+            self.controllers.streams.jump_to(0.0);
+            self.controllers.season_search.set_text("");
+            self.season_filter.set(String::new());
+            self.controllers.season_list.jump_to(0.0);
+        }
+        self.season_open.set(open);
+    }
+
+    pub fn close_season_picker(&self) {
+        if self.season_open.get_untracked() {
+            self.season_open.set(false);
+        }
+    }
+
+    pub fn filter_seasons(&self, query: String) {
+        self.season_filter.set(query);
+        self.controllers.season_list.jump_to(0.0);
     }
 
     pub fn clear_video(&self) {

@@ -99,17 +99,7 @@ pub fn screen(app: &App) -> Widget {
         .child(
             Column::new(vec![
                 row(vec![
-                    Container::new()
-                        .width(44.0)
-                        .height(44.0)
-                        .alignment(Alignment::CENTER)
-                        .decoration(
-                            BoxDecoration::new()
-                                .color(ACCENT)
-                                .border_radius(BorderRadius::all(Radius::circular(13.0))),
-                        )
-                        .child(icon_with(icons::play(), 22.0, ON_ACCENT, ICON_STROKE, true))
-                        .into(),
+                    logo(38.0),
                     hgap(14.0),
                     col(vec![
                         text("Spoutpeak", 22.0, FontWeight::W700, TEXT).into(),

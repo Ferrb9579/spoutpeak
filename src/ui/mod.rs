@@ -80,17 +80,7 @@ fn sidebar(app: &App, current: Route) -> Widget {
         Padding::new(
             EdgeInsets::only(14.0, 6.0, 0.0, 0.0),
             row(vec![
-                Container::new()
-                    .width(30.0)
-                    .height(30.0)
-                    .alignment(Alignment::CENTER)
-                    .decoration(
-                        BoxDecoration::new()
-                            .color(ACCENT)
-                            .border_radius(BorderRadius::all(Radius::circular(9.0))),
-                    )
-                    .child(icon_with(icons::play(), 16.0, ON_ACCENT, ICON_STROKE, true))
-                    .into(),
+                logo(26.0),
                 hgap(11.0),
                 text("Spoutpeak", 18.0, FontWeight::W700, TEXT).into(),
             ]),

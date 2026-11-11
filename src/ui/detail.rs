@@ -5,7 +5,9 @@ use crate::state::{App, Load, Quality, StreamGroup};
 use crate::media::types::{Meta, Stream, StreamSource, Video};
 use crate::theme::*;
 use incular::prelude::*;
+use incular::controls::{Button, ButtonStyle, StateColor};
 use incular::widgets::{HitTestBehavior, StackFit};
+use std::rc::Rc;
 
 const PANEL_WIDTH: f32 = 460.0;
 const PANEL_INNER: f32 = PANEL_WIDTH - 40.0;
@@ -333,7 +335,7 @@ fn streams_pane(app: &App, groups: &[StreamGroup], video: &Video, is_series: boo
             SizedBox::new()
                 .width(PANEL_INNER)
                 .height(32.0)
-                .child(SingleChildScrollView::new(row(chips)).scroll_direction(Axis::Horizontal))
+                .child(horizontal_scroller(&app.controllers.row("chips:quality"), row(chips)))
                 .into(),
         );
         children.push(gap(14.0));
@@ -384,30 +386,19 @@ fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
         .library
         .read(|l| l.get(meta.id()).and_then(|i| i.state.video_id.clone()));
     let mut children: Vec<Widget> = Vec::new();
-    if seasons.len() > 1 {
-        let chips: Vec<Widget> = seasons
+    let picker = seasons.len() > 1;
+    let entries: Rc<Vec<SeasonEntry>> = Rc::new(
+        seasons
             .iter()
-            .flat_map(|number| {
-                let app = app.clone();
-                let number = *number;
-                let label = if number == 0 {
-                    "Specials".to_owned()
-                } else {
-                    format!("Season {number}")
-                };
-                [
-                    chip(label, season == Some(number), move || app.select_season(number)),
-                    hgap(8.0),
-                ]
+            .map(|&number| SeasonEntry {
+                number,
+                label: season_label(number),
+                episodes: meta.episodes(Some(number)).len(),
             })
-            .collect();
-        children.push(
-            SizedBox::new()
-                .height(34.0)
-                .width(PANEL_INNER)
-                .child(SingleChildScrollView::new(row(chips)).scroll_direction(Axis::Horizontal))
-                .into(),
-        );
+            .collect(),
+    );
+    if picker {
+        children.push(season_trigger(app, entries.clone(), season));
         children.push(gap(14.0));
     }
     let season = if seasons.is_empty() { None } else { season };
@@ -453,9 +444,246 @@ fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
         }));
         children.push(gap(8.0));
     }
-    SingleChildScrollView::new(Padding::new(EdgeInsets::all(20.0), col(children)))
-        .controller(app.controllers.streams.clone())
+    let list: Widget =
+        SingleChildScrollView::new(Padding::new(EdgeInsets::all(20.0), col(children)))
+            .controller(app.controllers.streams.clone())
+            .into();
+    if !picker {
+        return list;
+    }
+    // The dropdown layer exists only while open: in Incular 0.1.1 even an
+    // `IgnorePointer` layer stacked over the list swallows its clicks.
+    let app = app.clone();
+    Builder::new(move |_| {
+        if app.season_open.get() {
+            layers(vec![list.clone(), season_overlay(&app, entries.clone(), season)])
+                .fit(StackFit::Expand)
+                .into()
+        } else {
+            list.clone()
+        }
+    })
+    .into()
+}
+
+const PICKER_HEIGHT: f32 = 40.0;
+const PICKER_ROW: f32 = 38.0;
+
+struct SeasonEntry {
+    number: u32,
+    label: String,
+    episodes: usize,
+}
+
+fn season_label(number: u32) -> String {
+    if number == 0 { "Specials".to_owned() } else { format!("Season {number}") }
+}
+
+fn episodes_label(count: usize) -> String {
+    format!("{count} episode{}", if count == 1 { "" } else { "s" })
+}
+
+/// Entries matching the search text: by label ("season 3", "specials") or
+/// by bare number ("3").
+fn matching(entries: &[SeasonEntry], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            query.is_empty()
+                || e.label.to_lowercase().contains(&query)
+                || e.number.to_string() == query.trim_start_matches(['s', 'S'])
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The combobox trigger, at the top of the episode list. Its own builder,
+/// so opening the picker doesn't rebuild the episodes.
+fn season_trigger(app: &App, entries: Rc<Vec<SeasonEntry>>, current: Option<u32>) -> Widget {
+    let app = app.clone();
+    Builder::new(move |_| {
+        let open = app.season_open.get();
+        let selected = entries.iter().find(|e| Some(e.number) == current);
+        let toggle = app.clone();
+        Button::with_child(
+            SizedBox::new()
+                .width(PANEL_INNER - 28.0)
+                .child(
+                    hrow(vec![
+                        text(
+                            selected.map_or("Choose a season".to_owned(), |e| e.label.clone()),
+                            14.0,
+                            FontWeight::W600,
+                            TEXT,
+                        )
+                        .into(),
+                        hgap(10.0),
+                        text(
+                            selected.map_or(String::new(), |e| episodes_label(e.episodes)),
+                            12.0,
+                            FontWeight::W400,
+                            FAINT,
+                        )
+                        .into(),
+                        Spacer::new().into(),
+                        icon(
+                            if open { icons::chevron_up() } else { icons::chevron_down() },
+                            18.0,
+                            MUTED,
+                        ),
+                    ])
+                    .cross_axis_alignment(CrossAxisAlignment::Center),
+                ),
+        )
+        .style(ButtonStyle {
+            background: Some(SURFACE_HI),
+            background_states: Some(StateColor::new(SURFACE_HI).hovered(SURFACE_HOVER)),
+            foreground: Some(TEXT),
+            border: Some(Border::new(0.0, Color::TRANSPARENT)),
+            border_radius: Some(12.0),
+            padding: Some(EdgeInsets::symmetric(14.0, 0.0)),
+            fixed_size: Some(Size::new(PANEL_INNER, PICKER_HEIGHT)),
+            alignment: Some(Alignment::CENTER_LEFT),
+            overlay_color: Some(Color::TRANSPARENT.into()),
+            animation_duration: Some(std::time::Duration::ZERO),
+            ..ButtonStyle::default()
+        })
+        .on_click(move || toggle.toggle_season_picker())
         .into()
+    })
+    .into()
+}
+
+/// The open dropdown, floating over the episode list just under the
+/// trigger, with a click-away barrier.
+fn season_overlay(app: &App, entries: Rc<Vec<SeasonEntry>>, current: Option<u32>) -> Widget {
+    let close = app.clone();
+    layers(vec![
+        GestureDetector::new(Container::new().color(Color::rgba(9, 11, 17, 120)))
+            .behavior(HitTestBehavior::Opaque)
+            .on_tap(move || close.close_season_picker())
+            .into(),
+        Positioned::new(season_dropdown(app, entries, current))
+            .left(20.0)
+            .top(20.0 + PICKER_HEIGHT + 6.0)
+            .into(),
+    ])
+    .fit(StackFit::Expand)
+    .into()
+}
+
+fn season_dropdown(app: &App, entries: Rc<Vec<SeasonEntry>>, current: Option<u32>) -> Widget {
+    let (submit_app, submit_entries) = (app.clone(), entries.clone());
+    let changed = app.clone();
+    let search = input(
+        &app.controllers.season_search,
+        "Search seasons",
+        PANEL_INNER - 20.0,
+        move |query| {
+            // Enter picks the first match.
+            if let Some(&first) = matching(&submit_entries, &query).first() {
+                submit_app.select_season(submit_entries[first].number);
+            }
+        },
+    )
+    .on_changed(move |query| changed.filter_seasons(query));
+
+    // The results rebuild on their own as the filter changes, leaving the
+    // text field (and its focus) alone.
+    let results = {
+        let app = app.clone();
+        Builder::new(move |_| {
+            let found = Rc::new(matching(&entries, &app.season_filter.get()));
+            if found.is_empty() {
+                return SizedBox::new()
+                    .height(PICKER_ROW)
+                    .child(Padding::new(
+                        EdgeInsets::only(12.0, 10.0, 0.0, 0.0),
+                        muted("No season matches"),
+                    ))
+                    .into();
+            }
+            let height = (found.len() as f32 * PICKER_ROW).min(PICKER_ROW * 7.0);
+            let controller = app.controllers.season_list.clone();
+            let (entries, app) = (entries.clone(), app.clone());
+            let count = found.len();
+            SizedBox::new()
+                .height(height)
+                .child(
+                    ListView::builder(count, move |index| {
+                        let entry = &entries[found[index]];
+                        season_option(&app, entry, Some(entry.number) == current)
+                    })
+                    .item_extent(PICKER_ROW)
+                    .controller(controller),
+                )
+                .into()
+        })
+    };
+
+    Container::new()
+        .width(PANEL_INNER)
+        .padding(EdgeInsets::all(10.0))
+        .decoration(
+            BoxDecoration::new()
+                .color(Color::rgba(28, 33, 49, 255))
+                .border_radius(BorderRadius::all(Radius::circular(14.0)))
+                .box_shadow(vec![BoxShadow::new(
+                    Color::rgba(0, 0, 0, 140),
+                    Offset::new(0.0, 10.0),
+                    28.0,
+                    0.0,
+                )]),
+        )
+        .child(
+            vcol(vec![search.into(), gap(8.0), results.into()])
+                .main_axis_size(MainAxisSize::Min)
+                .cross_axis_alignment(CrossAxisAlignment::Start),
+        )
+        .into()
+}
+
+fn season_option(app: &App, entry: &SeasonEntry, selected: bool) -> Widget {
+    let background = if selected { ACCENT_DIM } else { Color::TRANSPARENT };
+    let color = if selected { ACCENT } else { TEXT };
+    let mut content: Vec<Widget> = vec![
+        text(entry.label.clone(), 13.5, FontWeight::W600, color).into(),
+        Spacer::new().into(),
+        text(episodes_label(entry.episodes), 12.0, FontWeight::W400, FAINT).into(),
+    ];
+    content.push(hgap(10.0));
+    content.push(if selected {
+        icon(icons::check(), 16.0, ACCENT)
+    } else {
+        SizedBox::new().width(16.0).into()
+    });
+    let (app, number) = (app.clone(), entry.number);
+    Button::with_child(
+        SizedBox::new()
+            .width(PANEL_INNER - 44.0)
+            .child(hrow(content).cross_axis_alignment(CrossAxisAlignment::Center)),
+    )
+    .style(ButtonStyle {
+        background: Some(background),
+        background_states: Some(StateColor::new(background).hovered(if selected {
+            ACCENT_DIM
+        } else {
+            SURFACE_HOVER
+        })),
+        foreground: Some(color),
+        border: Some(Border::new(0.0, Color::TRANSPARENT)),
+        border_radius: Some(9.0),
+        padding: Some(EdgeInsets::symmetric(12.0, 0.0)),
+        fixed_size: Some(Size::new(PANEL_INNER - 20.0, PICKER_ROW - 4.0)),
+        alignment: Some(Alignment::CENTER_LEFT),
+        overlay_color: Some(Color::TRANSPARENT.into()),
+        animation_duration: Some(std::time::Duration::ZERO),
+        ..ButtonStyle::default()
+    })
+    .on_click(move || app.select_season(number))
+    .into()
 }
 
 pub fn screen(app: &App) -> Widget {
