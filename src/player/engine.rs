@@ -127,7 +127,8 @@ pub struct Engine {
     inner: Arc<Inner>,
 }
 
-/// Locates `ffmpeg`/`ffprobe`: on PATH, else next to an installed Media.
+/// Locates `ffmpeg`/`ffprobe`: bundled next to the app (in `ffmpeg\`, as the
+/// installer lays it out), else on PATH, else next to an installed Media.
 pub fn tools() -> Option<(PathBuf, PathBuf)> {
     static TOOLS: OnceLock<Option<(PathBuf, PathBuf)>> = OnceLock::new();
     TOOLS
@@ -142,18 +143,29 @@ pub fn tools() -> Option<(PathBuf, PathBuf)> {
                 hide_console(&mut command);
                 command.status().is_ok_and(|s| s.success())
             };
+            let exe = if cfg!(windows) { ".exe" } else { "" };
+            let in_dir = |dir: &std::path::Path| {
+                (dir.join(format!("ffmpeg{exe}")), dir.join(format!("ffprobe{exe}")))
+            };
+            let app_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(PathBuf::from));
+            if let Some(app_dir) = app_dir {
+                for dir in [app_dir.join("ffmpeg"), app_dir] {
+                    let bundled = in_dir(&dir);
+                    if works(&bundled.0) && works(&bundled.1) {
+                        return Some(bundled);
+                    }
+                }
+            }
             let on_path = (PathBuf::from("ffmpeg"), PathBuf::from("ffprobe"));
             if works(&on_path.0) && works(&on_path.1) {
                 return Some(on_path);
             }
             let (_, script) = crate::media::server::find_local_server()?;
             let dir = script.parent()?;
-            let exe = if cfg!(windows) { ".exe" } else { "" };
-            let bundled = (
-                dir.join(format!("ffmpeg{exe}")),
-                dir.join(format!("ffprobe{exe}")),
-            );
-            (works(&bundled.0) && works(&bundled.1)).then_some(bundled)
+            let media = in_dir(dir);
+            (works(&media.0) && works(&media.1)).then_some(media)
         })
         .clone()
 }
