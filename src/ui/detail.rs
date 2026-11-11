@@ -12,7 +12,7 @@ const PANEL_INNER: f32 = PANEL_WIDTH - 40.0;
 
 /// A list tile that grows with its content (controls `Button` has a fixed
 /// height), with its own hover state.
-fn list_button(child: Widget, selected: bool, on_click: impl Fn() + 'static) -> Widget {
+fn list_button(child: Widget, width: f32, selected: bool, on_click: impl Fn() + 'static) -> Widget {
     let hovered = Signal::new(false);
     let on_click = std::rc::Rc::new(on_click);
     Builder::new(move |_| {
@@ -27,12 +27,11 @@ fn list_button(child: Widget, selected: bool, on_click: impl Fn() + 'static) -> 
         MouseRegion::new(
             GestureDetector::new(
                 Container::new()
-                    .width(PANEL_INNER)
+                    .width(width)
                     .padding(EdgeInsets::all(12.0))
                     .decoration(
                         BoxDecoration::new()
                             .color(background)
-                            .border(Border::new(1.0, if selected { ACCENT } else { LINE }))
                             .border_radius(BorderRadius::all(Radius::circular(12.0))),
                     )
                     .child(child.clone()),
@@ -223,15 +222,56 @@ fn stream_tile(app: &App, stream: &Stream) -> Widget {
                 .into(),
         );
     }
-    let (app, stream) = (app.clone(), stream.clone());
-    list_button(
+    let downloadable = matches!(
+        stream.source(),
+        StreamSource::Url(_) | StreamSource::Torrent { .. }
+    );
+    // The download button sits beside the tile, not inside it: a tap on a
+    // nested button would also reach the tile's own gesture detector.
+    let tile_width = if downloadable { PANEL_INNER - DOWNLOAD_BUTTON - 8.0 } else { PANEL_INNER };
+    let (play, play_stream) = (app.clone(), stream.clone());
+    let tile = list_button(
         SizedBox::new()
-            .width(PANEL_INNER - 26.0)
+            .width(tile_width - 26.0)
             .child(col(lines))
             .into(),
+        tile_width,
         false,
-        move || app.play_stream(&stream),
-    )
+        move || play.play_stream(&play_stream),
+    );
+    if !downloadable {
+        return tile;
+    }
+    let (save, save_stream) = (app.clone(), stream.clone());
+    hrow(vec![
+        tile,
+        hgap(8.0),
+        download_button(move || save.download_stream(&save_stream)),
+    ])
+    .cross_axis_alignment(CrossAxisAlignment::Center)
+    .into()
+}
+
+const DOWNLOAD_BUTTON: f32 = 40.0;
+
+fn download_button(on_click: impl Fn() + 'static) -> Widget {
+    use incular::controls::{Button, ButtonStyle, StateColor};
+    Button::with_child(icon(icons::download(), 18.0, MUTED))
+        .style(ButtonStyle {
+            background: Some(SURFACE),
+            background_states: Some(StateColor::new(SURFACE).hovered(SURFACE_HOVER)),
+            foreground: Some(TEXT),
+            border: Some(Border::new(0.0, Color::TRANSPARENT)),
+            border_radius: Some(12.0),
+            padding: Some(EdgeInsets::ZERO),
+            fixed_size: Some(Size::new(DOWNLOAD_BUTTON, DOWNLOAD_BUTTON)),
+            alignment: Some(Alignment::CENTER),
+            overlay_color: Some(Color::TRANSPARENT.into()),
+            animation_duration: Some(std::time::Duration::ZERO),
+            ..ButtonStyle::default()
+        })
+        .on_click(on_click)
+        .into()
 }
 
 fn streams_pane(app: &App, groups: &[StreamGroup], video: &Video, is_series: bool) -> Widget {
@@ -408,7 +448,7 @@ fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
         .main_axis_size(MainAxisSize::Min)
         .cross_axis_alignment(CrossAxisAlignment::Center);
         let app = app.clone();
-        children.push(list_button(tile.into(), is_resume, move || {
+        children.push(list_button(tile.into(), PANEL_INNER, is_resume, move || {
             app.select_video(video.clone())
         }));
         children.push(gap(8.0));
@@ -468,7 +508,6 @@ pub fn screen(app: &App) -> Widget {
                     .decoration(
                         BoxDecoration::new()
                             .color(Color::rgba(15, 18, 28, 235))
-                            .border(Border::new(1.0, LINE))
                             .border_radius(BorderRadius::all(Radius::circular(18.0))),
                     )
                     .child(panel)

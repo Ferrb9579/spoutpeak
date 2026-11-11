@@ -29,6 +29,63 @@ impl PlayerKind {
     }
 }
 
+/// Outline drawn around subtitle glyphs (YouTube's "character edge style").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubtitleEdge {
+    #[default]
+    None,
+    DropShadow,
+    Outline,
+    Raised,
+    Depressed,
+}
+
+impl SubtitleEdge {
+    pub const ALL: [SubtitleEdge; 5] =
+        [Self::None, Self::DropShadow, Self::Outline, Self::Raised, Self::Depressed];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::DropShadow => "Shadow",
+            Self::Outline => "Outline",
+            Self::Raised => "Raised",
+            Self::Depressed => "Depressed",
+        }
+    }
+}
+
+/// How subtitles look, modelled on YouTube's caption options: text, a box
+/// behind each line ("background") and a box behind the whole cue
+/// ("window"), each with its own colour and opacity.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubtitleStyle {
+    pub text_color: [u8; 3],
+    pub text_opacity: f32,
+    pub background_color: [u8; 3],
+    pub background_opacity: f32,
+    pub window_color: [u8; 3],
+    pub window_opacity: f32,
+    pub edge: SubtitleEdge,
+    pub bold: bool,
+}
+
+impl Default for SubtitleStyle {
+    fn default() -> Self {
+        Self {
+            text_color: [255, 255, 255],
+            text_opacity: 1.0,
+            background_color: [0, 0, 0],
+            background_opacity: 0.75,
+            window_color: [0, 0, 0],
+            window_opacity: 0.0,
+            edge: SubtitleEdge::None,
+            bold: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -39,6 +96,9 @@ pub struct Settings {
     pub subtitle_lang: String,
     pub audio_lang: String,
     pub subtitle_size: f32,
+    pub subtitle_style: SubtitleStyle,
+    /// Picture brightness multiplier in the built-in player (1 = unchanged).
+    pub brightness: f32,
     /// Upper bound on the decoded picture height of the built-in player.
     pub max_video_height: u32,
     pub autoplay_next: bool,
@@ -58,6 +118,8 @@ impl Default for Settings {
             subtitle_lang: "eng".to_owned(),
             audio_lang: "eng".to_owned(),
             subtitle_size: 28.0,
+            subtitle_style: SubtitleStyle::default(),
+            brightness: 1.0,
             max_video_height: 720,
             autoplay_next: true,
             volume: 1.0,

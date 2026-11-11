@@ -5,7 +5,7 @@ pub mod engine;
 pub mod subtitles;
 
 use crate::state::{App, Route, Shared, spawn, ui};
-use crate::store::{PlayerKind, Settings};
+use crate::store::{PlayerKind, Settings, SubtitleStyle};
 use crate::media::addon::{self, http};
 use crate::media::server::{self, TorrentStats};
 use crate::media::types::*;
@@ -35,6 +35,10 @@ pub enum Menu {
     Speed,
     /// The subtitle line list used to fix timing by picking a line.
     Sync,
+    /// Subtitle appearance (colours, opacity, edges).
+    SubtitleStyle,
+    /// Picture adjustments (brightness).
+    Picture,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +69,8 @@ pub struct PlayerState {
     pub sub_choice: SubChoice,
     pub sub_delay: f64,
     pub sub_size: f32,
+    pub sub_style: SubtitleStyle,
+    pub brightness: f32,
     pub controls_visible: bool,
     pub menu: Menu,
     pub fullscreen: bool,
@@ -130,6 +136,8 @@ impl PlayerUi {
                 sub_choice: SubChoice::Off,
                 sub_delay: 0.0,
                 sub_size: settings.subtitle_size,
+                sub_style: settings.subtitle_style.clone(),
+                brightness: settings.brightness,
                 controls_visible: true,
                 menu: Menu::None,
                 fullscreen: false,
@@ -895,7 +903,8 @@ impl App {
     }
 
     pub fn set_volume(&self, volume: f32) {
-        let volume = volume.clamp(0.0, 1.0);
+        // Snap to whole percents so keyboard steps land on 100 % exactly.
+        let volume = (volume.clamp(0.0, engine::MAX_VOLUME) * 100.0).round() / 100.0;
         self.player.with_engine(|e| e.set_volume(volume));
         self.player.state.write(|s| {
             s.volume = volume;
@@ -1036,10 +1045,48 @@ impl App {
     }
 
     pub fn set_player_menu(&self, menu: Menu) {
-        self.player.state.write(|s| {
+        let opened = self.player.state.write(|s| {
             s.menu = if s.menu == menu { Menu::None } else { menu };
+            s.menu
         });
+        if opened != Menu::None && opened != Menu::Sync {
+            // A freshly opened panel starts at its top; rebuilds while it
+            // stays open keep the scroll position (shared controller).
+            ui(|app| {
+                app.controllers.player_menu.jump_to(0.0);
+            });
+        }
         self.player_activity();
+    }
+
+    /// Brightness multiplier applied to the picture (0.3 – 1.7).
+    pub fn set_brightness(&self, brightness: f32) {
+        let brightness = (brightness.clamp(0.3, 1.7) * 20.0).round() / 20.0;
+        self.player.state.write(|s| s.brightness = brightness);
+        self.update_settings(|s| s.brightness = brightness);
+        self.player_activity();
+    }
+
+    pub fn adjust_brightness(&self, delta: f32) {
+        let current = self.player.state.peek(|s| s.brightness);
+        self.set_brightness(current + delta);
+    }
+
+    /// Changes the subtitle appearance and remembers it.
+    pub fn update_subtitle_style(&self, change: impl FnOnce(&mut SubtitleStyle)) {
+        let style = self.player.state.write(|s| {
+            change(&mut s.sub_style);
+            s.sub_style.clone()
+        });
+        self.update_settings(|s| s.subtitle_style = style);
+        self.player_activity();
+    }
+
+    pub fn reset_subtitle_style(&self) {
+        self.update_subtitle_style(|style| *style = SubtitleStyle::default());
+        let size = Settings::default().subtitle_size;
+        self.player.state.write(|s| s.sub_size = size);
+        self.update_settings(|s| s.subtitle_size = size);
     }
 
     pub fn toggle_fullscreen(&self) {

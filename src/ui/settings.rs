@@ -96,7 +96,6 @@ fn password_field(app: &App) -> Widget {
         .decoration(
             BoxDecoration::new()
                 .color(SURFACE_HI)
-                .border(Border::new(1.0, LINE))
                 .border_radius(BorderRadius::all(Radius::circular(10.0))),
         )
         .child(

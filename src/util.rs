@@ -49,6 +49,18 @@ pub fn format_speed(bytes_per_second: f64) -> String {
     }
 }
 
+/// `734 MB` / `1.42 GB`.
+pub fn format_bytes(bytes: u64) -> String {
+    let bytes = bytes as f64;
+    if bytes >= 1_073_741_824.0 {
+        format!("{:.2} GB", bytes / 1_073_741_824.0)
+    } else if bytes >= 1_048_576.0 {
+        format!("{:.0} MB", bytes / 1_048_576.0)
+    } else {
+        format!("{:.0} KB", bytes / 1024.0)
+    }
+}
+
 pub fn hash_hex(value: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

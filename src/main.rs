@@ -5,6 +5,7 @@
 )]
 
 mod devtools;
+mod downloads;
 mod images;
 mod player;
 mod state;

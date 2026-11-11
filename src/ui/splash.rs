@@ -94,7 +94,6 @@ pub fn screen(app: &App) -> Widget {
         .decoration(
             BoxDecoration::new()
                 .color(PANEL)
-                .border(Border::new(1.0, LINE))
                 .border_radius(BorderRadius::all(Radius::circular(22.0))),
         )
         .child(

@@ -152,6 +152,7 @@ pub enum Route {
     Board,
     Discover,
     Library,
+    Downloads,
     Search,
     Addons,
     Settings,
@@ -325,6 +326,9 @@ pub struct Controllers {
     pub detail: ScrollController,
     pub streams: ScrollController,
     pub sync_list: ScrollController,
+    /// The player's audio / subtitle / speed panels.
+    pub player_menu: ScrollController,
+    pub downloads: ScrollController,
     pub addons: ScrollController,
     pub settings: ScrollController,
     rows: Rc<RefCell<HashMap<String, ScrollController>>>,
@@ -350,6 +354,8 @@ impl Controllers {
             detail: ScrollController::new(),
             streams: ScrollController::new(),
             sync_list: ScrollController::new(),
+            player_menu: ScrollController::new(),
+            downloads: ScrollController::new(),
             addons: ScrollController::new(),
             settings: ScrollController::new(),
             rows: Rc::new(RefCell::new(HashMap::new())),
@@ -384,6 +390,7 @@ pub struct App {
     pub booted: Signal<bool>,
     search_typing: Rc<std::cell::Cell<u64>>,
     pub player: PlayerUi,
+    pub downloads: Shared<Vec<crate::downloads::Download>>,
     pub controllers: Controllers,
 }
 
@@ -416,6 +423,7 @@ impl App {
             server_online: Signal::new(None),
             booted: Signal::new(false),
             search_typing: Rc::new(std::cell::Cell::new(0)),
+            downloads: Shared::new(crate::downloads::load()),
             controllers,
         }
     }

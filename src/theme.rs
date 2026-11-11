@@ -136,10 +136,7 @@ pub fn chip(label: impl Into<String>, selected: bool, on_click: impl Fn() + 'sta
             background: Some(background),
             background_states: Some(StateColor::new(background).hovered(hover)),
             foreground: Some(foreground),
-            border: Some(Border::new(
-                1.0,
-                if selected { ACCENT } else { LINE },
-            )),
+            border: Some(Border::new(0.0, Color::TRANSPARENT)),
             border_radius: Some(15.0),
             padding: Some(EdgeInsets::symmetric(13.0, 0.0)),
             height: Some(30.0),
@@ -176,10 +173,10 @@ pub fn icon_button(child: impl Into<Widget>, size: f32, on_click: impl Fn() + 's
 
 pub fn field_style() -> TextFieldStyle {
     TextFieldStyle {
-        background: Some(SURFACE),
+        background: Some(SURFACE_HI),
         foreground: Some(TEXT),
         placeholder_color: Some(FAINT),
-        border: Some(Border::new(1.0, LINE)),
+        border: Some(Border::new(0.0, Color::TRANSPARENT)),
         // Left unset: Incular 0.1.1 draws the focused border around the
         // inner editable area instead of the field's outer box.
         border_focused: None,
@@ -208,7 +205,6 @@ pub fn card(child: impl Into<Widget>) -> Container {
         .decoration(
             BoxDecoration::new()
                 .color(SURFACE)
-                .border(Border::new(1.0, LINE))
                 .border_radius(BorderRadius::all(Radius::circular(14.0))),
         )
         .child(child)
@@ -224,35 +220,15 @@ pub fn divider() -> Widget {
 /// `<circle>` and `<rect>` elements are rewritten as equivalent path data.
 pub mod icons {
     use super::*;
-    use kurbo::{BezPath, PathEl};
+    use kurbo::BezPath;
     use std::sync::OnceLock;
 
     fn from_svg(paths: &[&str]) -> Arc<Path> {
-        let point = |p: kurbo::Point| Offset::new(p.x as f32, p.y as f32);
-        let mut builder = Path::builder();
+        let mut all = BezPath::new();
         for data in paths {
-            let parsed = BezPath::from_svg(data).expect("valid Lucide path data");
-            for element in parsed.elements() {
-                match *element {
-                    PathEl::MoveTo(p) => {
-                        builder.move_to(point(p));
-                    }
-                    PathEl::LineTo(p) => {
-                        builder.line_to(point(p));
-                    }
-                    PathEl::QuadTo(c, p) => {
-                        builder.quadratic_to(point(c), point(p));
-                    }
-                    PathEl::CurveTo(a, b, p) => {
-                        builder.cubic_to(point(a), point(b), point(p));
-                    }
-                    PathEl::ClosePath => {
-                        builder.close();
-                    }
-                }
-            }
+            all.extend(BezPath::from_svg(data).expect("valid Lucide path data"));
         }
-        Arc::new(builder.build())
+        Arc::new(to_path(&all))
     }
 
     macro_rules! lucide {
@@ -333,7 +309,31 @@ pub mod icons {
             "M16 21h3a2 2 0 0 0 2-2v-3",
         ];
 
+        audio_lines => [
+            "M2 10v3", "M6 6v11", "M10 3v18", "M14 8v7", "M18 5v13", "M22 10v3",
+        ];
+        captions => [
+            "M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z",
+            "M7 15h4M15 15h2M7 11h2M13 11h4",
+        ];
+        gauge => ["m12 14 4-4", "M3.34 19a10 10 0 1 1 17.32 0"];
+        sun => [
+            "M8 12a4 4 0 1 0 8 0a4 4 0 1 0-8 0z",
+            "M12 2v2", "M12 20v2", "m4.93 4.93 1.41 1.41", "m17.66 17.66 1.41 1.41",
+            "M2 12h2", "M20 12h2", "m6.34 17.66-1.41 1.41", "m19.07 4.93-1.41 1.41",
+        ];
+        type_ => ["M12 4v16", "M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2", "M9 20h6"];
+
         // Actions and status
+        download => ["M12 15V3", "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "m7 10 5 5 5-5"];
+        trash_2 => [
+            "M10 11v6", "M14 11v6", "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6", "M3 6h18",
+            "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
+        ];
+        folder_open => [
+            "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2",
+        ];
+        rotate_ccw => ["M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8", "M3 3v5h5"];
         check => ["M20 6 9 17l-5-5"];
         x => ["M18 6 6 18", "m6 6 12 12"];
         plus => ["M5 12h14", "M12 5v14"];
@@ -344,19 +344,71 @@ pub mod icons {
 /// Lucide's default stroke width on its 24-unit grid.
 pub const ICON_STROKE: f32 = 2.0;
 
-/// The 24-unit icon geometry scaled to `size`. Cached so a given icon at a
-/// given size keeps one `PathId` (and one retained mesh) across rebuilds.
-fn scaled_icon(path: &Arc<Path>, size: f32) -> Arc<Path> {
+fn to_path(bez: &kurbo::BezPath) -> Path {
+    use kurbo::PathEl;
+    let point = |p: kurbo::Point| Offset::new(p.x as f32, p.y as f32);
+    let mut builder = Path::builder();
+    for element in bez.elements() {
+        match *element {
+            PathEl::MoveTo(p) => {
+                builder.move_to(point(p));
+            }
+            PathEl::LineTo(p) => {
+                builder.line_to(point(p));
+            }
+            PathEl::QuadTo(c, p) => {
+                builder.quadratic_to(point(c), point(p));
+            }
+            PathEl::CurveTo(a, b, p) => {
+                builder.cubic_to(point(a), point(b), point(p));
+            }
+            PathEl::ClosePath => {
+                builder.close();
+            }
+        }
+    }
+    builder.build()
+}
+
+/// Filled geometry for one icon at one size: the stroke expanded into an
+/// outline, plus the interior when the icon is drawn solid.
+#[derive(Clone)]
+struct IconMesh {
+    outline: Arc<Path>,
+    interior: Option<Arc<Path>>,
+}
+
+/// The 24-unit icon scaled to `size`, its stroke expanded on the CPU into a
+/// filled outline. Expanding here (rather than asking the renderer to
+/// stroke) matters for straight icons such as `minus`: their zero-height
+/// bounds would otherwise be culled inside any clipped area. Cached so an
+/// icon at a given size keeps one `PathId` and one GPU mesh across rebuilds.
+fn icon_mesh(path: &Arc<Path>, size: f32, stroke: f32, filled: bool) -> IconMesh {
     use std::cell::RefCell;
     use std::collections::HashMap;
+    type Key = (PathId, u32, u32, bool);
     thread_local! {
-        static SCALED: RefCell<HashMap<(PathId, u32), Arc<Path>>> = RefCell::new(HashMap::new());
+        static MESHES: RefCell<HashMap<Key, IconMesh>> = RefCell::new(HashMap::new());
     }
-    SCALED.with(|cache| {
+    let key = (path.id(), size.to_bits(), stroke.to_bits(), filled);
+    MESHES.with(|cache| {
         cache
             .borrow_mut()
-            .entry((path.id(), size.to_bits()))
-            .or_insert_with(|| Arc::new(path.transformed(AffineTransform::scale(size / 24.0))))
+            .entry(key)
+            .or_insert_with(|| {
+                let scale = f64::from(size) / 24.0;
+                let mut scaled = path.bez_path().clone();
+                scaled.apply_affine(kurbo::Affine::scale(scale));
+                let style = kurbo::Stroke::new(f64::from(stroke) * scale)
+                    .with_caps(kurbo::Cap::Round)
+                    .with_join(kurbo::Join::Round);
+                let outline =
+                    kurbo::stroke(scaled.iter(), &style, &kurbo::StrokeOpts::default(), 0.01);
+                IconMesh {
+                    outline: Arc::new(to_path(&outline)),
+                    interior: filled.then(|| Arc::new(to_path(&scaled))),
+                }
+            })
             .clone()
     })
 }
@@ -370,21 +422,12 @@ pub fn icon(path: Arc<Path>, size: f32, color: Color) -> Widget {
 /// [`icon`] with an explicit stroke width (in 24-grid units) and an optional
 /// solid fill, for tiny marks or filled glyphs such as the brand's play.
 pub fn icon_with(path: Arc<Path>, size: f32, color: Color, stroke: f32, filled: bool) -> Widget {
-    let scaled = scaled_icon(&path, size);
+    let mesh = icon_mesh(&path, size, stroke, filled);
     let mut canvas = Canvas::default();
-    if filled {
-        canvas.fill_path(scaled.clone(), color, FillRule::NonZero);
+    if let Some(interior) = mesh.interior {
+        canvas.fill_path(interior, color, FillRule::NonZero);
     }
-    canvas.stroke_path(
-        scaled,
-        color,
-        Stroke {
-            width: stroke * size / 24.0,
-            cap: LineCap::Round,
-            join: LineJoin::Round,
-            ..Stroke::default()
-        },
-    );
+    canvas.fill_path(mesh.outline, color, FillRule::NonZero);
     CustomPaint::new(Size::new(size, size), canvas.finish()).into()
 }
 

@@ -86,7 +86,6 @@ fn addon_card(app: &App, addon: &Descriptor, installed: bool, manage: bool) -> W
             .decoration(
                 BoxDecoration::new()
                     .color(SURFACE)
-                    .border(Border::new(1.0, LINE))
                     .border_radius(BorderRadius::all(Radius::circular(14.0))),
             )
             .child(

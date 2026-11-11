@@ -1,13 +1,16 @@
 //! The player screen: picture, subtitles and transport controls.
 
 use crate::player::{Menu, Status, SubChoice};
+use crate::player::engine::MAX_VOLUME;
 use crate::state::App;
+use crate::store::{SubtitleEdge, SubtitleStyle};
 use crate::theme::*;
 use crate::util::{format_speed, format_time, language_name};
 use incular::controls::{Button, ButtonStyle, StateColor};
 use incular::prelude::*;
 use incular::widgets::{HitTestBehavior, StackFit};
 use std::rc::Rc;
+use std::sync::Arc;
 
 const OVERLAY: Color = Color::rgba(8, 9, 14, 205);
 
@@ -121,43 +124,35 @@ fn clock(app: &App) -> Widget {
     .into()
 }
 
-fn pill(label: impl Into<String>, active: bool, on_click: impl Fn() + 'static) -> Widget {
+/// Rounded translucent button used inside the player panels.
+fn pill_content(
+    child: Widget,
+    active: bool,
+    fixed: Option<Size>,
+    on_click: impl Fn() + 'static,
+) -> Widget {
     let background = if active { ACCENT_DIM } else { Color::rgba(255, 255, 255, 22) };
     let foreground = if active { ACCENT } else { TEXT };
-    Button::new(label)
+    Button::with_child(child)
         .style(ButtonStyle {
             background: Some(background),
             background_states: Some(
-                StateColor::new(background).hovered(Color::rgba(255, 255, 255, 48)),
+                StateColor::new(background).hovered(if active {
+                    ACCENT_DIM
+                } else {
+                    Color::rgba(255, 255, 255, 48)
+                }),
             ),
             foreground: Some(foreground),
             border: Some(Border::new(0.0, Color::TRANSPARENT)),
             border_radius: Some(15.0),
-            padding: Some(EdgeInsets::symmetric(13.0, 0.0)),
+            padding: Some(if fixed.is_some() {
+                EdgeInsets::ZERO
+            } else {
+                EdgeInsets::symmetric(12.0, 0.0)
+            }),
             height: Some(30.0),
-            text_style: Some(style(12.5, FontWeight::W600, foreground)),
-            overlay_color: Some(Color::TRANSPARENT.into()),
-            animation_duration: Some(std::time::Duration::ZERO),
-            ..ButtonStyle::default()
-        })
-        .on_click(on_click)
-        .into()
-}
-
-/// A round 30px [`pill`] holding a Lucide icon.
-fn icon_pill(glyph: std::sync::Arc<Path>, on_click: impl Fn() + 'static) -> Widget {
-    let background = Color::rgba(255, 255, 255, 22);
-    Button::with_child(icon(glyph, 15.0, TEXT))
-        .style(ButtonStyle {
-            background: Some(background),
-            background_states: Some(
-                StateColor::new(background).hovered(Color::rgba(255, 255, 255, 48)),
-            ),
-            foreground: Some(TEXT),
-            border: Some(Border::new(0.0, Color::TRANSPARENT)),
-            border_radius: Some(15.0),
-            padding: Some(EdgeInsets::ZERO),
-            fixed_size: Some(Size::new(30.0, 30.0)),
+            fixed_size: fixed,
             alignment: Some(Alignment::CENTER),
             overlay_color: Some(Color::TRANSPARENT.into()),
             animation_duration: Some(std::time::Duration::ZERO),
@@ -167,31 +162,77 @@ fn icon_pill(glyph: std::sync::Arc<Path>, on_click: impl Fn() + 'static) -> Widg
         .into()
 }
 
+fn pill(label: impl Into<String>, active: bool, on_click: impl Fn() + 'static) -> Widget {
+    let color = if active { ACCENT } else { TEXT };
+    pill_content(text(label, 12.5, FontWeight::W600, color).into(), active, None, on_click)
+}
+
+/// A round 30px pill holding a Lucide icon.
+fn icon_pill(glyph: Arc<Path>, on_click: impl Fn() + 'static) -> Widget {
+    pill_content(icon(glyph, 15.0, TEXT), false, Some(Size::new(30.0, 30.0)), on_click)
+}
+
+/// A pill with a leading icon and a label.
+fn labeled_pill(glyph: Arc<Path>, label: &str, on_click: impl Fn() + 'static) -> Widget {
+    pill_content(
+        row(vec![
+            icon(glyph, 14.0, TEXT),
+            hgap(6.0),
+            text(label, 12.5, FontWeight::W600, TEXT).into(),
+        ])
+        .into(),
+        false,
+        None,
+        on_click,
+    )
+}
+
+/// Inner width of a menu panel.
+const PANEL_INNER: f32 = 296.0;
+const MENU_ROW: f32 = 34.0;
+
 fn menu_item(label: String, selected: bool, on_click: impl Fn() + 'static) -> Widget {
     let background = if selected { ACCENT_DIM } else { Color::TRANSPARENT };
-    Button::new(label)
-        .style(ButtonStyle {
-            background: Some(background),
-            background_states: Some(
-                StateColor::new(background).hovered(Color::rgba(255, 255, 255, 30)),
-            ),
-            foreground: Some(if selected { ACCENT } else { TEXT }),
-            border: Some(Border::new(0.0, Color::TRANSPARENT)),
-            border_radius: Some(8.0),
-            padding: Some(EdgeInsets::symmetric(12.0, 0.0)),
-            fixed_size: Some(Size::new(296.0, 34.0)),
-            alignment: Some(Alignment::CENTER_LEFT),
-            text_style: Some(style(
-                13.0,
-                FontWeight::W500,
-                if selected { ACCENT } else { TEXT },
-            )),
-            overlay_color: Some(Color::TRANSPARENT.into()),
-            animation_duration: Some(std::time::Duration::ZERO),
-            ..ButtonStyle::default()
-        })
-        .on_click(on_click)
-        .into()
+    let color = if selected { ACCENT } else { TEXT };
+    let mut content: Vec<Widget> = vec![
+        Expanded::new(line(
+            label,
+            13.0,
+            if selected { FontWeight::W600 } else { FontWeight::W500 },
+            color,
+        ))
+        .into(),
+    ];
+    if selected {
+        content.push(hgap(8.0));
+        content.push(icon(icons::check(), 16.0, ACCENT));
+    }
+    Button::with_child(
+        SizedBox::new()
+            .width(PANEL_INNER - 24.0)
+            .child(hrow(content).cross_axis_alignment(CrossAxisAlignment::Center)),
+    )
+    .style(ButtonStyle {
+        background: Some(background),
+        background_states: Some(
+            StateColor::new(background).hovered(if selected {
+                ACCENT_DIM
+            } else {
+                Color::rgba(255, 255, 255, 30)
+            }),
+        ),
+        foreground: Some(color),
+        border: Some(Border::new(0.0, Color::TRANSPARENT)),
+        border_radius: Some(8.0),
+        padding: Some(EdgeInsets::symmetric(12.0, 0.0)),
+        fixed_size: Some(Size::new(PANEL_INNER, MENU_ROW - 2.0)),
+        alignment: Some(Alignment::CENTER_LEFT),
+        overlay_color: Some(Color::TRANSPARENT.into()),
+        animation_duration: Some(std::time::Duration::ZERO),
+        ..ButtonStyle::default()
+    })
+    .on_click(on_click)
+    .into()
 }
 
 fn track_label(language: &str, title: &str, fallback: usize) -> String {
@@ -207,155 +248,466 @@ fn track_label(language: &str, title: &str, fallback: usize) -> String {
     }
 }
 
+/// Every selectable subtitle with the label the menu shows for it, in menu
+/// order (off, embedded tracks, addon tracks sorted by language).
+fn subtitle_entries(app: &App) -> Vec<(SubChoice, String)> {
+    let (embedded, addon) = app
+        .player
+        .state
+        .peek(|s| (s.embedded_subs.clone(), s.addon_subs.clone()));
+    let mut entries = vec![(SubChoice::Off, "Off".to_owned())];
+    for (index, track) in embedded.iter().enumerate() {
+        if track.is_text_subtitle() {
+            entries.push((
+                SubChoice::Embedded(index),
+                format!("{}  (embedded)", track_label(&track.language, &track.title, index)),
+            ));
+        }
+    }
+    let mut ordered: Vec<(usize, String)> = addon
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (i, language_name(s.lang.as_deref().unwrap_or(""))))
+        .collect();
+    ordered.sort_by(|a, b| a.1.cmp(&b.1));
+    let mut seen: std::collections::HashMap<String, usize> = Default::default();
+    for (index, language) in ordered {
+        let number = seen.entry(language.clone()).or_insert(0);
+        *number += 1;
+        entries.push((SubChoice::Addon(index), format!("{language}  #{number}")));
+    }
+    entries
+}
+
+/// Children of a menu panel plus their total height, so the scroll view
+/// can be offered exactly what it needs.
+struct Panel {
+    children: Vec<Widget>,
+    height: f32,
+}
+
+impl Panel {
+    fn new() -> Self {
+        Self { children: Vec::new(), height: 0.0 }
+    }
+    fn push(&mut self, widget: impl Into<Widget>, height: f32) {
+        self.children.push(widget.into());
+        self.height += height;
+    }
+    fn gap(&mut self, height: f32) {
+        self.push(gap(height), height);
+    }
+    fn label(&mut self, value: &str) {
+        self.push(
+            Padding::new(
+                EdgeInsets::only(4.0, 0.0, 0.0, 0.0),
+                text(value.to_uppercase(), 10.5, FontWeight::W700, FAINT),
+            ),
+            16.0,
+        );
+        self.gap(8.0);
+    }
+    fn row(&mut self, children: Vec<Widget>) {
+        self.push(
+            Padding::new(EdgeInsets::only(4.0, 0.0, 0.0, 0.0), row(children)),
+            30.0,
+        );
+    }
+}
+
+/// Title row of a panel, with an optional way back to a parent panel.
+fn panel_header(app: &App, title: &str, back: Option<Menu>, trailing: Vec<Widget>) -> Widget {
+    let mut children: Vec<Widget> = Vec::new();
+    if let Some(parent) = back {
+        let app = app.clone();
+        children.push(icon_button(icon(icons::chevron_left(), 18.0, TEXT), 28.0, move || {
+            app.set_player_menu(parent)
+        }));
+        children.push(hgap(4.0));
+    } else {
+        children.push(hgap(4.0));
+    }
+    children.push(text(title, 14.0, FontWeight::W600, TEXT).into());
+    children.push(Spacer::new().into());
+    children.extend(trailing);
+    SizedBox::new()
+        .width(PANEL_INNER)
+        .height(30.0)
+        .child(hrow(children).cross_axis_alignment(CrossAxisAlignment::Center))
+        .into()
+}
+
+fn speed_label(speed: f64) -> String {
+    if (speed - 1.0).abs() < 0.01 {
+        "Normal".to_owned()
+    } else {
+        format!("{speed}×")
+    }
+}
+
+fn speed_panel(app: &App) -> Panel {
+    let current = app.player.state.peek(|s| s.speed);
+    let mut panel = Panel::new();
+    panel.push(panel_header(app, "Playback speed", None, Vec::new()), 30.0);
+    panel.gap(10.0);
+    for speed in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0] {
+        let app = app.clone();
+        panel.push(
+            menu_item(speed_label(speed), (current - speed).abs() < 0.01, move || {
+                app.set_speed(speed)
+            }),
+            MENU_ROW,
+        );
+    }
+    panel
+}
+
+fn audio_panel(app: &App) -> Panel {
+    let (tracks, current) = app
+        .player
+        .state
+        .peek(|s| (s.audio_tracks.clone(), s.audio_index));
+    let mut panel = Panel::new();
+    panel.push(panel_header(app, "Audio track", None, Vec::new()), 30.0);
+    panel.gap(10.0);
+    if tracks.is_empty() {
+        panel.push(Padding::new(EdgeInsets::only(4.0, 0.0, 0.0, 0.0), muted("No audio tracks")), 20.0);
+    }
+    // The track in use first, then the rest in file order.
+    let mut order: Vec<usize> = (0..tracks.len()).collect();
+    order.sort_by_key(|&index| index != current);
+    for index in order {
+        let track = &tracks[index];
+        let app = app.clone();
+        panel.push(
+            menu_item(
+                track_label(&track.language, &track.title, index),
+                index == current,
+                move || app.select_audio(index),
+            ),
+            MENU_ROW,
+        );
+    }
+    panel
+}
+
+fn subtitles_panel(app: &App) -> Panel {
+    let (choice, delay) = app.player.state.peek(|s| (s.sub_choice.clone(), s.sub_delay));
+    let entries = subtitle_entries(app);
+    let current = entries
+        .iter()
+        .find(|(c, _)| *c == choice)
+        .map(|(_, label)| label.clone())
+        .unwrap_or_else(|| "Off".to_owned());
+
+    let mut panel = Panel::new();
+    let style = app.clone();
+    panel.push(
+        panel_header(
+            app,
+            "Subtitles",
+            None,
+            vec![labeled_pill(icons::type_(), "Style", move || {
+                style.set_player_menu(Menu::SubtitleStyle)
+            })],
+        ),
+        30.0,
+    );
+    panel.gap(8.0);
+    panel.push(
+        Padding::new(
+            EdgeInsets::only(4.0, 0.0, 0.0, 0.0),
+            row(vec![
+                text("Showing", 12.0, FontWeight::W500, MUTED).into(),
+                hgap(8.0),
+                SizedBox::new()
+                    .width(PANEL_INNER - 70.0)
+                    .child(line(current, 12.5, FontWeight::W600, ACCENT))
+                    .into(),
+            ]),
+        ),
+        18.0,
+    );
+    panel.gap(12.0);
+
+    if choice != SubChoice::Off {
+        let (earlier, later, sync) = (app.clone(), app.clone(), app.clone());
+        panel.row(vec![
+            SizedBox::new()
+                .width(110.0)
+                .child(text(format!("Delay {delay:+.2}s"), 12.5, FontWeight::W500, MUTED))
+                .into(),
+            icon_pill(icons::minus(), move || earlier.adjust_subtitle_delay(-0.25)),
+            hgap(6.0),
+            icon_pill(icons::plus(), move || later.adjust_subtitle_delay(0.25)),
+            hgap(6.0),
+            pill("Sync…", false, move || sync.open_subtitle_sync()),
+        ]);
+        panel.gap(12.0);
+    }
+
+    panel.label("Tracks");
+    // The track in use first, then everything else in menu order.
+    let (selected, others): (Vec<_>, Vec<_>) =
+        entries.into_iter().partition(|(c, _)| *c == choice);
+    for (entry, label) in selected.into_iter().chain(others) {
+        let app = app.clone();
+        let is_current = entry == choice;
+        panel.push(
+            menu_item(label, is_current, move || app.select_subtitle(entry.clone())),
+            MENU_ROW,
+        );
+    }
+    panel
+}
+
+const PALETTE: [[u8; 3]; 8] = [
+    [255, 255, 255],
+    [255, 235, 59],
+    [76, 230, 106],
+    [0, 229, 255],
+    [66, 133, 244],
+    [234, 64, 251],
+    [244, 67, 54],
+    [0, 0, 0],
+];
+
+fn rgb(color: [u8; 3], opacity: f32) -> Color {
+    Color::rgba(
+        color[0],
+        color[1],
+        color[2],
+        (opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+    )
+}
+
+/// A colour dot; the chosen one carries a check.
+fn swatch(color: [u8; 3], selected: bool, on_click: impl Fn() + 'static) -> Widget {
+    let fill = rgb(color, 1.0);
+    let light = u32::from(color[0]) * 3 + u32::from(color[1]) * 6 + u32::from(color[2]) > 1100;
+    let child: Widget = if selected {
+        icon_with(icons::check(), 16.0, if light { BG } else { Color::WHITE }, 3.0, false)
+    } else {
+        SizedBox::shrink().into()
+    };
+    Button::with_child(child)
+        .style(ButtonStyle {
+            background: Some(fill),
+            background_states: Some(StateColor::new(fill)),
+            foreground: Some(TEXT),
+            border: Some(Border::new(0.0, Color::TRANSPARENT)),
+            border_radius: Some(14.0),
+            padding: Some(EdgeInsets::ZERO),
+            fixed_size: Some(Size::new(28.0, 28.0)),
+            alignment: Some(Alignment::CENTER),
+            overlay_color: Some(Color::TRANSPARENT.into()),
+            animation_duration: Some(std::time::Duration::ZERO),
+            ..ButtonStyle::default()
+        })
+        .on_click(on_click)
+        .into()
+}
+
+fn swatches(
+    app: &App,
+    current: [u8; 3],
+    set: fn(&mut SubtitleStyle, [u8; 3]),
+) -> Vec<Widget> {
+    let mut children = Vec::new();
+    for color in PALETTE {
+        let app = app.clone();
+        children.push(swatch(color, color == current, move || {
+            app.update_subtitle_style(|style| set(style, color))
+        }));
+        children.push(hgap(8.0));
+    }
+    children
+}
+
+fn opacity_pills(
+    app: &App,
+    current: f32,
+    choices: &[f32],
+    set: fn(&mut SubtitleStyle, f32),
+) -> Vec<Widget> {
+    let mut children = Vec::new();
+    for &value in choices {
+        let app = app.clone();
+        children.push(pill(
+            format!("{:.0}%", value * 100.0),
+            (current - value).abs() < 0.01,
+            move || app.update_subtitle_style(|style| set(style, value)),
+        ));
+        children.push(hgap(6.0));
+    }
+    children
+}
+
+fn subtitle_style_panel(app: &App) -> Panel {
+    let (style, size) = app.player.state.peek(|s| (s.sub_style.clone(), s.sub_size));
+    let mut panel = Panel::new();
+    let reset = app.clone();
+    panel.push(
+        panel_header(
+            app,
+            "Subtitle style",
+            Some(Menu::Subtitles),
+            vec![labeled_pill(icons::rotate_ccw(), "Reset", move || {
+                reset.reset_subtitle_style()
+            })],
+        ),
+        30.0,
+    );
+    panel.gap(12.0);
+
+    // Live preview on a picture-like backdrop.
+    panel.push(
+        Container::new()
+            .width(PANEL_INNER)
+            .height(72.0)
+            .alignment(Alignment::CENTER)
+            .decoration(
+                BoxDecoration::new()
+                    .color(Color::rgba(58, 66, 92, 255))
+                    .border_radius(BorderRadius::all(Radius::circular(10.0))),
+            )
+            .child(caption_block(&["Subtitles look like this"], size.min(22.0), &style)),
+        72.0,
+    );
+    panel.gap(14.0);
+
+    let (smaller, bigger) = (app.clone(), app.clone());
+    panel.label("Font size");
+    panel.row(vec![
+        icon_pill(icons::minus(), move || smaller.adjust_subtitle_size(-2.0)),
+        SizedBox::new()
+            .width(56.0)
+            .child(
+                Column::new(vec![text(format!("{size:.0}"), 13.0, FontWeight::W600, TEXT).into()]
+                    as Vec<Widget>)
+                .cross_axis_alignment(CrossAxisAlignment::Center),
+            )
+            .into(),
+        icon_pill(icons::plus(), move || bigger.adjust_subtitle_size(2.0)),
+        hgap(12.0),
+        {
+            let app = app.clone();
+            pill("Bold", style.bold, move || {
+                app.update_subtitle_style(|s| s.bold = !s.bold)
+            })
+        },
+    ]);
+    panel.gap(14.0);
+
+    panel.label("Text colour");
+    panel.push(
+        Padding::new(
+            EdgeInsets::only(4.0, 0.0, 0.0, 0.0),
+            row(swatches(app, style.text_color, |s, c| s.text_color = c)),
+        ),
+        28.0,
+    );
+    panel.gap(8.0);
+    panel.row(opacity_pills(app, style.text_opacity, &[0.25, 0.5, 0.75, 1.0], |s, v| {
+        s.text_opacity = v
+    }));
+    panel.gap(14.0);
+
+    panel.label("Background");
+    panel.push(
+        Padding::new(
+            EdgeInsets::only(4.0, 0.0, 0.0, 0.0),
+            row(swatches(app, style.background_color, |s, c| s.background_color = c)),
+        ),
+        28.0,
+    );
+    panel.gap(8.0);
+    panel.row(opacity_pills(
+        app,
+        style.background_opacity,
+        &[0.0, 0.25, 0.5, 0.75, 1.0],
+        |s, v| s.background_opacity = v,
+    ));
+    panel.gap(14.0);
+
+    panel.label("Window");
+    panel.push(
+        Padding::new(
+            EdgeInsets::only(4.0, 0.0, 0.0, 0.0),
+            row(swatches(app, style.window_color, |s, c| s.window_color = c)),
+        ),
+        28.0,
+    );
+    panel.gap(8.0);
+    panel.row(opacity_pills(
+        app,
+        style.window_opacity,
+        &[0.0, 0.25, 0.5, 0.75, 1.0],
+        |s, v| s.window_opacity = v,
+    ));
+    panel.gap(14.0);
+
+    panel.label("Character edge");
+    for edges in SubtitleEdge::ALL.chunks(3) {
+        let mut children = Vec::new();
+        for &edge in edges {
+            let app = app.clone();
+            children.push(pill(edge.label(), style.edge == edge, move || {
+                app.update_subtitle_style(|s| s.edge = edge)
+            }));
+            children.push(hgap(6.0));
+        }
+        panel.row(children);
+        panel.gap(6.0);
+    }
+    panel
+}
+
+fn picture_panel(app: &App) -> Panel {
+    let brightness = app.player.state.peek(|s| s.brightness);
+    let mut panel = Panel::new();
+    let reset = app.clone();
+    panel.push(
+        panel_header(
+            app,
+            "Brightness",
+            None,
+            vec![
+                text(format!("{:.0}%", brightness * 100.0), 12.5, FontWeight::W600, ACCENT).into(),
+                hgap(8.0),
+                labeled_pill(icons::rotate_ccw(), "Reset", move || reset.set_brightness(1.0)),
+            ],
+        ),
+        30.0,
+    );
+    panel.gap(14.0);
+    let (darker, brighter, drag) = (app.clone(), app.clone(), app.clone());
+    panel.row(vec![
+        icon_pill(icons::minus(), move || darker.adjust_brightness(-0.05)),
+        hgap(10.0),
+        slider(
+            PANEL_INNER - 98.0,
+            (brightness - 0.3) / 1.4,
+            Rc::new(move |value, _| drag.set_brightness(0.3 + value * 1.4)),
+        ),
+        hgap(10.0),
+        icon_pill(icons::plus(), move || brighter.adjust_brightness(0.05)),
+    ]);
+    panel.gap(6.0);
+    panel
+}
+
 fn menu_panel(app: &App, menu: Menu) -> Option<Widget> {
-    let mut items: Vec<Widget> = Vec::new();
-    let title = match menu {
+    let panel = match menu {
         Menu::None => return None,
         Menu::Sync => return Some(sync_panel(app)),
-        Menu::Speed => {
-            let current = app.player.state.peek(|s| s.speed);
-            for speed in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] {
-                let app = app.clone();
-                items.push(menu_item(
-                    format!("{speed}×"),
-                    (current - speed).abs() < 0.01,
-                    move || app.set_speed(speed),
-                ));
-            }
-            "Speed"
-        }
-        Menu::Audio => {
-            let (tracks, current) = app
-                .player
-                .state
-                .peek(|s| (s.audio_tracks.clone(), s.audio_index));
-            for (index, track) in tracks.iter().enumerate() {
-                let app = app.clone();
-                items.push(menu_item(
-                    track_label(&track.language, &track.title, index),
-                    index == current,
-                    move || app.select_audio(index),
-                ));
-            }
-            if tracks.is_empty() {
-                items.push(muted("No audio tracks"));
-            }
-            "Audio"
-        }
-        Menu::Subtitles => {
-            let (embedded, addon, choice, delay, size) = app.player.state.peek(|s| {
-                (
-                    s.embedded_subs.clone(),
-                    s.addon_subs.clone(),
-                    s.sub_choice.clone(),
-                    s.sub_delay,
-                    s.sub_size,
-                )
-            });
-            {
-                let app = app.clone();
-                items.push(menu_item("Off".to_owned(), choice == SubChoice::Off, move || {
-                    app.select_subtitle(SubChoice::Off)
-                }));
-            }
-            for (index, track) in embedded.iter().enumerate() {
-                if !track.is_text_subtitle() {
-                    continue;
-                }
-                let app = app.clone();
-                items.push(menu_item(
-                    format!("{}  (embedded)", track_label(&track.language, &track.title, index)),
-                    choice == SubChoice::Embedded(index),
-                    move || app.select_subtitle(SubChoice::Embedded(index)),
-                ));
-            }
-            let mut ordered: Vec<(usize, String)> = addon
-                .iter()
-                .enumerate()
-                .map(|(i, s)| (i, language_name(s.lang.as_deref().unwrap_or(""))))
-                .collect();
-            ordered.sort_by(|a, b| a.1.cmp(&b.1));
-            let mut seen: std::collections::HashMap<String, usize> = Default::default();
-            for (index, language) in ordered {
-                let number = seen.entry(language.clone()).or_insert(0);
-                *number += 1;
-                let app = app.clone();
-                items.push(menu_item(
-                    format!("{language}  #{number}"),
-                    choice == SubChoice::Addon(index),
-                    move || app.select_subtitle(SubChoice::Addon(index)),
-                ));
-            }
-            if choice != SubChoice::Off {
-                let app = app.clone();
-                items.insert(
-                    0,
-                    Padding::new(
-                        EdgeInsets::only(4.0, 0.0, 0.0, 10.0),
-                        pill("Out of sync? Pick the line…", false, move || {
-                            app.open_subtitle_sync()
-                        }),
-                    )
-                    .into(),
-                );
-            }
-            let (earlier, later, smaller, bigger) =
-                (app.clone(), app.clone(), app.clone(), app.clone());
-            items.insert(
-                0,
-                Padding::new(
-                    EdgeInsets::only(4.0, 0.0, 0.0, 10.0),
-                    col(vec![
-                        row(vec![
-                            SizedBox::new()
-                                .width(118.0)
-                                .child(text(
-                                    format!("Delay {delay:+.2}s"),
-                                    12.5,
-                                    FontWeight::W500,
-                                    MUTED,
-                                ))
-                                .into(),
-                            icon_pill(icons::minus(), move || earlier.adjust_subtitle_delay(-0.25)),
-                            hgap(6.0),
-                            icon_pill(icons::plus(), move || later.adjust_subtitle_delay(0.25)),
-                        ])
-                        .into(),
-                        gap(8.0),
-                        row(vec![
-                            SizedBox::new()
-                                .width(118.0)
-                                .child(text(
-                                    format!("Size {size:.0}"),
-                                    12.5,
-                                    FontWeight::W500,
-                                    MUTED,
-                                ))
-                                .into(),
-                            icon_pill(icons::minus(), move || smaller.adjust_subtitle_size(-2.0)),
-                            hgap(6.0),
-                            icon_pill(icons::plus(), move || bigger.adjust_subtitle_size(2.0)),
-                        ])
-                        .into(),
-                    ]),
-                )
-                .into(),
-            );
-            "Subtitles"
-        }
+        Menu::Speed => speed_panel(app),
+        Menu::Audio => audio_panel(app),
+        Menu::Subtitles => subtitles_panel(app),
+        Menu::SubtitleStyle => subtitle_style_panel(app),
+        Menu::Picture => picture_panel(app),
     };
-    // The scroll view fills whatever height it is offered, so offer only
-    // what the entries need (up to a cap).
-    let extra = if menu == Menu::Subtitles { 130.0 } else { 0.0 };
-    let height = (34.0 + extra + items.len() as f32 * 34.0).min(420.0);
-    let mut children: Vec<Widget> = vec![
-        Padding::new(
-            EdgeInsets::only(4.0, 0.0, 0.0, 10.0),
-            text(title, 14.0, FontWeight::W600, TEXT),
-        )
-        .into(),
-    ];
-    children.extend(items);
+    let height = panel.height.min(460.0);
     Some(
         Container::new()
             .width(320.0)
@@ -364,17 +716,96 @@ fn menu_panel(app: &App, menu: Menu) -> Option<Widget> {
             .decoration(
                 BoxDecoration::new()
                     .color(Color::rgba(18, 21, 32, 245))
-                    .border(Border::new(1.0, LINE))
                     .border_radius(BorderRadius::all(Radius::circular(14.0))),
             )
-            .child(
-                ConstrainedBox::new(
-                    Constraints::tight(Size::new(296.0, height)),
-                    SingleChildScrollView::new(col(children)),
-                ),
-            )
+            .child(ConstrainedBox::new(
+                Constraints::tight(Size::new(PANEL_INNER, height)),
+                // A shared controller: the panel is rebuilt whenever player
+                // state changes, and a fresh controller would jump to the top.
+                SingleChildScrollView::new(col(panel.children))
+                    .controller(app.controllers.player_menu.clone()),
+            ))
             .into(),
     )
+}
+
+/// One caption line drawn with the chosen character edge. Edges are copies
+/// of the text offset underneath it (Incular 0.1.1 does not paint text
+/// shadows).
+fn edged_text(value: &str, size: f32, style: &SubtitleStyle) -> Widget {
+    let weight = if style.bold { FontWeight::W700 } else { FontWeight::W500 };
+    let alpha = style.text_opacity;
+    let text_color = rgb(style.text_color, alpha);
+    let glyphs = |color: Color| Text::new(value.to_owned()).style(self::style(size, weight, color));
+    let dark = |strength: f32| Color::rgba(0, 0, 0, (strength * alpha * 255.0) as u8);
+    let light = |strength: f32| Color::rgba(255, 255, 255, (strength * alpha * 255.0) as u8);
+    let d = (size * 0.06).clamp(1.0, 2.5);
+    let copies: Vec<(f32, f32, Color)> = match style.edge {
+        SubtitleEdge::None => Vec::new(),
+        SubtitleEdge::DropShadow => vec![(d, d, dark(0.75)), (d * 1.6, d * 1.6, dark(0.35))],
+        SubtitleEdge::Outline => [
+            (-1.0, -1.0),
+            (0.0, -1.0),
+            (1.0, -1.0),
+            (-1.0, 0.0),
+            (1.0, 0.0),
+            (-1.0, 1.0),
+            (0.0, 1.0),
+            (1.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(x, y)| (x * d, y * d, dark(1.0)))
+        .collect(),
+        SubtitleEdge::Raised => vec![(d * 0.6, d * 0.6, dark(0.9)), (d * 1.2, d * 1.2, dark(0.5))],
+        SubtitleEdge::Depressed => vec![(-d * 0.6, -d * 0.6, dark(0.9)), (d * 0.6, d * 0.6, light(0.45))],
+    };
+    if copies.is_empty() {
+        return glyphs(text_color).into();
+    }
+    let pad = d * 2.0;
+    let mut layers: Vec<Widget> = copies
+        .into_iter()
+        .map(|(x, y, color)| {
+            Positioned::new(glyphs(color)).left(pad + x).top(pad + y).into()
+        })
+        .collect();
+    layers.push(Padding::new(EdgeInsets::all(pad), glyphs(text_color)).into());
+    Stack::new(layers).into()
+}
+
+/// A subtitle cue: optional window behind the block, a background behind
+/// each line, edged text on top.
+fn caption_block(lines: &[&str], size: f32, style: &SubtitleStyle) -> Widget {
+    let background = rgb(style.background_color, style.background_opacity);
+    let rows: Vec<Widget> = lines
+        .iter()
+        .map(|line| {
+            Container::new()
+                .padding(EdgeInsets::symmetric(size * 0.3, size * 0.06))
+                .decoration(
+                    BoxDecoration::new()
+                        .color(background)
+                        .border_radius(BorderRadius::all(Radius::circular(4.0))),
+                )
+                .child(edged_text(line, size, style))
+                .into()
+        })
+        .collect();
+    let block = Column::new(rows)
+        .main_axis_size(MainAxisSize::Min)
+        .cross_axis_alignment(CrossAxisAlignment::Center);
+    if style.window_opacity <= 0.0 {
+        return block.into();
+    }
+    Container::new()
+        .padding(EdgeInsets::symmetric(size * 0.5, size * 0.3))
+        .decoration(
+            BoxDecoration::new()
+                .color(rgb(style.window_color, style.window_opacity))
+                .border_radius(BorderRadius::all(Radius::circular(8.0))),
+        )
+        .child(block)
+        .into()
 }
 
 /// Every subtitle line with its time. Clicking the line being spoken right
@@ -502,8 +933,42 @@ fn top_bar(app: &App, title: &str, subtitle: &str) -> Widget {
         .into()
 }
 
+/// A control-bar icon that opens a panel. Tinted while its panel is open;
+/// a dot underneath marks a non-default setting (subtitles on, 1.5x, ...).
+fn menu_button(glyph: Arc<Path>, open: bool, changed: bool, on_click: impl Fn() + 'static) -> Widget {
+    let color = if open || changed { ACCENT } else { TEXT };
+    let mark: Widget = Container::new()
+        .width(4.0)
+        .height(4.0)
+        .radius(2.0)
+        .color(if changed { ACCENT } else { Color::TRANSPARENT })
+        .into();
+    let content = Column::new(vec![icon(glyph, 20.0, color), gap(3.0), mark])
+        .main_axis_size(MainAxisSize::Min)
+        .cross_axis_alignment(CrossAxisAlignment::Center);
+    let background = if open { Color::rgba(255, 255, 255, 26) } else { Color::TRANSPARENT };
+    Button::with_child(Padding::new(EdgeInsets::only(0.0, 7.0, 0.0, 0.0), content))
+        .style(ButtonStyle {
+            background: Some(background),
+            background_states: Some(
+                StateColor::new(background).hovered(Color::rgba(255, 255, 255, 28)),
+            ),
+            foreground: Some(TEXT),
+            border: Some(Border::new(0.0, Color::TRANSPARENT)),
+            border_radius: Some(20.0),
+            padding: Some(EdgeInsets::ZERO),
+            fixed_size: Some(Size::new(40.0, 40.0)),
+            alignment: Some(Alignment::CENTER),
+            overlay_color: Some(Color::TRANSPARENT.into()),
+            animation_duration: Some(std::time::Duration::ZERO),
+            ..ButtonStyle::default()
+        })
+        .on_click(on_click)
+        .into()
+}
+
 fn bottom_bar(app: &App) -> Widget {
-    let (live, paused, ended, volume, muted_now, speed, menu, has_next, torrent, has_subs) =
+    let (live, paused, ended, volume, muted_now, speed, menu, has_next, torrent, has_subs, brightness) =
         app.player.state.peek(|s| {
             (
                 s.live,
@@ -516,6 +981,7 @@ fn bottom_bar(app: &App) -> Widget {
                 s.next.is_some(),
                 s.torrent.clone(),
                 s.sub_choice != SubChoice::Off,
+                s.brightness,
             )
         });
     let action = |call: fn(&App)| {
@@ -568,11 +1034,25 @@ fn bottom_bar(app: &App) -> Widget {
     ));
     {
         let app = app.clone();
+        let shown = if muted_now { 0.0 } else { volume };
         controls.push(slider(
-            96.0,
-            if muted_now { 0.0 } else { volume },
-            Rc::new(move |value, _| app.set_volume(value)),
+            120.0,
+            shown / MAX_VOLUME,
+            Rc::new(move |value, _| app.set_volume(value * MAX_VOLUME)),
         ));
+        controls.push(hgap(8.0));
+        controls.push(
+            SizedBox::new()
+                .width(40.0)
+                .child(text(
+                    format!("{:.0}%", shown * 100.0),
+                    12.0,
+                    FontWeight::W600,
+                    // Boosted past 100 % reads as a warning colour.
+                    if shown > 1.0 { ACCENT } else { MUTED },
+                ))
+                .into(),
+        );
     }
     controls.push(hgap(14.0));
     controls.push(clock(app));
@@ -589,20 +1069,22 @@ fn bottom_bar(app: &App) -> Widget {
         );
         controls.push(hgap(14.0));
     }
-    for (label, target, active) in [
-        (format!("{speed}×"), Menu::Speed, (speed - 1.0).abs() > 0.01),
-        ("Audio".to_owned(), Menu::Audio, false),
-        ("Subtitles".to_owned(), Menu::Subtitles, has_subs),
+    let style_open = menu == Menu::SubtitleStyle || menu == Menu::Sync;
+    for (glyph, target, changed) in [
+        (icons::sun(), Menu::Picture, (brightness - 1.0).abs() > 0.01),
+        (icons::gauge(), Menu::Speed, (speed - 1.0).abs() > 0.01),
+        (icons::audio_lines(), Menu::Audio, false),
+        (icons::captions(), Menu::Subtitles, has_subs),
     ] {
         if live && target == Menu::Speed {
             continue;
         }
+        let open = menu == target || (target == Menu::Subtitles && style_open);
         let app = app.clone();
-        controls.push(pill(label, active || menu == target, move || {
-            app.set_player_menu(target)
-        }));
-        controls.push(hgap(8.0));
+        controls.push(menu_button(glyph, open, changed, move || app.set_player_menu(target)));
+        controls.push(hgap(4.0));
     }
+    controls.push(hgap(4.0));
     controls.push(icon_button(
         icon(icons::maximize(), 20.0, TEXT),
         40.0,
@@ -656,7 +1138,7 @@ fn status_card(children: Vec<Widget>) -> Widget {
 }
 
 pub fn screen(app: &App) -> Widget {
-    let (stage, status, title, subtitle, visible, menu, stalled, has_video, torrent, next) =
+    let (stage, status, title, subtitle, visible, menu, stalled, has_video, torrent, next, brightness) =
         app.player.state.read(|s| {
             (
                 s.stage.clone(),
@@ -669,12 +1151,13 @@ pub fn screen(app: &App) -> Widget {
                 s.has_video,
                 s.torrent.clone(),
                 s.next.clone(),
+                s.brightness,
             )
         });
 
-    let picture = {
+    let picture: Widget = {
         let frame = app.player.frame.clone();
-        LayoutBuilder::new(move |_, constraints| {
+        let image = LayoutBuilder::new(move |_, constraints| {
             let size = constraints.biggest();
             match frame.get() {
                 Some(handle) => Image::new(handle)
@@ -684,7 +1167,13 @@ pub fn screen(app: &App) -> Widget {
                     .into(),
                 None => SizedBox::shrink().into(),
             }
-        })
+        });
+        // Filtering costs an offscreen pass, so only when it changes anything.
+        if (brightness - 1.0).abs() > 0.01 {
+            ColorFiltered::new(ColorFilter::brightness(brightness), image).into()
+        } else {
+            image.into()
+        }
     };
 
     let captions = {
@@ -694,34 +1183,18 @@ pub fn screen(app: &App) -> Widget {
             if cue.is_empty() {
                 return SizedBox::shrink().into();
             }
-            let (size, lifted) = app
+            let (size, lifted, sub_style) = app
                 .player
                 .state
-                .read(|s| (s.sub_size, s.controls_visible));
+                .read(|s| (s.sub_size, s.controls_visible, s.sub_style.clone()));
+            // One widget per line, centred by the column: `TextAlign::Center`
+            // on shrink-wrapped text clips in Incular 0.1.1.
+            let lines: Vec<&str> = cue.lines().collect();
             Align::new(
                 Alignment::BOTTOM_CENTER,
                 Padding::new(
                     EdgeInsets::only(48.0, 0.0, 48.0, if lifted { 128.0 } else { 44.0 }),
-                    IgnorePointer::new(
-                        Container::new()
-                            .padding(EdgeInsets::symmetric(14.0, 6.0))
-                            .decoration(
-                                BoxDecoration::new()
-                                    .color(Color::rgba(0, 0, 0, 150))
-                                    .border_radius(BorderRadius::all(Radius::circular(8.0))),
-                            )
-                            .child(
-                                // One Text per line, centred by the column:
-                                // `TextAlign::Center` on shrink-wrapped text
-                                // clips in Incular 0.1.1.
-                                Column::new(cue.lines().map(|line| {
-                                    Text::new(line.to_owned())
-                                        .style(style(size, FontWeight::W600, Color::WHITE))
-                                }))
-                                .main_axis_size(MainAxisSize::Min)
-                                .cross_axis_alignment(CrossAxisAlignment::Center),
-                            ),
-                    ),
+                    IgnorePointer::new(caption_block(&lines, size, &sub_style)),
                 ),
             )
             .into()
@@ -745,7 +1218,7 @@ pub fn screen(app: &App) -> Widget {
 
     let mut layers: Vec<Widget> = vec![
         Container::new().color(Color::BLACK).into(),
-        picture.into(),
+        picture,
         captions.into(),
         surface.into(),
     ];

@@ -3,6 +3,7 @@
 mod addons;
 mod browse;
 mod detail;
+mod downloads;
 mod player;
 mod settings;
 mod splash;
@@ -103,6 +104,7 @@ fn sidebar(app: &App, current: Route) -> Widget {
         ("Discover", icons::compass(), Route::Discover),
         ("Library", icons::bookmark(), Route::Library),
         ("Search", icons::search(), Route::Search),
+        ("Downloads", icons::download(), Route::Downloads),
     ] {
         items.push(nav_button(app, label, glyph, route, route == current));
         items.push(gap(4.0));
@@ -142,7 +144,6 @@ fn sidebar(app: &App, current: Route) -> Widget {
                     .decoration(
                         BoxDecoration::new()
                             .color(SURFACE)
-                            .border(Border::new(1.0, LINE))
                             .border_radius(BorderRadius::all(Radius::circular(14.0))),
                     )
                     .child(col(vec![
@@ -200,7 +201,6 @@ fn sidebar(app: &App, current: Route) -> Widget {
             .decoration(
                 BoxDecoration::new()
                     .color(PANEL)
-                    .border(Border::new(1.0, LINE))
                     .border_radius(BorderRadius::all(Radius::circular(20.0))),
             )
             .child(
@@ -263,6 +263,7 @@ pub(super) fn handle_key(app: &App, event: &KeyboardEvent) -> bool {
             Code::Digit4 if control => Route::Search,
             Code::Digit5 if control => Route::Addons,
             Code::Digit6 if control => Route::Settings,
+            Code::Digit7 if control => Route::Downloads,
             _ => return false,
         };
         app.go(target);
@@ -316,6 +317,7 @@ pub fn root(app: &App) -> Widget {
                 Route::Library => island(app, browse::library),
                 Route::Search => island(app, browse::search),
                 Route::Addons => island(app, addons::screen),
+                Route::Downloads => island(app, downloads::screen),
                 _ => island(app, settings::screen),
             };
             hrow(vec![sidebar(app, base), Expanded::new(screen).into()])

@@ -224,7 +224,7 @@ impl Engine {
     pub fn set_volume(&self, volume: f32) {
         self.inner
             .volume
-            .store(volume.clamp(0.0, 1.5).to_bits(), Ordering::Release);
+            .store(volume.clamp(0.0, MAX_VOLUME).to_bits(), Ordering::Release);
     }
 
     pub fn set_speed(&self, speed: f64) {
@@ -927,7 +927,25 @@ impl Iterator for QueueSource {
             inner.consumed_frames.fetch_add(1, Ordering::Relaxed);
         }
         let volume = f32::from_bits(inner.volume.load(Ordering::Relaxed));
-        Some((sample as f32 * volume).clamp(i16::MIN as f32, i16::MAX as f32) as i16)
+        let scaled = sample as f32 / 32768.0 * volume;
+        let out = if volume > 1.0 { soft_clip(scaled) } else { scaled };
+        Some((out * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16)
+    }
+}
+
+/// Highest playback gain (200 %).
+pub const MAX_VOLUME: f32 = 2.0;
+
+/// Leaves quiet samples alone and bends loud ones smoothly towards full
+/// scale, so boosted volume compresses peaks instead of clipping them.
+fn soft_clip(x: f32) -> f32 {
+    const KNEE: f32 = 0.8;
+    let magnitude = x.abs();
+    if magnitude <= KNEE {
+        x
+    } else {
+        let room = 1.0 - KNEE;
+        x.signum() * (KNEE + room * ((magnitude - KNEE) / room).tanh())
     }
 }
 
