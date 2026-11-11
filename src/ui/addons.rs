@@ -42,9 +42,9 @@ fn addon_card(app: &App, addon: &Descriptor, installed: bool, manage: bool) -> W
     let mut actions: Vec<Widget> = Vec::new();
     let url = addon.transport_url.clone();
     if manage {
-        for (label, delta) in [("▲", -1), ("▼", 1)] {
+        for (glyph, delta) in [(icons::chevron_up(), -1), (icons::chevron_down(), 1)] {
             let (app, url) = (app.clone(), url.clone());
-            actions.push(small_button(label, Tone::Ghost, move || {
+            actions.push(small_icon_button(glyph, None, Tone::Ghost, move || {
                 app.move_addon(&url, delta)
             }));
         }

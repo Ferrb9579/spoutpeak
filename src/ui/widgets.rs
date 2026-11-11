@@ -231,9 +231,9 @@ fn row_header(app: &App, title: &str, subtitle: &str, key: &str, scrollable: boo
         Spacer::new().into(),
     ];
     if scrollable {
-        for (label, delta) in [("‹", -720.0_f32), ("›", 720.0)] {
+        for (glyph, delta) in [(icons::chevron_left(), -720.0_f32), (icons::chevron_right(), 720.0)] {
             let controller = app.controllers.row(key);
-            children.push(small_button(label, Tone::Neutral, move || {
+            children.push(small_icon_button(glyph, None, Tone::Neutral, move || {
                 controller.scroll_by(delta);
             }));
             children.push(hgap(6.0));

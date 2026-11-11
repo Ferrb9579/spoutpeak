@@ -16,6 +16,8 @@ dirs = "6"
 urlencoding = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 open = "5"
+# SVG path parsing for the Lucide icon set (same version Incular renders with).
+kurbo = "0.13"
 
 [profile.dev]
 opt-level = 1

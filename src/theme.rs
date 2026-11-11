@@ -218,258 +218,223 @@ pub fn divider() -> Widget {
     Container::new().height(1.0).color(LINE).into()
 }
 
-/// Hand-drawn icons: Incular ships no icon set, so the handful the player
-/// and shell need are authored here on a 24-unit grid.
+/// Lucide icons (<https://lucide.dev>, ISC licence), path data copied
+/// verbatim from `lucide-static` 1.72.0. Each function returns the icon's
+/// geometry on Lucide's 24x24 grid; [`icon`] scales and strokes it.
+/// `<circle>` and `<rect>` elements are rewritten as equivalent path data.
 pub mod icons {
     use super::*;
+    use kurbo::{BezPath, PathEl};
     use std::sync::OnceLock;
 
-    fn polygons(shapes: &[&[(f32, f32)]]) -> Arc<Path> {
+    fn from_svg(paths: &[&str]) -> Arc<Path> {
+        let point = |p: kurbo::Point| Offset::new(p.x as f32, p.y as f32);
         let mut builder = Path::builder();
-        for shape in shapes {
-            let mut points = shape.iter();
-            if let Some(&(x, y)) = points.next() {
-                builder.move_to(Offset::new(x, y));
+        for data in paths {
+            let parsed = BezPath::from_svg(data).expect("valid Lucide path data");
+            for element in parsed.elements() {
+                match *element {
+                    PathEl::MoveTo(p) => {
+                        builder.move_to(point(p));
+                    }
+                    PathEl::LineTo(p) => {
+                        builder.line_to(point(p));
+                    }
+                    PathEl::QuadTo(c, p) => {
+                        builder.quadratic_to(point(c), point(p));
+                    }
+                    PathEl::CurveTo(a, b, p) => {
+                        builder.cubic_to(point(a), point(b), point(p));
+                    }
+                    PathEl::ClosePath => {
+                        builder.close();
+                    }
+                }
             }
-            for &(x, y) in points {
-                builder.line_to(Offset::new(x, y));
-            }
-            builder.close();
         }
         Arc::new(builder.build())
     }
 
-    macro_rules! icon {
-        ($name:ident, $shapes:expr) => {
-            pub fn $name() -> Arc<Path> {
-                static PATH: OnceLock<Arc<Path>> = OnceLock::new();
-                PATH.get_or_init(|| polygons($shapes)).clone()
-            }
-        };
-    }
-
-    /// A regular polygon ring (outer clockwise, inner counter-clockwise) so
-    /// the non-zero fill rule leaves the middle open.
-    fn ring(builder: &mut PathBuilder, cx: f32, cy: f32, outer: f32, inner: f32) {
-        const SIDES: usize = 20;
-        for (radius, reverse) in [(outer, false), (inner, true)] {
-            for step in 0..SIDES {
-                let index = if reverse { SIDES - step } else { step };
-                let angle = index as f32 / SIDES as f32 * std::f32::consts::TAU;
-                let point = Offset::new(cx + radius * angle.cos(), cy + radius * angle.sin());
-                if step == 0 {
-                    builder.move_to(point);
-                } else {
-                    builder.line_to(point);
+    macro_rules! lucide {
+        ($($name:ident => [$($d:literal),+ $(,)?];)+) => {
+            $(
+                pub fn $name() -> Arc<Path> {
+                    static PATH: OnceLock<Arc<Path>> = OnceLock::new();
+                    PATH.get_or_init(|| from_svg(&[$($d),+])).clone()
                 }
-            }
-            builder.close();
-        }
-    }
-
-    fn poly(builder: &mut PathBuilder, points: &[(f32, f32)]) {
-        for (index, &(x, y)) in points.iter().enumerate() {
-            if index == 0 {
-                builder.move_to(Offset::new(x, y));
-            } else {
-                builder.line_to(Offset::new(x, y));
-            }
-        }
-        builder.close();
-    }
-
-    macro_rules! drawn {
-        ($name:ident, $build:expr) => {
-            pub fn $name() -> Arc<Path> {
-                static PATH: OnceLock<Arc<Path>> = OnceLock::new();
-                PATH.get_or_init(|| {
-                    let mut builder = Path::builder();
-                    let draw: fn(&mut PathBuilder) = $build;
-                    draw(&mut builder);
-                    Arc::new(builder.build())
-                })
-                .clone()
-            }
+            )+
         };
     }
 
-    drawn!(search, |b| {
-        ring(b, 10.5, 10.5, 7.5, 5.3);
-        poly(b, &[(15.2, 16.8), (16.8, 15.2), (21.6, 20.0), (20.0, 21.6)]);
-    });
-    drawn!(compass, |b| {
-        ring(b, 12.0, 12.0, 10.0, 8.0);
-        poly(b, &[(16.5, 7.5), (13.6, 13.6), (7.5, 16.5), (10.4, 10.4)]);
-    });
-    drawn!(settings, |b| {
-        // Three sliders with knobs.
-        poly(b, &[(3.0, 5.2), (21.0, 5.2), (21.0, 6.8), (3.0, 6.8)]);
-        poly(b, &[(3.0, 11.2), (21.0, 11.2), (21.0, 12.8), (3.0, 12.8)]);
-        poly(b, &[(3.0, 17.2), (21.0, 17.2), (21.0, 18.8), (3.0, 18.8)]);
-        poly(b, &[(13.5, 3.2), (17.5, 3.2), (17.5, 8.8), (13.5, 8.8)]);
-        poly(b, &[(6.0, 9.2), (10.0, 9.2), (10.0, 14.8), (6.0, 14.8)]);
-        poly(b, &[(14.5, 15.2), (18.5, 15.2), (18.5, 20.8), (14.5, 20.8)]);
-    });
-    icon!(
-        home,
-        &[&[
-            (12.0, 3.0),
-            (21.5, 11.2),
-            (19.0, 11.2),
-            (19.0, 20.5),
-            (14.2, 20.5),
-            (14.2, 14.5),
-            (9.8, 14.5),
-            (9.8, 20.5),
-            (5.0, 20.5),
-            (5.0, 11.2),
-            (2.5, 11.2)
-        ]]
-    );
-    icon!(
-        bookmark,
-        &[&[(6.0, 3.0), (18.0, 3.0), (18.0, 21.0), (12.0, 16.4), (6.0, 21.0)]]
-    );
-    icon!(
-        puzzle,
-        &[
-            &[(3.5, 3.5), (10.7, 3.5), (10.7, 10.7), (3.5, 10.7)],
-            &[(13.3, 13.3), (20.5, 13.3), (20.5, 20.5), (13.3, 20.5)],
-            &[(3.5, 13.3), (10.7, 13.3), (10.7, 20.5), (3.5, 20.5)],
-            &[(17.0, 2.2), (21.8, 7.0), (17.0, 11.8), (12.2, 7.0)]
-        ]
-    );
+    lucide! {
+        // Navigation
+        house => [
+            "M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8",
+            "M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+        ];
+        compass => [
+            "M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0z",
+            "m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z",
+        ];
+        bookmark => [
+            "M17 3a2 2 0 0 1 2 2v15a1 1 0 0 1-1.496.868l-4.512-2.578a2 2 0 0 0-1.984 0l-4.512 2.578A1 1 0 0 1 5 20V5a2 2 0 0 1 2-2z",
+        ];
+        search => [
+            "m21 21-4.34-4.34",
+            "M3 11a8 8 0 1 0 16 0a8 8 0 1 0-16 0z",
+        ];
+        puzzle => [
+            "M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 15.39a1 1 0 0 1-1.68-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68l1.683-1.682a2.414 2.414 0 0 1 3.414 0z",
+        ];
+        settings => [
+            "M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915",
+            "M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0z",
+        ];
+        arrow_left => ["m12 19-7-7 7-7", "M19 12H5"];
+        chevron_left => ["m15 18-6-6 6-6"];
+        chevron_right => ["m9 18 6-6-6-6"];
+        chevron_up => ["m18 15-6-6-6 6"];
+        chevron_down => ["m6 9 6 6 6-6"];
 
-    icon!(play, &[&[(6.0, 3.0), (21.0, 12.0), (6.0, 21.0)]]);
-    icon!(
-        pause,
-        &[
-            &[(5.0, 3.0), (10.0, 3.0), (10.0, 21.0), (5.0, 21.0)],
-            &[(14.0, 3.0), (19.0, 3.0), (19.0, 21.0), (14.0, 21.0)]
-        ]
-    );
-    icon!(
-        back,
-        &[&[
-            (3.0, 12.0),
-            (11.0, 4.0),
-            (12.8, 5.8),
-            (7.9, 10.7),
-            (21.0, 10.7),
-            (21.0, 13.3),
-            (7.9, 13.3),
-            (12.8, 18.2),
-            (11.0, 20.0)
-        ]]
-    );
-    icon!(
-        rewind,
-        &[
-            &[(12.0, 4.0), (12.0, 20.0), (2.0, 12.0)],
-            &[(22.0, 4.0), (22.0, 20.0), (12.0, 12.0)]
-        ]
-    );
-    icon!(
-        forward,
-        &[
-            &[(2.0, 4.0), (12.0, 12.0), (2.0, 20.0)],
-            &[(12.0, 4.0), (22.0, 12.0), (12.0, 20.0)]
-        ]
-    );
-    icon!(
-        next,
-        &[
-            &[(3.0, 4.0), (15.0, 12.0), (3.0, 20.0)],
-            &[(17.0, 4.0), (21.0, 4.0), (21.0, 20.0), (17.0, 20.0)]
-        ]
-    );
-    icon!(
-        volume,
-        &[
-            &[
-                (2.0, 9.0),
-                (7.0, 9.0),
-                (13.0, 4.0),
-                (13.0, 20.0),
-                (7.0, 15.0),
-                (2.0, 15.0)
-            ],
-            &[(16.0, 8.0), (18.0, 8.0), (18.0, 16.0), (16.0, 16.0)],
-            &[(20.0, 5.0), (22.0, 5.0), (22.0, 19.0), (20.0, 19.0)]
-        ]
-    );
-    icon!(
-        muted,
-        &[
-            &[
-                (2.0, 9.0),
-                (7.0, 9.0),
-                (13.0, 4.0),
-                (13.0, 20.0),
-                (7.0, 15.0),
-                (2.0, 15.0)
-            ],
-            &[(15.0, 11.0), (22.0, 11.0), (22.0, 13.0), (15.0, 13.0)]
-        ]
-    );
-    icon!(
-        fullscreen,
-        &[
-            &[(3.0, 3.0), (10.0, 3.0), (10.0, 5.5), (5.5, 5.5), (5.5, 10.0), (3.0, 10.0)],
-            &[(14.0, 3.0), (21.0, 3.0), (21.0, 10.0), (18.5, 10.0), (18.5, 5.5), (14.0, 5.5)],
-            &[(3.0, 14.0), (5.5, 14.0), (5.5, 18.5), (10.0, 18.5), (10.0, 21.0), (3.0, 21.0)],
-            &[(18.5, 14.0), (21.0, 14.0), (21.0, 21.0), (14.0, 21.0), (14.0, 18.5), (18.5, 18.5)]
-        ]
-    );
-    icon!(
-        close,
-        &[&[
-            (5.0, 3.2),
-            (12.0, 10.2),
-            (19.0, 3.2),
-            (20.8, 5.0),
-            (13.8, 12.0),
-            (20.8, 19.0),
-            (19.0, 20.8),
-            (12.0, 13.8),
-            (5.0, 20.8),
-            (3.2, 19.0),
-            (10.2, 12.0),
-            (3.2, 5.0)
-        ]]
-    );
-    icon!(
-        check,
-        &[&[
-            (3.0, 12.5),
-            (5.0, 10.5),
-            (9.5, 15.0),
-            (19.0, 4.5),
-            (21.0, 6.3),
-            (9.6, 19.0)
-        ]]
-    );
-    icon!(
-        plus,
-        &[&[
-            (10.7, 3.0),
-            (13.3, 3.0),
-            (13.3, 10.7),
-            (21.0, 10.7),
-            (21.0, 13.3),
-            (13.3, 13.3),
-            (13.3, 21.0),
-            (10.7, 21.0),
-            (10.7, 13.3),
-            (3.0, 13.3),
-            (3.0, 10.7),
-            (10.7, 10.7)
-        ]]
-    );
+        // Playback
+        play => [
+            "M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z",
+        ];
+        pause => [
+            "M15 3h3a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z",
+            "M6 3h3a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z",
+        ];
+        rewind => [
+            "M12 6a2 2 0 0 0-3.414-1.414l-6 6a2 2 0 0 0 0 2.828l6 6A2 2 0 0 0 12 18z",
+            "M22 6a2 2 0 0 0-3.414-1.414l-6 6a2 2 0 0 0 0 2.828l6 6A2 2 0 0 0 22 18z",
+        ];
+        fast_forward => [
+            "M12 6a2 2 0 0 1 3.414-1.414l6 6a2 2 0 0 1 0 2.828l-6 6A2 2 0 0 1 12 18z",
+            "M2 6a2 2 0 0 1 3.414-1.414l6 6a2 2 0 0 1 0 2.828l-6 6A2 2 0 0 1 2 18z",
+        ];
+        skip_forward => [
+            "M21 4v16",
+            "M6.029 4.285A2 2 0 0 0 3 6v12a2 2 0 0 0 3.029 1.715l9.997-5.998a2 2 0 0 0 .003-3.432z",
+        ];
+        volume_2 => [
+            "M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z",
+            "M16 9a5 5 0 0 1 0 6",
+            "M19.364 18.364a9 9 0 0 0 0-12.728",
+        ];
+        volume_x => [
+            "M11 4.702a.7.7 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.7.7 0 0 0 11 19.298z",
+            "m16.5 14.5 5-5",
+            "m16.5 9.5 5 5",
+        ];
+        maximize => [
+            "M8 3H5a2 2 0 0 0-2 2v3",
+            "M21 8V5a2 2 0 0 0-2-2h-3",
+            "M3 16v3a2 2 0 0 0 2 2h3",
+            "M16 21h3a2 2 0 0 0 2-2v-3",
+        ];
+
+        // Actions and status
+        check => ["M20 6 9 17l-5-5"];
+        x => ["M18 6 6 18", "m6 6 12 12"];
+        plus => ["M5 12h14", "M12 5v14"];
+        minus => ["M5 12h14"];
+    }
 }
 
+/// Lucide's default stroke width on its 24-unit grid.
+pub const ICON_STROKE: f32 = 2.0;
+
+/// The 24-unit icon geometry scaled to `size`. Cached so a given icon at a
+/// given size keeps one `PathId` (and one retained mesh) across rebuilds.
+fn scaled_icon(path: &Arc<Path>, size: f32) -> Arc<Path> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static SCALED: RefCell<HashMap<(PathId, u32), Arc<Path>>> = RefCell::new(HashMap::new());
+    }
+    SCALED.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry((path.id(), size.to_bits()))
+            .or_insert_with(|| Arc::new(path.transformed(AffineTransform::scale(size / 24.0))))
+            .clone()
+    })
+}
+
+/// A Lucide icon drawn the way Lucide intends: outlined, round caps and
+/// joins, 2-unit stroke, on a square `size` box.
 pub fn icon(path: Arc<Path>, size: f32, color: Color) -> Widget {
-    Icon::new(path).size(size).brush(color).into()
+    icon_with(path, size, color, ICON_STROKE, false)
+}
+
+/// [`icon`] with an explicit stroke width (in 24-grid units) and an optional
+/// solid fill, for tiny marks or filled glyphs such as the brand's play.
+pub fn icon_with(path: Arc<Path>, size: f32, color: Color, stroke: f32, filled: bool) -> Widget {
+    let scaled = scaled_icon(&path, size);
+    let mut canvas = Canvas::default();
+    if filled {
+        canvas.fill_path(scaled.clone(), color, FillRule::NonZero);
+    }
+    canvas.stroke_path(
+        scaled,
+        color,
+        Stroke {
+            width: stroke * size / 24.0,
+            cap: LineCap::Round,
+            join: LineJoin::Round,
+            ..Stroke::default()
+        },
+    );
+    CustomPaint::new(Size::new(size, size), canvas.finish()).into()
+}
+
+fn icon_label(glyph: Arc<Path>, label: Option<String>, size: f32, text_size: f32, color: Color) -> Widget {
+    let mut children = vec![icon(glyph, size, color)];
+    if let Some(label) = label {
+        children.push(hgap(7.0));
+        children.push(text(label, text_size, FontWeight::W600, color).into());
+    }
+    row(children).into()
+}
+
+/// [`button`] with a leading Lucide icon.
+pub fn icon_text_button(
+    glyph: Arc<Path>,
+    label: impl Into<String>,
+    tone: Tone,
+    on_click: impl Fn() + 'static,
+) -> Widget {
+    let mut style = button_style(tone, 36.0);
+    style.padding = Some(EdgeInsets::only(13.0, 0.0, 16.0, 0.0));
+    style.alignment = Some(Alignment::CENTER);
+    let color = style.foreground.unwrap_or(TEXT);
+    Button::with_child(icon_label(glyph, Some(label.into()), 16.0, 13.5, color))
+        .style(style)
+        .on_click(on_click)
+        .into()
+}
+
+/// [`small_button`] holding a Lucide icon, optionally followed by a label.
+/// Without a label the button is a 28px square.
+pub fn small_icon_button(
+    glyph: Arc<Path>,
+    label: Option<&str>,
+    tone: Tone,
+    on_click: impl Fn() + 'static,
+) -> Widget {
+    let mut style = button_style(tone, 28.0);
+    style.alignment = Some(Alignment::CENTER);
+    if label.is_some() {
+        style.padding = Some(EdgeInsets::only(9.0, 0.0, 12.0, 0.0));
+    } else {
+        style.padding = Some(EdgeInsets::ZERO);
+        style.fixed_size = Some(Size::new(28.0, 28.0));
+    }
+    let color = style.foreground.unwrap_or(TEXT);
+    Button::with_child(icon_label(glyph, label.map(str::to_owned), 15.0, 12.5, color))
+        .style(style)
+        .on_click(on_click)
+        .into()
 }
 
 /// `Column::new` over an explicitly typed child list (keeps `.into()`

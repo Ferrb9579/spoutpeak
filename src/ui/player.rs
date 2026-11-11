@@ -144,6 +144,29 @@ fn pill(label: impl Into<String>, active: bool, on_click: impl Fn() + 'static) -
         .into()
 }
 
+/// A round 30px [`pill`] holding a Lucide icon.
+fn icon_pill(glyph: std::sync::Arc<Path>, on_click: impl Fn() + 'static) -> Widget {
+    let background = Color::rgba(255, 255, 255, 22);
+    Button::with_child(icon(glyph, 15.0, TEXT))
+        .style(ButtonStyle {
+            background: Some(background),
+            background_states: Some(
+                StateColor::new(background).hovered(Color::rgba(255, 255, 255, 48)),
+            ),
+            foreground: Some(TEXT),
+            border: Some(Border::new(0.0, Color::TRANSPARENT)),
+            border_radius: Some(15.0),
+            padding: Some(EdgeInsets::ZERO),
+            fixed_size: Some(Size::new(30.0, 30.0)),
+            alignment: Some(Alignment::CENTER),
+            overlay_color: Some(Color::TRANSPARENT.into()),
+            animation_duration: Some(std::time::Duration::ZERO),
+            ..ButtonStyle::default()
+        })
+        .on_click(on_click)
+        .into()
+}
+
 fn menu_item(label: String, selected: bool, on_click: impl Fn() + 'static) -> Widget {
     let background = if selected { ACCENT_DIM } else { Color::TRANSPARENT };
     Button::new(label)
@@ -293,9 +316,9 @@ fn menu_panel(app: &App, menu: Menu) -> Option<Widget> {
                                     MUTED,
                                 ))
                                 .into(),
-                            pill("−", false, move || earlier.adjust_subtitle_delay(-0.25)),
+                            icon_pill(icons::minus(), move || earlier.adjust_subtitle_delay(-0.25)),
                             hgap(6.0),
-                            pill("+", false, move || later.adjust_subtitle_delay(0.25)),
+                            icon_pill(icons::plus(), move || later.adjust_subtitle_delay(0.25)),
                         ])
                         .into(),
                         gap(8.0),
@@ -309,9 +332,9 @@ fn menu_panel(app: &App, menu: Menu) -> Option<Widget> {
                                     MUTED,
                                 ))
                                 .into(),
-                            pill("−", false, move || smaller.adjust_subtitle_size(-2.0)),
+                            icon_pill(icons::minus(), move || smaller.adjust_subtitle_size(-2.0)),
                             hgap(6.0),
-                            pill("+", false, move || bigger.adjust_subtitle_size(2.0)),
+                            icon_pill(icons::plus(), move || bigger.adjust_subtitle_size(2.0)),
                         ])
                         .into(),
                     ]),
@@ -470,7 +493,7 @@ fn top_bar(app: &App, title: &str, subtitle: &str) -> Widget {
         .padding(EdgeInsets::symmetric(18.0, 12.0))
         .child(
             hrow(vec![
-                icon_button(icon(icons::back(), 18.0, TEXT), 40.0, move || back.back()),
+                icon_button(icon(icons::arrow_left(), 20.0, TEXT), 40.0, move || back.back()),
                 hgap(12.0),
                 Expanded::new(col(titles)).into(),
             ])
@@ -512,19 +535,19 @@ fn bottom_bar(app: &App) -> Widget {
     ];
     if !live {
         controls.push(icon_button(
-            icon(icons::rewind(), 18.0, TEXT),
+            icon(icons::rewind(), 20.0, TEXT),
             40.0,
             action(|app| app.seek_by(-10.0)),
         ));
         controls.push(icon_button(
-            icon(icons::forward(), 18.0, TEXT),
+            icon(icons::fast_forward(), 20.0, TEXT),
             40.0,
             action(|app| app.seek_by(10.0)),
         ));
     }
     if has_next {
         controls.push(icon_button(
-            icon(icons::next(), 18.0, TEXT),
+            icon(icons::skip_forward(), 20.0, TEXT),
             40.0,
             action(|app| {
                 if let Some(next) = app.player.state.peek(|s| s.next.clone()) {
@@ -536,8 +559,8 @@ fn bottom_bar(app: &App) -> Widget {
     controls.push(hgap(6.0));
     controls.push(icon_button(
         icon(
-            if muted_now || volume <= 0.0 { icons::muted() } else { icons::volume() },
-            18.0,
+            if muted_now || volume <= 0.0 { icons::volume_x() } else { icons::volume_2() },
+            20.0,
             TEXT,
         ),
         40.0,
@@ -581,7 +604,7 @@ fn bottom_bar(app: &App) -> Widget {
         controls.push(hgap(8.0));
     }
     controls.push(icon_button(
-        icon(icons::fullscreen(), 18.0, TEXT),
+        icon(icons::maximize(), 20.0, TEXT),
         40.0,
         action(|app| app.toggle_fullscreen()),
     ));

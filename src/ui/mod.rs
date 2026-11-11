@@ -36,7 +36,7 @@ fn nav_button(app: &App, label: &str, glyph: Arc<Path>, route: Route, active: bo
             .color(if active { ACCENT } else { Color::TRANSPARENT })
             .into(),
         hgap(13.0),
-        icon(glyph, 17.0, if active { ACCENT } else { MUTED }),
+        icon(glyph, 18.0, if active { ACCENT } else { MUTED }),
         hgap(13.0),
         text(
             label,
@@ -88,7 +88,7 @@ fn sidebar(app: &App, current: Route) -> Widget {
                             .color(ACCENT)
                             .border_radius(BorderRadius::all(Radius::circular(9.0))),
                     )
-                    .child(icon(icons::play(), 13.0, ON_ACCENT))
+                    .child(icon_with(icons::play(), 16.0, ON_ACCENT, ICON_STROKE, true))
                     .into(),
                 hgap(11.0),
                 text("Spoutpeak", 18.0, FontWeight::W700, TEXT).into(),
@@ -99,7 +99,7 @@ fn sidebar(app: &App, current: Route) -> Widget {
         nav_label("BROWSE"),
     ];
     for (label, glyph, route) in [
-        ("Home", icons::home(), Route::Board),
+        ("Home", icons::house(), Route::Board),
         ("Discover", icons::compass(), Route::Discover),
         ("Library", icons::bookmark(), Route::Library),
         ("Search", icons::search(), Route::Search),

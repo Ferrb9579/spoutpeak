@@ -85,8 +85,9 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
     let in_library = app.in_library(meta.id());
     let mut actions: Vec<Widget> = vec![{
         let (app, meta) = (app.clone(), meta.clone());
-        button(
-            if in_library { "✓  In library" } else { "+  Add to library" },
+        icon_text_button(
+            if in_library { icons::check() } else { icons::plus() },
+            if in_library { "In library" } else { "Add to library" },
             if in_library { Tone::Neutral } else { Tone::Primary },
             move || app.toggle_library(&meta),
         )
@@ -239,7 +240,9 @@ fn streams_pane(app: &App, groups: &[StreamGroup], video: &Video, is_series: boo
         let app = app.clone();
         children.push(
             row(vec![
-                small_button("‹  Episodes", Tone::Neutral, move || app.clear_video()),
+                small_icon_button(icons::chevron_left(), Some("Episodes"), Tone::Neutral, move || {
+                    app.clear_video()
+                }),
                 hgap(12.0),
                 SizedBox::new()
                     .width(PANEL_INNER - 130.0)
@@ -451,7 +454,7 @@ pub fn screen(app: &App) -> Widget {
 
     let back = {
         let app = app.clone();
-        icon_button(icon(icons::back(), 18.0, TEXT), 40.0, move || app.back())
+        icon_button(icon(icons::arrow_left(), 20.0, TEXT), 40.0, move || app.back())
     };
 
     let content = vcol(vec![

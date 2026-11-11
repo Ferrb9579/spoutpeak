@@ -140,8 +140,9 @@ fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
             row(vec![
                 button("View details", Tone::Primary, move || open.open_detail(open_meta.clone())),
                 hgap(10.0),
-                button(
-                    if saved { "✓  In library" } else { "+  Library" },
+                icon_text_button(
+                    if saved { icons::check() } else { icons::plus() },
+                    if saved { "In library" } else { "Library" },
                     Tone::Neutral,
                     move || save.toggle_library(&save_meta),
                 ),
