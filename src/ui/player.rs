@@ -1110,7 +1110,7 @@ fn bottom_bar(app: &App) -> Widget {
 
 /// "Up next" countdown in the bottom-right corner, above the control bar
 /// when it is showing.
-fn up_next_card(app: &App, next: &crate::media::types::Video, left: u32, lifted: bool) -> Widget {
+fn up_next_card(app: &App, next: &crate::addons::types::Video, left: u32, lifted: bool) -> Widget {
     let (play, cancel, video) = (app.clone(), app.clone(), next.clone());
     let card = Container::new()
         .width(340.0)

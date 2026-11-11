@@ -113,19 +113,12 @@ fn sidebar(app: &App, current: Route) -> Widget {
     let footer = {
         let app = app.clone();
         Builder::new(move |_| {
-            let account = app
-                .profile
-                .read(|p| p.auth.as_ref().map(|a| a.user.email.clone()));
             let (dot, server) = match app.server_online.get() {
                 Some(true) => (GOOD, "Torrent engine ready"),
                 Some(false) => (DANGER, "Torrent engine stopped"),
                 None => (FAINT, "Starting torrent engine"),
             };
-            let initial = account
-                .as_deref()
-                .and_then(|a| a.chars().next())
-                .map(|c| c.to_uppercase().to_string())
-                .unwrap_or_else(|| "?".to_owned());
+            let titles = app.library.read(|l| l.values().filter(|i| !i.removed).count());
             let open = app.clone();
             GestureDetector::new(
                 Container::new()
@@ -137,36 +130,14 @@ fn sidebar(app: &App, current: Route) -> Widget {
                             .border_radius(BorderRadius::all(Radius::circular(14.0))),
                     )
                     .child(col(vec![
-                        row(vec![
-                            Container::new()
-                                .width(30.0)
-                                .height(30.0)
-                                .radius(15.0)
-                                .color(SURFACE_HOVER)
-                                .alignment(Alignment::CENTER)
-                                .child(text(initial, 13.0, FontWeight::W700, TEXT))
-                                .into(),
-                            hgap(10.0),
-                            SizedBox::new()
-                                .width(NAV_WIDTH - 66.0)
-                                .child(col(vec![
-                                    line(
-                                        account.clone().unwrap_or_else(|| "Guest".to_owned()),
-                                        12.5,
-                                        FontWeight::W600,
-                                        TEXT,
-                                    ),
-                                    gap(1.0),
-                                    line(
-                                        if account.is_some() { "Synced with Media" } else { "Sign in to sync" },
-                                        11.0,
-                                        FontWeight::W400,
-                                        FAINT,
-                                    ),
-                                ]))
-                                .into(),
-                        ])
-                        .into(),
+                        line(
+                            format!("{titles} in your library"),
+                            12.5,
+                            FontWeight::W600,
+                            TEXT,
+                        ),
+                        gap(1.0),
+                        line("Saved on this PC", 11.0, FontWeight::W400, FAINT),
                         gap(10.0),
                         row(vec![
                             Container::new().width(7.0).height(7.0).radius(3.5).color(dot).into(),

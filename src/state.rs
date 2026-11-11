@@ -6,9 +6,8 @@
 
 use crate::player::PlayerUi;
 use crate::store::{self, Profile};
-use crate::media::addon::{self, CatalogRef};
-use crate::media::types::*;
-use crate::media::api;
+use crate::addons::{self, CatalogRef};
+use crate::addons::types::*;
 use incular::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -287,12 +286,6 @@ pub struct AddonsState {
     pub busy: bool,
 }
 
-#[derive(Default)]
-pub struct AccountState {
-    pub busy: bool,
-    pub error: Option<String>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LibrarySort {
     Recent,
@@ -315,8 +308,6 @@ pub struct Controllers {
     /// Keyboard focus for global shortcuts; must outlive rebuilds.
     pub focus: FocusNode,
     pub player_focus: FocusNode,
-    pub email: TextEditingController,
-    pub password: TextEditingController,
     pub player_path: TextEditingController,
     pub download_dir: TextEditingController,
     pub board: ScrollController,
@@ -345,8 +336,6 @@ impl Controllers {
             open_url: TextEditingController::new(),
             focus: FocusNode::new(),
             player_focus: FocusNode::new(),
-            email: TextEditingController::new(),
-            password: TextEditingController::new(),
             player_path: TextEditingController::with_text(&profile.settings.custom_player_path),
             download_dir: TextEditingController::with_text(&profile.settings.download_dir),
             board: ScrollController::new(),
@@ -392,7 +381,6 @@ pub struct App {
     pub season_open: Signal<bool>,
     pub season_filter: Signal<String>,
     pub addons: Shared<AddonsState>,
-    pub account: Shared<AccountState>,
     /// Built-in torrent engine: `None` while starting, then whether it runs.
     pub server_online: Signal<Option<bool>>,
     /// False while the startup screen is up.
@@ -431,7 +419,6 @@ impl App {
                 filter: String::new(),
                 busy: false,
             }),
-            account: Shared::new(AccountState::default()),
             server_online: Signal::new(None),
             booted: Signal::new(false),
             search_typing: Rc::new(std::cell::Cell::new(0)),
@@ -447,7 +434,7 @@ impl App {
         if has_addons {
             self.load_board();
         } else {
-            spawn(addon::default_addons(), |app, addons| {
+            spawn(addons::default_addons(), |app, addons| {
                 if addons.is_empty() {
                     app.notify("Could not reach the default addons. Check your connection.");
                     app.finish_boot();
@@ -461,7 +448,6 @@ impl App {
                 app.load_board();
             });
         }
-        self.sync_account();
         self.start_streaming();
         // Never hold the startup screen hostage to a slow network.
         spawn(
@@ -571,7 +557,7 @@ impl App {
 
     pub fn load_board(&self) {
         let addons = self.profile.peek(|p| p.addons.clone());
-        let refs: Vec<CatalogRef> = addon::all_catalogs(&addons)
+        let refs: Vec<CatalogRef> = addons::all_catalogs(&addons)
             .into_iter()
             .filter(|c| c.catalog.is_browsable())
             .take(40)
@@ -585,7 +571,7 @@ impl App {
             let key = reference.key();
             spawn(
                 async move {
-                    addon::catalog(
+                    addons::catalog(
                         &reference.addon,
                         &reference.catalog.kind,
                         &reference.catalog.id,
@@ -623,7 +609,7 @@ impl App {
     /// Catalogs Discover can show: nothing required beyond a genre.
     pub fn discover_catalogs(&self) -> Vec<CatalogRef> {
         let addons = self.profile.peek(|p| p.addons.clone());
-        addon::all_catalogs(&addons)
+        addons::all_catalogs(&addons)
             .into_iter()
             .filter(|c| {
                 c.catalog
@@ -707,7 +693,7 @@ impl App {
         self.discover.write(|d| d.loading = true);
         spawn(
             async move {
-                addon::catalog(
+                addons::catalog(
                     &reference.addon,
                     &reference.catalog.kind,
                     &reference.catalog.id,
@@ -805,7 +791,7 @@ impl App {
         let refs: Vec<CatalogRef> = if query.is_empty() {
             Vec::new()
         } else {
-            addon::all_catalogs(&addons)
+            addons::all_catalogs(&addons)
                 .into_iter()
                 .filter(|c| {
                     c.catalog.supports_extra("search")
@@ -828,7 +814,7 @@ impl App {
             let extra = vec![("search".to_owned(), query.clone())];
             spawn(
                 async move {
-                    addon::catalog(
+                    addons::catalog(
                         &reference.addon,
                         &reference.catalog.kind,
                         &reference.catalog.id,
@@ -885,7 +871,7 @@ impl App {
         self.push(Route::Detail);
         let addons = self.profile.peek(|p| p.addons.clone());
         spawn(
-            async move { addon::meta(&addons, &kind, &id).await },
+            async move { addons::meta(&addons, &kind, &id).await },
             move |app, result| app.detail_loaded(generation, result),
         );
     }
@@ -1021,7 +1007,7 @@ impl App {
             let name = addon_descriptor.manifest.name.clone();
             let (kind, video_id) = (kind.clone(), video_id.clone());
             spawn(
-                async move { addon::streams(&addon_descriptor, &kind, &video_id).await },
+                async move { addons::streams(&addon_descriptor, &kind, &video_id).await },
                 move |app, result| {
                     if app.detail.peek(|d| d.generation) != generation {
                         return;
@@ -1058,7 +1044,7 @@ impl App {
             return;
         }
         let now = now_iso();
-        let (item, added) = self.library.write(|library| {
+        let added = self.library.write(|library| {
             let item = library.entry(id.clone()).or_insert_with(|| LibraryItem {
                 id: id.clone(),
                 removed: true,
@@ -1072,10 +1058,9 @@ impl App {
             item.removed = !item.removed;
             item.temp = false;
             item.mtime = Some(now.clone());
-            (item.clone(), !item.removed)
+            !item.removed
         });
         self.library.peek(store::save_library);
-        self.push_library(vec![item]);
         self.notify(if added {
             "Added to your library"
         } else {
@@ -1085,17 +1070,13 @@ impl App {
 
     pub fn dismiss_continue_watching(&self, id: &str) {
         let now = now_iso();
-        let item = self.library.write(|library| {
-            library.get_mut(id).map(|item| {
+        self.library.write(|library| {
+            if let Some(item) = library.get_mut(id) {
                 item.state.time_offset = 0.0;
                 item.mtime = Some(now);
-                item.clone()
-            })
+            }
         });
         self.library.peek(store::save_library);
-        if let Some(item) = item {
-            self.push_library(vec![item]);
-        }
     }
 
     /// Records playback progress. `ended` advances series to `next`.
@@ -1115,14 +1096,14 @@ impl App {
             return;
         }
         let now = now_iso();
-        let item = self.library.write_silent(|library| {
+        self.library.write_silent(|library| {
             let item = library.entry(id.clone()).or_insert_with(|| LibraryItem {
                 id: id.clone(),
                 name: meta.title().to_owned(),
                 kind: meta.kind.clone(),
                 poster: meta.poster.clone(),
                 poster_shape: meta.poster_shape.clone(),
-                // Like Media: watched-but-not-added items are temporary.
+                // Watched but not added to the library: kept, but temporary.
                 removed: true,
                 temp: true,
                 ctime: Some(now.clone()),
@@ -1152,139 +1133,11 @@ impl App {
                 }
             }
             item.mtime = Some(now.clone());
-            item.clone()
         });
         if push {
             self.library.write(|_| {});
             self.library.peek(store::save_library);
-            self.push_library(vec![item]);
         }
-    }
-
-    fn auth_key(&self) -> Option<String> {
-        self.profile.peek(|p| p.auth.as_ref().map(|a| a.key.clone()))
-    }
-
-    fn push_library(&self, items: Vec<LibraryItem>) {
-        let Some(key) = self.auth_key() else { return };
-        spawn(
-            async move { api::library_put(&key, &items).await },
-            |app, result| {
-                if let Err(error) = result {
-                    app.notify(format!("Library sync failed: {error}"));
-                }
-            },
-        );
-    }
-
-    // ------------------------------------------------------------ account
-
-    /// Pulls addons and library for the signed-in user and merges them.
-    pub fn sync_account(&self) {
-        let Some(key) = self.auth_key() else { return };
-        let addons_key = key.clone();
-        spawn(
-            async move { api::addon_collection_get(&addons_key).await },
-            |app, result| match result {
-                Ok(addons) if !addons.is_empty() => {
-                    let changed = app.profile.peek(|p| p.addons != addons);
-                    if changed {
-                        app.profile.write(|p| p.addons = addons);
-                        app.save_profile();
-                        app.load_board();
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => app.notify(format!("Addon sync failed: {error}")),
-            },
-        );
-        spawn(
-            async move { api::library_get_all(&key).await },
-            |app, result| match result {
-                Ok(remote) => app.merge_library(remote),
-                Err(error) => app.notify(format!("Library sync failed: {error}")),
-            },
-        );
-    }
-
-    fn merge_library(&self, remote: Vec<LibraryItem>) {
-        let remote_ids: std::collections::HashSet<String> =
-            remote.iter().map(|i| i.id.clone()).collect();
-        let newer_locally = self.library.write(|library| {
-            for item in remote {
-                let keep_local = library
-                    .get(&item.id)
-                    .is_some_and(|local| local.mtime > item.mtime);
-                if !keep_local {
-                    library.insert(item.id.clone(), item);
-                }
-            }
-            library
-                .values()
-                .filter(|local| !remote_ids.contains(&local.id))
-                .cloned()
-                .collect::<Vec<_>>()
-        });
-        self.library.peek(store::save_library);
-        self.push_library(newer_locally);
-    }
-
-    pub fn sign_in(&self, register: bool) {
-        let email = self.controllers.email.text().trim().to_owned();
-        let password = self.controllers.password.text();
-        if email.is_empty() || password.is_empty() {
-            self.account
-                .write(|a| a.error = Some("Enter your email and password.".into()));
-            return;
-        }
-        self.account.write(|a| {
-            a.busy = true;
-            a.error = None;
-        });
-        spawn(
-            async move {
-                if register {
-                    api::register(&email, &password).await
-                } else {
-                    api::login(&email, &password).await
-                }
-            },
-            |app, result| {
-                match result {
-                    Ok(auth) => {
-                        app.controllers.password.set_text("");
-                        app.account.write(|a| a.busy = false);
-                        app.notify(format!("Signed in as {}", auth.user.email));
-                        app.profile.write(|p| p.auth = Some(auth));
-                        app.save_profile();
-                        app.sync_account();
-                    }
-                    Err(error) => app.account.write(|a| {
-                        a.busy = false;
-                        a.error = Some(error);
-                    }),
-                };
-            },
-        );
-    }
-
-    pub fn sign_out(&self) {
-        if let Some(key) = self.auth_key() {
-            spawn(async move { api::logout(&key).await }, |_, _| {});
-        }
-        self.profile.write(|p| {
-            p.auth = None;
-            p.addons.clear();
-        });
-        self.library.write(|l| l.clear());
-        self.library.peek(store::save_library);
-        self.save_profile();
-        self.notify("Signed out");
-        spawn(addon::default_addons(), |app, addons| {
-            app.profile.write(|p| p.addons = addons);
-            app.save_profile();
-            app.load_board();
-        });
     }
 
     // ------------------------------------------------------------- addons
@@ -1292,22 +1145,11 @@ impl App {
     fn addons_changed(&self) {
         self.save_profile();
         self.load_board();
-        if let Some(key) = self.auth_key() {
-            let addons = self.profile.peek(|p| p.addons.clone());
-            spawn(
-                async move { api::addon_collection_set(&key, &addons).await },
-                |app, result| {
-                    if let Err(error) = result {
-                        app.notify(format!("Addon sync failed: {error}"));
-                    }
-                },
-            );
-        }
     }
 
     pub fn install_addon_from_input(&self) {
         let input = self.controllers.addon_url.text();
-        match addon::normalize_transport_url(&input) {
+        match addons::normalize_transport_url(&input) {
             Some(url) => self.install_addon(url),
             None => self.notify("Paste an addon URL first"),
         }
@@ -1316,7 +1158,7 @@ impl App {
     pub fn install_addon(&self, transport_url: String) {
         self.addons.write(|a| a.busy = true);
         spawn(
-            async move { addon::fetch_manifest(&transport_url).await },
+            async move { addons::fetch_manifest(&transport_url).await },
             |app, result| {
                 app.addons.write(|a| a.busy = false);
                 match result {
@@ -1386,7 +1228,7 @@ impl App {
             return;
         }
         self.addons.write(|a| a.community = Load::Loading);
-        spawn(addon::community_addons(), |app, result| {
+        spawn(addons::community_addons(), |app, result| {
             app.addons.write(|a| {
                 a.community = match result {
                     Ok(list) => Load::Ready(list),

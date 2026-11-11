@@ -2,7 +2,7 @@
 
 use crate::images::{self, Picture};
 use crate::state::{App, CatalogRow, Load, Route};
-use crate::media::types::Meta;
+use crate::addons::types::Meta;
 use crate::theme::*;
 use incular::controls::{Button, ButtonStyle, StateColor};
 use incular::prelude::*;

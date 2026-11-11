@@ -1,9 +1,9 @@
-//! Media addon-protocol and API data model.
+//! Addon-protocol data model.
 //!
 //! Addons in the wild are sloppy (numbers as strings, nulls where arrays are
 //! expected, missing fields), so every field is defaulted and the ambiguous
 //! ones go through lenient deserializers. Unknown fields are preserved on the
-//! types we write back to the Media API (manifests, library items).
+//! types we save back to disk (manifests, library items).
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
@@ -780,7 +780,7 @@ impl LibraryItem {
             0.0
         }
     }
-    /// Same rule Media uses for its Continue Watching row.
+    /// Which items belong in the Continue Watching row.
     pub fn is_in_continue_watching(&self) -> bool {
         self.kind != "other" && (!self.removed || self.temp) && self.state.time_offset > 0.0
     }
@@ -794,25 +794,6 @@ impl LibraryItem {
             ..Meta::default()
         }
     }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct User {
-    #[serde(default, rename = "_id")]
-    pub id: String,
-    #[serde(default)]
-    pub email: String,
-    #[serde(default, deserialize_with = "lenient_string")]
-    pub avatar: Option<String>,
-    #[serde(flatten)]
-    pub other: Map<String, Value>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Auth {
-    #[serde(rename = "authKey", alias = "key")]
-    pub key: String,
-    pub user: User,
 }
 
 pub fn now_iso() -> String {

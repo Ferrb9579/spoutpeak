@@ -4,6 +4,7 @@
     windows_subsystem = "windows"
 )]
 
+mod addons;
 mod devtools;
 mod downloads;
 mod images;
@@ -11,7 +12,6 @@ mod player;
 mod state;
 mod store;
 mod streaming;
-mod media;
 mod theme;
 mod ui;
 mod util;

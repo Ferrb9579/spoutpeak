@@ -44,7 +44,7 @@ fn step_row(state: Step, label: &str, detail: String) -> Widget {
 
 pub fn screen(app: &App) -> Widget {
     const WIDTH: f32 = 420.0;
-    let (addons, signed_in) = app.profile.read(|p| (p.addons.len(), p.auth.is_some()));
+    let addons = app.profile.read(|p| p.addons.len());
     let (rows_done, rows_total, items) = app.board.read(|b| {
         (
             b.rows.iter().filter(|r| r.items != Load::Loading).count(),
@@ -137,7 +137,7 @@ pub fn screen(app: &App) -> Widget {
                 step_row(
                     Step::Done,
                     "Profile",
-                    if signed_in { "Signed in".to_owned() } else { "Guest".to_owned() },
+                    "Loaded".to_owned(),
                 ),
                 step_row(
                     addons_step,

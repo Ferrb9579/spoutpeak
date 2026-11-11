@@ -1,10 +1,12 @@
-//! Addon transport: the HTTP flavour of the Media addon protocol.
+//! Addons: the HTTP addon protocol that every content source speaks.
 //!
 //! `{base}/{resource}/{type}/{id}.json`, or with extra arguments
 //! `{base}/{resource}/{type}/{id}/{k=v&k2=v2}.json`.
 
-use super::types::*;
+pub mod types;
+
 use serde::de::DeserializeOwned;
+use types::*;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -13,7 +15,7 @@ pub const OPENSUBTITLES: &str = "https://opensubtitles-v3.strem.io/manifest.json
 pub const WATCHHUB: &str = "https://watchhub.strem.io/manifest.json";
 pub const COMMUNITY_CATALOG: &str = "https://api.strem.io/addonscollection.json";
 
-/// Addons every Media profile starts with.
+/// Addons a new profile starts with.
 pub const DEFAULT_ADDONS: &[&str] = &[CINEMETA, OPENSUBTITLES, WATCHHUB];
 
 pub fn http() -> &'static reqwest::Client {
@@ -28,7 +30,7 @@ pub fn http() -> &'static reqwest::Client {
     })
 }
 
-/// Accepts what users paste: `media://…`, a bare host, a URL with or
+/// Accepts what users paste: an addon install link (`media://…`, the scheme addon sites use), a bare host, a URL with or
 /// without `manifest.json`.
 pub fn normalize_transport_url(input: &str) -> Option<String> {
     let mut url = input.trim().to_owned();
@@ -123,7 +125,7 @@ fn short_error(error: &reqwest::Error) -> String {
 pub async fn fetch_manifest(transport_url: &str) -> Result<Descriptor, String> {
     let manifest: Manifest = get_json(transport_url).await?;
     if manifest.id.is_empty() {
-        return Err("not a Media addon manifest".into());
+        return Err("not an addon manifest".into());
     }
     Ok(Descriptor {
         transport_url: transport_url.to_owned(),
@@ -191,7 +193,7 @@ pub async fn subtitles(
     Ok(get_json::<SubtitlesResponse>(&url).await?.subtitles)
 }
 
-/// The community addon list Media shows under "Community addons".
+/// The public community addon list shown under "Community addons".
 pub async fn community_addons() -> Result<Vec<Descriptor>, String> {
     get_json::<Vec<Descriptor>>(COMMUNITY_CATALOG).await
 }

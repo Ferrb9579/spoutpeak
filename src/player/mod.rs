@@ -1,4 +1,4 @@
-//! Playback orchestration: turning a Media stream into something playing,
+//! Playback orchestration: turning an addon stream into something playing,
 //! tracking progress into the library, subtitles, and next-episode binge.
 
 pub mod engine;
@@ -6,9 +6,9 @@ pub mod subtitles;
 
 use crate::state::{App, Route, Shared, spawn, ui};
 use crate::store::{PlayerKind, Settings, SubtitleStyle};
-use crate::media::addon::{self, http};
+use crate::addons::{self, http};
 use crate::streaming::{self, TorrentStats};
-use crate::media::types::*;
+use crate::addons::types::*;
 use crate::util::same_language;
 use engine::{Engine, Event, MediaInfo, OpenRequest, Track};
 use incular::prelude::*;
@@ -572,7 +572,7 @@ impl App {
         for descriptor in addons {
             let (kind, video_id, extra) = (kind.clone(), video_id.clone(), extra.clone());
             spawn(
-                async move { addon::subtitles(&descriptor, &kind, &video_id, &extra).await },
+                async move { addons::subtitles(&descriptor, &kind, &video_id, &extra).await },
                 move |app, result| {
                     if app.player.session_id.get() != session_id {
                         return;

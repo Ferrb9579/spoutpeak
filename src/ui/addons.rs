@@ -2,8 +2,8 @@
 
 use super::widgets::*;
 use crate::state::{AddonsTab, App, Load};
-use crate::media::addon::configure_url;
-use crate::media::types::Descriptor;
+use crate::addons::configure_url;
+use crate::addons::types::Descriptor;
 use crate::theme::*;
 use incular::prelude::*;
 use std::rc::Rc;

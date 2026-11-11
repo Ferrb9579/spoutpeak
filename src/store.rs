@@ -1,6 +1,6 @@
-//! On-disk profile: account, installed addons, settings and the library.
+//! On-disk profile: installed addons, settings and the library.
 
-use crate::media::types::{Auth, Descriptor, LibraryItem};
+use crate::addons::types::{Descriptor, LibraryItem};
 use crate::util::data_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -174,7 +174,6 @@ impl Default for TorrentSettings {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
-    pub auth: Option<Auth>,
     pub addons: Vec<Descriptor>,
     pub settings: Settings,
 }

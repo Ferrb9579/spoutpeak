@@ -3,8 +3,8 @@
 //! Partial files keep a `.part` extension and resume with a Range request.
 
 use crate::state::{App, spawn, ui};
-use crate::media::addon::http;
-use crate::media::types::{Meta, Stream, StreamSource, Video};
+use crate::addons::http;
+use crate::addons::types::{Meta, Stream, StreamSource, Video};
 use crate::util::data_dir;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

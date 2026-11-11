@@ -3,7 +3,7 @@
 //! widget showing that image rebuilds.
 
 use crate::state::spawn;
-use crate::media::addon::http;
+use crate::addons::http;
 use crate::util::{cache_dir, hash_hex};
 use incular::prelude::*;
 use std::cell::RefCell;

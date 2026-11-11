@@ -378,7 +378,7 @@ impl Inner {
     fn open(self: Arc<Self>) {
         let Some((_, ffprobe)) = tools() else {
             self.emit(Event::Error(
-                "ffmpeg was not found. Install ffmpeg (or Media) or choose an external player in Settings."
+                "ffmpeg is missing from the Spoutpeak folder. Reinstall Spoutpeak or choose an external player in Settings."
                     .into(),
             ));
             return;

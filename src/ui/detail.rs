@@ -2,7 +2,7 @@
 
 use super::widgets::*;
 use crate::state::{App, Load, Quality, StreamGroup};
-use crate::media::types::{Meta, Stream, StreamSource, Video};
+use crate::addons::types::{Meta, Stream, StreamSource, Video};
 use crate::theme::*;
 use incular::prelude::*;
 use incular::controls::{Button, ButtonStyle, StateColor};

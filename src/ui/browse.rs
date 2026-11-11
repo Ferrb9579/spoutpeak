@@ -2,7 +2,7 @@
 
 use super::widgets::*;
 use crate::state::{App, LibrarySort, Load, ui};
-use crate::media::types::{LibraryItem, Meta};
+use crate::addons::types::{LibraryItem, Meta};
 use crate::theme::*;
 use incular::prelude::*;
 use std::collections::HashMap;
@@ -379,7 +379,6 @@ pub fn library(app: &App) -> Widget {
         }),
     }
 
-    let signed_in = app.profile.read(|p| p.auth.is_some());
     let progress: Rc<HashMap<String, f32>> = Rc::new(
         all.iter()
             .filter(|i| i.state.time_offset > 0.0 && i.state.duration > 0.0)
@@ -391,14 +390,7 @@ pub fn library(app: &App) -> Widget {
     let body: Widget = if metas.is_empty() {
         Padding::new(
             PAGE_PADDING,
-            notice(
-                if signed_in {
-                    "Your library is empty. Add something from its details page."
-                } else {
-                    "Your library is empty. Add titles from their details page; sign in under Settings to sync with your Media account."
-                },
-                MUTED,
-            ),
+            notice("Your library is empty. Add something from its details page.", MUTED),
         )
         .into()
     } else {

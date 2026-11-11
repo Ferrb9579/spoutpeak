@@ -1,4 +1,4 @@
-//! Settings: Media account, playback, streaming.
+//! Settings: playback, streaming, downloads.
 
 use super::widgets::*;
 use crate::state::App;
@@ -85,87 +85,6 @@ fn toggle(app: &App, on: bool, apply: fn(&mut Settings, bool)) -> Widget {
         on,
         apply,
     )
-}
-
-fn password_field(app: &App) -> Widget {
-    let submit = app.clone();
-    Container::new()
-        .width(300.0)
-        .height(40.0)
-        .padding(EdgeInsets::symmetric(12.0, 0.0))
-        .alignment(Alignment::CENTER_LEFT)
-        .decoration(
-            BoxDecoration::new()
-                .color(SURFACE_HI)
-                .border_radius(BorderRadius::all(Radius::circular(10.0))),
-        )
-        .child(
-            EditableText::new(app.controllers.password.clone())
-                .size(Size::new(276.0, 22.0))
-                .style(style(14.0, FontWeight::W400, TEXT))
-                .placeholder("Password")
-                .placeholder_color(FAINT)
-                .obscure_text(true)
-                .on_submit(move |_| submit.sign_in(false)),
-        )
-        .into()
-}
-
-fn account_card(app: &App) -> Widget {
-    let user = app.profile.read(|p| p.auth.as_ref().map(|a| a.user.email.clone()));
-    let (busy, error) = app.account.read(|a| (a.busy, a.error.clone()));
-    let mut children: Vec<Widget> = vec![section("Media account"), gap(6.0)];
-    match user {
-        Some(email) => {
-            let library_count = app.library.read(|l| l.values().filter(|i| !i.removed).count());
-            children.push(muted(format!(
-                "Signed in as {email}. Addons and library ({library_count} titles) sync with your Media account."
-            )));
-            children.push(gap(14.0));
-            let (sync, out) = (app.clone(), app.clone());
-            children.push(
-                row(vec![
-                    button("Sync now", Tone::Neutral, move || {
-                        sync.sync_account();
-                        sync.notify("Syncing with Media…");
-                    }),
-                    hgap(10.0),
-                    button("Sign out", Tone::Danger, move || out.sign_out()),
-                ])
-                .into(),
-            );
-        }
-        None => {
-            children.push(muted(
-                "Sign in to bring your installed addons, library and watch progress from Media. Without an account everything stays on this device.",
-            ));
-            children.push(gap(14.0));
-            let (login, register) = (app.clone(), app.clone());
-            let mut email = input(&app.controllers.email, "Email", 300.0, |_| {});
-            email = email.style(crate::theme::field_style());
-            children.push(
-                Wrap::new(vec![
-                    email.into(),
-                    password_field(app),
-                    button(
-                        if busy { "Signing in…" } else { "Sign in" },
-                        Tone::Primary,
-                        move || login.sign_in(false),
-                    ),
-                    button("Create account", Tone::Ghost, move || register.sign_in(true)),
-                ])
-                .spacing(10.0)
-                .run_spacing(10.0)
-                .cross_axis_alignment(WrapCrossAlignment::Center)
-                .into(),
-            );
-            if let Some(error) = error {
-                children.push(gap(10.0));
-                children.push(text(error, 13.0, FontWeight::W500, DANGER).into());
-            }
-        }
-    }
-    card(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
 }
 
 /// Card title with a leading Lucide icon.
@@ -565,7 +484,7 @@ pub fn screen(app: &App) -> Widget {
             section("About"),
             gap(6.0),
             muted(format!(
-                "Spoutpeak {} - a native addon-based client built with Incular.",
+                "Spoutpeak {} - a native, addon-based media center built with Incular.",
                 env!("CARGO_PKG_VERSION")
             )),
             gap(4.0),
@@ -579,8 +498,6 @@ pub fn screen(app: &App) -> Widget {
         SingleChildScrollView::new(Padding::new(
             PAGE_PADDING,
             col(vec![
-                account_card(app),
-                gap(16.0),
                 playback_card(app, &settings),
                 gap(16.0),
                 controls_card(app, &settings),
