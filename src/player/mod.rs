@@ -78,6 +78,10 @@ pub struct PlayerState {
     pub fullscreen: bool,
     pub torrent: Option<TorrentStats>,
     pub next: Option<Video>,
+    /// Whole seconds left while the "Up next" card is showing.
+    pub up_next: Option<u32>,
+    /// The card was dismissed: no card and no autoplay for this video.
+    pub up_next_cancelled: bool,
 }
 
 struct Session {
@@ -146,6 +150,8 @@ impl PlayerUi {
                 fullscreen: false,
                 torrent: None,
                 next: None,
+                up_next: None,
+                up_next_cancelled: false,
             }),
             engine: Rc::new(RefCell::new(None)),
             cues: Rc::new(RefCell::new(Vec::new())),
@@ -391,6 +397,7 @@ impl App {
         let video_id = video.as_ref().map(|v| v.id().to_owned());
         let start = meta
             .as_ref()
+            .filter(|_| settings.resume_playback)
             .and_then(|m| {
                 self.library.peek(|l| {
                     l.get(m.id()).and_then(|item| {
@@ -470,7 +477,7 @@ impl App {
             s.paused = false;
             s.stalled = false;
             s.has_video = true;
-            s.speed = 1.0;
+            s.speed = settings.default_speed;
             s.audio_tracks.clear();
             s.audio_index = 0;
             s.audio_delay = 0.0;
@@ -483,6 +490,8 @@ impl App {
             s.menu = Menu::None;
             s.torrent = None;
             s.next = next;
+            s.up_next = None;
+            s.up_next_cancelled = false;
         });
         let (volume, muted) = self.player.state.peek(|s| (s.volume, s.muted));
         let engine = Engine::open(
@@ -497,6 +506,9 @@ impl App {
             },
             move |event| ui(move |app| app.player_event(session_id, event)),
         );
+        if (settings.default_speed - 1.0).abs() > 0.01 {
+            engine.set_speed(settings.default_speed);
+        }
         *self.player.engine.borrow_mut() = Some(engine);
         self.push(Route::Player);
         if torrent {
@@ -705,7 +717,10 @@ impl App {
         if status != Status::Playing {
             return;
         }
-        let idle = self.player.session.borrow().last_activity.elapsed().as_secs_f64() > 3.0;
+        self.update_up_next(seconds);
+        let hide_after = self.profile.peek(|p| p.settings.controls_hide_seconds).max(1);
+        let idle = self.player.session.borrow().last_activity.elapsed().as_secs_f64()
+            > f64::from(hide_after);
         let hide = visible && idle && !paused && menu == Menu::None;
         if was_stalled != stalled || hide {
             self.player.state.write(|s| {
@@ -784,11 +799,12 @@ impl App {
     fn player_ended(&self) {
         let position = self.player.position.get_untracked();
         self.record_player_progress(position, true, true);
-        let next = self.player.state.peek(|s| s.next.clone());
-        let autoplay = self.profile.peek(|p| p.settings.autoplay_next);
+        let (next, cancelled) = self.player.state.peek(|s| (s.next.clone(), s.up_next_cancelled));
+        let autoplay = self.profile.peek(|p| p.settings.autoplay_next) && !cancelled;
         self.player.state.write(|s| {
             s.status = Status::Ended;
             s.controls_visible = true;
+            s.up_next = None;
         });
         if let (Some(next), true) = (next, autoplay) {
             self.play_next(next);
@@ -1038,6 +1054,51 @@ impl App {
         self.player
             .state
             .write(|s| s.sub_delay = ((s.sub_delay + delta) * 4.0).round() / 4.0);
+    }
+
+    /// Shows the "Up next" countdown near the end of an episode.
+    fn update_up_next(&self, seconds: f64) {
+        let lead = self.profile.peek(|p| p.settings.up_next_seconds);
+        let (duration, has_next, cancelled, live, shown) = self.player.state.peek(|s| {
+            (s.duration, s.next.is_some(), s.up_next_cancelled, s.live, s.up_next)
+        });
+        let remaining = duration - seconds;
+        let wanted = (lead > 0 && has_next && !cancelled && !live && duration > 60.0
+            && remaining <= f64::from(lead)
+            && remaining > 0.0)
+            .then(|| remaining.ceil() as u32);
+        if wanted != shown {
+            self.player.state.write(|s| s.up_next = wanted);
+        }
+    }
+
+    pub fn cancel_up_next(&self) {
+        self.player.state.write(|s| {
+            s.up_next = None;
+            s.up_next_cancelled = true;
+        });
+    }
+
+    /// `C`: off -> first available track -> off.
+    pub fn cycle_subtitles(&self) {
+        let next = self.player.state.peek(|s| {
+            if s.sub_choice != SubChoice::Off {
+                return Some(SubChoice::Off);
+            }
+            s.embedded_subs
+                .iter()
+                .position(|t| t.is_text_subtitle())
+                .map(SubChoice::Embedded)
+                .or_else(|| (!s.addon_subs.is_empty()).then_some(SubChoice::Addon(0)))
+        });
+        match next {
+            Some(choice) => {
+                let off = choice == SubChoice::Off;
+                self.select_subtitle(choice);
+                self.notify(if off { "Subtitles off" } else { "Subtitles on" });
+            }
+            None => self.notify("No subtitles for this video"),
+        }
     }
 
     pub fn adjust_audio_delay(&self, delta: f64) {

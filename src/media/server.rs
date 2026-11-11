@@ -138,6 +138,156 @@ pub async fn torrent_stats(stream_url: &str) -> Option<TorrentStats> {
     })
 }
 
+/// A selectable option the server advertises (cache size, cache drive,
+/// HTTPS endpoint).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerChoice {
+    pub name: String,
+    /// `Value::Null` stands for "unlimited" / "disabled".
+    pub value: Value,
+}
+
+/// The streaming server's own settings (`GET /settings`). `values` is kept
+/// whole so a save writes back every field it did not touch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerSettings {
+    pub values: serde_json::Map<String, Value>,
+    pub cache_sizes: Vec<ServerChoice>,
+    pub cache_roots: Vec<ServerChoice>,
+    pub https_endpoints: Vec<ServerChoice>,
+    pub transcode_profiles: Vec<String>,
+}
+
+impl ServerSettings {
+    pub fn u64(&self, key: &str) -> Option<u64> {
+        self.values.get(key).and_then(Value::as_u64)
+    }
+    pub fn value(&self, key: &str) -> Value {
+        self.values.get(key).cloned().unwrap_or(Value::Null)
+    }
+}
+
+/// Media's torrent profiles: how aggressively the server downloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TorrentProfile {
+    Soft,
+    Default,
+    Fast,
+    UltraFast,
+}
+
+impl TorrentProfile {
+    pub const ALL: [TorrentProfile; 4] = [Self::Soft, Self::Default, Self::Fast, Self::UltraFast];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Soft => "Soft",
+            Self::Default => "Default",
+            Self::Fast => "Fast",
+            Self::UltraFast => "Ultra fast",
+        }
+    }
+
+    /// (max connections, handshake ms, request ms, soft limit B/s, hard
+    /// limit B/s, peers for stable), the values Media itself writes.
+    fn values(self) -> (u64, u64, u64, f64, f64, u64) {
+        match self {
+            Self::Soft => (35, 20_000, 4_000, 1_677_721.6, 1_677_721.6, 5),
+            Self::Default => (55, 20_000, 4_000, 2_621_440.0, 3_145_728.0, 5),
+            Self::Fast => (200, 20_000, 4_000, 4_194_304.0, 39_321_600.0, 10),
+            Self::UltraFast => (400, 25_000, 6_000, 8_388_608.0, 78_643_200.0, 10),
+        }
+    }
+
+    pub fn apply(self, values: &mut serde_json::Map<String, Value>) {
+        let (connections, handshake, request, soft, hard, peers) = self.values();
+        values.insert("btMaxConnections".into(), json!(connections));
+        values.insert("btHandshakeTimeout".into(), json!(handshake));
+        values.insert("btRequestTimeout".into(), json!(request));
+        values.insert("btDownloadSpeedSoftLimit".into(), json!(soft));
+        values.insert("btDownloadSpeedHardLimit".into(), json!(hard));
+        values.insert("btMinPeersForStable".into(), json!(peers));
+    }
+
+    /// The profile the current values match, if any (else "custom").
+    pub fn detect(settings: &ServerSettings) -> Option<Self> {
+        Self::ALL.into_iter().find(|profile| {
+            let (connections, ..) = profile.values();
+            settings.u64("btMaxConnections") == Some(connections)
+                && settings
+                    .values
+                    .get("btDownloadSpeedHardLimit")
+                    .and_then(Value::as_f64)
+                    .is_some_and(|v| (v - profile.values().4).abs() < 1.0)
+        })
+    }
+}
+
+fn choices(options: &[Value], id: &str) -> Vec<ServerChoice> {
+    options
+        .iter()
+        .find(|o| o.get("id").and_then(Value::as_str) == Some(id))
+        .and_then(|o| o.get("selections"))
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(|s| ServerChoice {
+                    name: s.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    value: s.get("val").cloned().unwrap_or(Value::Null),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub async fn get_settings(base: &str) -> Result<ServerSettings, String> {
+    let url = format!("{}/settings", base.trim_end_matches('/'));
+    let body: Value = http()
+        .get(url)
+        .timeout(Duration::from_secs(6))
+        .send()
+        .await
+        .map_err(|_| "The streaming server is not reachable".to_owned())?
+        .json()
+        .await
+        .map_err(|_| "The streaming server sent unreadable settings".to_owned())?;
+    let values = body.get("values").and_then(Value::as_object).cloned().unwrap_or_default();
+    let options = body.get("options").and_then(Value::as_array).cloned().unwrap_or_default();
+    let transcode_profiles = values
+        .get("allTranscodeProfiles")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+    Ok(ServerSettings {
+        cache_sizes: choices(&options, "cacheSize"),
+        cache_roots: choices(&options, "cacheRoot"),
+        https_endpoints: choices(&options, "remoteHttps"),
+        transcode_profiles,
+        values,
+    })
+}
+
+/// Saves the full value set back (the server replaces what it is sent).
+pub async fn set_settings(base: &str, mut values: serde_json::Map<String, Value>) -> Result<(), String> {
+    // Reported by the server, not settable.
+    for key in ["serverVersion", "appPath", "cacheRootVersion", "cacheRootsToClean", "allTranscodeProfiles"] {
+        values.remove(key);
+    }
+    let url = format!("{}/settings", base.trim_end_matches('/'));
+    let response = http()
+        .post(url)
+        .json(&Value::Object(values))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|_| "The streaming server is not reachable".to_owned())?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("The server refused the change (HTTP {})", response.status().as_u16()))
+    }
+}
+
 /// OpenSubtitles hash of a remote video, computed by the streaming server.
 pub async fn opensub_hash(base: &str, video_url: &str) -> Option<(String, u64)> {
     let url = format!(

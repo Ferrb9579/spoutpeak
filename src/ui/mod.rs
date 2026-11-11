@@ -259,18 +259,37 @@ pub(super) fn handle_key(app: &App, event: &KeyboardEvent) -> bool {
         app.go(target);
         return true;
     }
+    let (seek, seek_shift, volume_step) = app.profile.peek(|p| {
+        let s = &p.settings;
+        (f64::from(s.seek_step), f64::from(s.seek_step_shift), s.volume_step as f32 / 100.0)
+    });
+    let step = if shift { seek_shift } else { seek };
     match event.code {
         Code::Space | Code::KeyK => app.toggle_pause(),
-        Code::ArrowLeft => app.seek_by(if shift { -60.0 } else { -10.0 }),
-        Code::ArrowRight => app.seek_by(if shift { 60.0 } else { 10.0 }),
+        Code::ArrowLeft | Code::KeyJ => app.seek_by(-step),
+        Code::ArrowRight | Code::KeyL => app.seek_by(step),
         Code::ArrowUp => {
             let volume = app.player.state.peek(|s| s.volume);
-            app.set_volume(volume + 0.05);
+            app.set_volume(volume + volume_step);
         }
         Code::ArrowDown => {
             let volume = app.player.state.peek(|s| s.volume);
-            app.set_volume(volume - 0.05);
+            app.set_volume(volume - volume_step);
         }
+        // Frame-ish stepping and speed, as in YouTube / mpv.
+        Code::Comma if shift => {
+            let speed = app.player.state.peek(|s| s.speed);
+            app.set_speed(((speed - 0.25).max(0.25) * 100.0).round() / 100.0);
+        }
+        Code::Period if shift => {
+            let speed = app.player.state.peek(|s| s.speed);
+            app.set_speed(((speed + 0.25).min(3.0) * 100.0).round() / 100.0);
+        }
+        Code::Digit0 | Code::Home => app.seek_to(0.0),
+        Code::BracketLeft => app.adjust_audio_delay(-0.05),
+        Code::BracketRight => app.adjust_audio_delay(0.05),
+        Code::KeyC => app.cycle_subtitles(),
+        Code::KeyB => app.adjust_brightness(if shift { -0.05 } else { 0.05 }),
         Code::KeyM => app.toggle_mute(),
         Code::KeyF | Code::F11 => app.toggle_fullscreen(),
         Code::KeyG => app.adjust_subtitle_delay(-0.25),

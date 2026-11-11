@@ -319,6 +319,7 @@ pub struct Controllers {
     pub password: TextEditingController,
     pub server_url: TextEditingController,
     pub player_path: TextEditingController,
+    pub download_dir: TextEditingController,
     pub board: ScrollController,
     pub discover: ScrollController,
     pub library: ScrollController,
@@ -349,6 +350,7 @@ impl Controllers {
             password: TextEditingController::new(),
             server_url: TextEditingController::with_text(&profile.settings.server_url),
             player_path: TextEditingController::with_text(&profile.settings.custom_player_path),
+            download_dir: TextEditingController::with_text(&profile.settings.download_dir),
             board: ScrollController::new(),
             discover: ScrollController::new(),
             library: ScrollController::new(),
@@ -394,6 +396,7 @@ pub struct App {
     pub addons: Shared<AddonsState>,
     pub account: Shared<AccountState>,
     pub server_online: Signal<Option<bool>>,
+    pub server_settings: Signal<Load<server::ServerSettings>>,
     /// False while the startup screen is up.
     pub booted: Signal<bool>,
     search_typing: Rc<std::cell::Cell<u64>>,
@@ -406,6 +409,7 @@ impl App {
     pub fn new() -> Self {
         let profile = store::load_profile();
         let controllers = Controllers::new(&profile);
+        crate::downloads::set_custom_folder(&profile.settings.download_dir);
         Self {
             route: Signal::new(vec![Route::Board]),
             toast: Signal::new(None),
@@ -431,6 +435,7 @@ impl App {
             }),
             account: Shared::new(AccountState::default()),
             server_online: Signal::new(None),
+            server_settings: Signal::new(Load::Idle),
             booted: Signal::new(false),
             search_typing: Rc::new(std::cell::Cell::new(0)),
             downloads: Shared::new(crate::downloads::load()),
@@ -528,6 +533,7 @@ impl App {
         match route {
             Route::Discover => self.ensure_discover(),
             Route::Addons => self.ensure_community(),
+            Route::Settings => self.load_server_settings(),
             _ => {}
         }
     }
@@ -1437,7 +1443,47 @@ impl App {
     }
 
     pub fn update_settings(&self, update: impl FnOnce(&mut store::Settings)) {
-        self.profile.write(|p| update(&mut p.settings));
+        let dir = self.profile.write(|p| {
+            update(&mut p.settings);
+            p.settings.download_dir.clone()
+        });
+        crate::downloads::set_custom_folder(&dir);
         self.save_profile();
+    }
+
+    // ------------------------------------------------- server settings
+
+    /// Fetches the streaming server's own settings for the Settings page.
+    pub fn load_server_settings(&self) {
+        let url = self.server_url();
+        self.server_settings.set(Load::Loading);
+        spawn(async move { server::get_settings(&url).await }, |app, result| {
+            app.server_settings.set(match result {
+                Ok(settings) => Load::Ready(settings),
+                Err(error) => Load::Failed(error),
+            });
+        });
+    }
+
+    /// Changes server settings and saves them; reloads to show what the
+    /// server actually kept.
+    pub fn update_server_settings(
+        &self,
+        change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+    ) {
+        let Load::Ready(mut settings) = self.server_settings.get_untracked() else {
+            return;
+        };
+        change(&mut settings.values);
+        let values = settings.values.clone();
+        self.server_settings.set(Load::Ready(settings));
+        let url = self.server_url();
+        spawn(async move { server::set_settings(&url, values).await }, |app, result| {
+            match result {
+                Ok(()) => app.notify("Streaming server settings saved"),
+                Err(error) => app.notify(error),
+            }
+            app.load_server_settings();
+        });
     }
 }

@@ -1108,6 +1108,50 @@ fn bottom_bar(app: &App) -> Widget {
         .into()
 }
 
+/// "Up next" countdown in the bottom-right corner, above the control bar
+/// when it is showing.
+fn up_next_card(app: &App, next: &crate::media::types::Video, left: u32, lifted: bool) -> Widget {
+    let (play, cancel, video) = (app.clone(), app.clone(), next.clone());
+    let card = Container::new()
+        .width(340.0)
+        .padding(EdgeInsets::all(16.0))
+        .decoration(
+            BoxDecoration::new()
+                .color(Color::rgba(18, 21, 32, 240))
+                .border_radius(BorderRadius::all(Radius::circular(14.0))),
+        )
+        .child(col(vec![
+            row(vec![
+                icon(icons::skip_forward(), 14.0, ACCENT),
+                hgap(6.0),
+                text(format!("UP NEXT IN {left}s"), 11.0, FontWeight::W700, ACCENT).into(),
+            ])
+            .into(),
+            gap(6.0),
+            SizedBox::new()
+                .width(308.0)
+                .child(line(next.label(), 14.5, FontWeight::W600, TEXT))
+                .into(),
+            gap(12.0),
+            row(vec![
+                icon_text_button(icons::play(), "Play now", Tone::Primary, move || {
+                    play.play_next(video.clone())
+                }),
+                hgap(8.0),
+                button("Cancel", Tone::Neutral, move || cancel.cancel_up_next()),
+            ])
+            .into(),
+        ]));
+    Align::new(
+        Alignment::BOTTOM_RIGHT,
+        Padding::new(
+            EdgeInsets::only(0.0, 0.0, 24.0, if lifted { 120.0 } else { 28.0 }),
+            card,
+        ),
+    )
+    .into()
+}
+
 fn stat(label: &str, value: String) -> Widget {
     Column::new(vec![
         text(value, 15.0, FontWeight::W700, TEXT).into(),
@@ -1282,7 +1326,7 @@ pub fn screen(app: &App) -> Widget {
         Status::Ended => {
             let (replay, forward) = (app.clone(), app.clone());
             let mut actions = vec![button("Replay", Tone::Neutral, move || replay.seek_to(0.0))];
-            if let Some(next) = next {
+            if let Some(next) = next.clone() {
                 actions.push(hgap(10.0));
                 actions.push(button("Next episode", Tone::Primary, move || {
                     forward.play_next(next.clone())
@@ -1305,6 +1349,10 @@ pub fn screen(app: &App) -> Widget {
             ]));
         }
         _ => {}
+    }
+
+    if let (Some(left), Some(next_video)) = (app.player.state.read(|s| s.up_next), next.clone()) {
+        layers.push(up_next_card(app, &next_video, left, visible));
     }
 
     if visible {

@@ -102,6 +102,21 @@ pub struct Settings {
     /// Upper bound on the decoded picture height of the built-in player.
     pub max_video_height: u32,
     pub autoplay_next: bool,
+    /// Seconds before the end at which the "Up next" card appears (0: never).
+    pub up_next_seconds: u32,
+    /// Start where the last viewing stopped.
+    pub resume_playback: bool,
+    /// Arrow-key seek step, and with Shift held.
+    pub seek_step: u32,
+    pub seek_step_shift: u32,
+    /// Volume step for the Up/Down keys and the mouse wheel, in percent.
+    pub volume_step: u32,
+    /// Seconds of inactivity before the player hides its controls.
+    pub controls_hide_seconds: u32,
+    /// Playback speed every new video starts at.
+    pub default_speed: f64,
+    /// Where downloads go; empty means `<Downloads>/Spoutpeak`.
+    pub download_dir: String,
     pub volume: f32,
     pub hardware_decoding: bool,
     /// Most recent first.
@@ -122,6 +137,14 @@ impl Default for Settings {
             brightness: 1.0,
             max_video_height: 720,
             autoplay_next: true,
+            up_next_seconds: 30,
+            resume_playback: true,
+            seek_step: 10,
+            seek_step_shift: 60,
+            volume_step: 5,
+            controls_hide_seconds: 3,
+            default_speed: 1.0,
+            download_dir: String::new(),
             volume: 1.0,
             hardware_decoding: true,
             recent_searches: Vec::new(),

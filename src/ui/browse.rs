@@ -78,7 +78,7 @@ fn continue_watching(app: &App) -> Option<Widget> {
         col(vec![
             text("Continue watching", 17.0, FontWeight::W600, TEXT).into(),
             gap(10.0),
-            strip.into(),
+            page_wheel(app, strip),
             gap(22.0),
         ])
         .cross_axis_alignment(CrossAxisAlignment::Stretch)

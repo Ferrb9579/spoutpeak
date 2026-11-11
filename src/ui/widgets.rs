@@ -1,7 +1,7 @@
 //! Shared visual pieces: network images, poster cards, catalog rows.
 
 use crate::images::{self, Picture};
-use crate::state::{App, CatalogRow, Load};
+use crate::state::{App, CatalogRow, Load, Route};
 use crate::media::types::Meta;
 use crate::theme::*;
 use incular::controls::{Button, ButtonStyle, StateColor};
@@ -262,24 +262,45 @@ fn row_header(app: &App, title: &str, subtitle: &str, key: &str, scrollable: boo
         .into()
 }
 
+/// Passes a vertical mouse wheel over a sideways row on to the page that
+/// contains it. Incular hands the wheel to the innermost (horizontal) view
+/// only, so without this the page stops scrolling under the cursor.
+pub fn page_wheel(app: &App, row: impl Into<Widget>) -> Widget {
+    let app = app.clone();
+    Listener::new(row)
+        .on_pointer_signal(move |event| {
+            if event.scroll_delta.y == 0.0 {
+                return;
+            }
+            let page = match app.route.get_untracked().last() {
+                Some(Route::Search) => &app.controllers.search_results,
+                _ => &app.controllers.board,
+            };
+            page.scroll_by(event.scroll_delta.y);
+        })
+        .into()
+}
+
 /// A horizontally scrolling, lazily built strip of poster cards.
 pub fn poster_strip(app: &App, key: &str, items: Rc<Vec<Meta>>, size: CardSize) -> Widget {
     let app_for_items = app.clone();
     let count = items.len();
-    SizedBox::new()
-        .height(size.height + CARD_TEXT)
-        .child(
-            ListView::builder(count, move |index| {
-                Padding::new(
-                    EdgeInsets::only(0.0, 0.0, CARD_GAP, 0.0),
-                    poster_card(&app_for_items, &items[index], size, None, None),
-                )
-            })
-            .scroll_direction(Axis::Horizontal)
-            .item_extent(size.width + CARD_GAP)
-            .controller(app.controllers.row(key)),
-        )
-        .into()
+    page_wheel(
+        app,
+        SizedBox::new()
+            .height(size.height + CARD_TEXT)
+            .child(
+                ListView::builder(count, move |index| {
+                    Padding::new(
+                        EdgeInsets::only(0.0, 0.0, CARD_GAP, 0.0),
+                        poster_card(&app_for_items, &items[index], size, None, None),
+                    )
+                })
+                .scroll_direction(Axis::Horizontal)
+                .item_extent(size.width + CARD_GAP)
+                .controller(app.controllers.row(key)),
+            ),
+    )
 }
 
 /// One catalog on the Board / Search: header plus strip or status.

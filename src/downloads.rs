@@ -60,11 +60,23 @@ impl Download {
     }
 }
 
-/// `<Downloads>/Spoutpeak`.
+static CUSTOM_FOLDER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Uses `dir` for new downloads; empty restores the default.
+pub fn set_custom_folder(dir: &str) {
+    *CUSTOM_FOLDER.lock().unwrap() = dir.trim().to_owned();
+}
+
+/// The chosen folder, else `<Downloads>/Spoutpeak`.
 pub fn folder() -> PathBuf {
-    let dir = dirs::download_dir()
-        .unwrap_or_else(|| data_dir().join("downloads"))
-        .join("Spoutpeak");
+    let custom = CUSTOM_FOLDER.lock().unwrap().clone();
+    let dir = if custom.is_empty() {
+        dirs::download_dir()
+            .unwrap_or_else(|| data_dir().join("downloads"))
+            .join("Spoutpeak")
+    } else {
+        PathBuf::from(custom)
+    };
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
