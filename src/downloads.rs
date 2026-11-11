@@ -1,10 +1,15 @@
-//! Saving streams to disk. Direct links are fetched as they are; torrents go
-//! through the streaming server, which turns them into a plain HTTP file.
-//! Partial files keep a `.part` extension and resume with a Range request.
+//! Saving streams to disk.
+//!
+//! Direct links are fetched into a `.part` file that resumes with a Range
+//! request. Torrents are downloaded in full by the torrent engine into a
+//! staging folder inside the downloads folder (pieces in any order), then
+//! hard-linked to their final name, so the data is never stored twice.
+//! Optionally the saved file is then converted to MP4 (see `crate::convert`).
 
-use crate::state::{App, spawn, ui};
 use crate::addons::http;
 use crate::addons::types::{Meta, Stream, StreamSource, Video};
+use crate::state::{App, spawn, ui};
+use crate::store::DownloadFormat;
 use crate::util::data_dir;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -14,9 +19,11 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DownloadStatus {
-    /// Waiting for the streaming server to resolve a torrent.
+    /// Connecting, or waiting for a torrent's details from peers.
     Preparing,
     Downloading,
+    /// Re-encoding the saved file into the chosen format.
+    Converting,
     Done,
     Failed(String),
     Cancelled,
@@ -24,7 +31,7 @@ pub enum DownloadStatus {
 
 impl DownloadStatus {
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Preparing | Self::Downloading)
+        matches!(self, Self::Preparing | Self::Downloading | Self::Converting)
     }
 }
 
@@ -40,23 +47,78 @@ pub struct Download {
     /// Name without extension; the extension is known once the server
     /// answers.
     pub stem: String,
-    /// The finished file, once there is one.
+    /// The saved file, once there is one. While a conversion is pending this
+    /// is the original; afterwards the converted MP4.
     pub file: Option<PathBuf>,
     pub received: u64,
     pub total: Option<u64>,
     pub status: DownloadStatus,
+    /// Chosen when the download started.
+    #[serde(default)]
+    pub format: DownloadFormat,
     #[serde(skip)]
     pub speed: f64,
+    /// Share of the conversion done, 0 to 1.
+    #[serde(skip)]
+    pub converted: f32,
+    /// The encoder doing the conversion ("NVIDIA GPU", …).
+    #[serde(skip)]
+    pub encoder: Option<&'static str>,
     #[serde(skip)]
     cancel: Arc<AtomicBool>,
 }
 
 impl Download {
     pub fn fraction(&self) -> Option<f32> {
+        if self.status == DownloadStatus::Converting {
+            return Some(self.converted);
+        }
         self.total
             .filter(|t| *t > 0)
             .map(|t| (self.received as f64 / t as f64).clamp(0.0, 1.0) as f32)
     }
+
+    fn info_hash(&self) -> Option<String> {
+        match self.stream.source() {
+            StreamSource::Torrent { info_hash, .. } => Some(info_hash.to_ascii_lowercase()),
+            _ => None,
+        }
+    }
+}
+
+/// Unfinished torrent downloads, one sub-folder per info hash. Inside the
+/// downloads folder so finished files can be hard-linked out of it.
+fn staging_folder() -> PathBuf {
+    folder().join(".incomplete")
+}
+
+/// Removes staging folders no unfinished download needs (left behind when
+/// the app closed before a finished download's copy was cleaned up).
+pub fn clean_staging(list: &[Download]) {
+    let needed: std::collections::HashSet<String> = list
+        .iter()
+        .filter(|d| !matches!(d.status, DownloadStatus::Done))
+        .filter_map(Download::info_hash)
+        .collect();
+    let Ok(entries) = std::fs::read_dir(staging_folder()) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if !needed.contains(&name) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Hard-links `from` to `to` (same drive: instant, no extra space), else
+/// copies it.
+async fn link_or_copy(from: PathBuf, to: PathBuf) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        std::fs::hard_link(&from, &to)
+            .or_else(|_| std::fs::copy(&from, &to).map(|_| ()))
+            .map_err(|e| format!("Could not save the file: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 static CUSTOM_FOLDER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
@@ -307,7 +369,10 @@ impl App {
             received: 0,
             total: None,
             status: DownloadStatus::Preparing,
+            format: self.profile.peek(|p| p.settings.download_format),
             speed: 0.0,
+            converted: 0.0,
+            encoder: None,
             cancel: Arc::new(AtomicBool::new(false)),
         };
         self.downloads.write(|list| list.insert(0, item));
@@ -329,13 +394,21 @@ impl App {
     }
 
     fn run_download(&self, id: u64) {
-        let Some((stream, stem, cancel)) = self.downloads.peek(|l| {
-            l.iter()
-                .find(|d| d.id == id)
-                .map(|d| (d.stream.clone(), d.stem.clone(), d.cancel.clone()))
+        let Some((stream, stem, cancel, format, file)) = self.downloads.peek(|l| {
+            l.iter().find(|d| d.id == id).map(|d| {
+                (d.stream.clone(), d.stem.clone(), d.cancel.clone(), d.format, d.file.clone())
+            })
         }) else {
             return;
         };
+        // Saved already, but the conversion did not finish (failed,
+        // cancelled or the app closed): only convert again.
+        if let Some(file) = file.filter(|f| f.exists()) {
+            if format != DownloadFormat::Original {
+                self.convert_download(id, file);
+                return;
+            }
+        }
         let headers: Vec<(String, String)> = stream
             .behavior_hints
             .proxy_headers
@@ -343,20 +416,9 @@ impl App {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let part = part_path(&stem);
         let source = stream.source();
         spawn(
             async move {
-                let url = match source {
-                    StreamSource::Url(url) => url,
-                    StreamSource::Torrent { info_hash, file_idx, trackers } => {
-                        crate::streaming::stream_url(&info_hash, file_idx, &trackers).await?
-                    }
-                    _ => return Err("This stream can't be downloaded".to_owned()),
-                };
-                if cancel.load(Ordering::Acquire) {
-                    return Err("cancelled".into());
-                }
                 let report = move |progress: Progress| {
                     ui(move |app| {
                         app.update_download(id, |d| match progress {
@@ -372,44 +434,143 @@ impl App {
                         })
                     })
                 };
-                let content_type = fetch(url.clone(), headers, part.clone(), cancel, report).await?;
-                Ok((part, url, content_type))
-            },
-            move |app, result| match result {
-                Ok((part, url, content_type)) => {
-                    let ext = extension_for(&stream, &url, content_type.as_deref());
-                    let target = unique_file(&stem, &ext);
-                    match std::fs::rename(&part, &target) {
-                        Ok(()) => {
-                            app.update_download(id, |d| {
-                                d.status = DownloadStatus::Done;
-                                d.file = Some(target);
-                                d.speed = 0.0;
-                            });
-                            let title = app.downloads.peek(|l| {
-                                l.iter().find(|d| d.id == id).map(|d| d.title.clone())
-                            });
-                            app.notify(format!("Downloaded {}", title.unwrap_or_default()));
-                        }
-                        Err(e) => app.update_download(id, |d| {
-                            d.status = DownloadStatus::Failed(format!("Could not save: {e}"));
-                        }),
+                match source {
+                    StreamSource::Url(url) => {
+                        let part = part_path(&stem);
+                        let content_type =
+                            fetch(url.clone(), headers, part.clone(), cancel, report).await?;
+                        let ext = extension_for(&stream, &url, content_type.as_deref());
+                        let target = unique_file(&stem, &ext);
+                        tokio::fs::rename(&part, &target)
+                            .await
+                            .map_err(|e| format!("Could not save: {e}"))?;
+                        Ok(target)
                     }
-                    app.save_downloads();
+                    StreamSource::Torrent { info_hash, file_idx, trackers } => {
+                        let staging = staging_folder();
+                        let started = AtomicBool::new(false);
+                        let downloaded = crate::streaming::download_file(
+                            &info_hash,
+                            file_idx,
+                            &trackers,
+                            &staging,
+                            &cancel,
+                            |p| {
+                                if !started.swap(true, Ordering::Relaxed) {
+                                    report(Progress::Started { total: Some(p.total), received: p.received });
+                                } else {
+                                    report(Progress::Tick { received: p.received, speed: p.speed });
+                                }
+                            },
+                        )
+                        .await?;
+                        let ext = stream
+                            .behavior_hints
+                            .filename
+                            .as_deref()
+                            .and_then(extension_of)
+                            .or_else(|| extension_of(&downloaded.name))
+                            .unwrap_or_else(|| "mkv".to_owned());
+                        let target = unique_file(&stem, &ext);
+                        link_or_copy(downloaded.path, target.clone()).await?;
+                        crate::streaming::finish_download(&info_hash, &staging);
+                        Ok(target)
+                    }
+                    _ => Err("This stream can't be downloaded".to_owned()),
                 }
-                Err(error) => {
+            },
+            move |app, result: Result<PathBuf, String>| match result {
+                Ok(target) => {
                     app.update_download(id, |d| {
+                        d.file = Some(target.clone());
                         d.speed = 0.0;
-                        d.status = if error == "cancelled" {
-                            DownloadStatus::Cancelled
-                        } else {
-                            DownloadStatus::Failed(error)
-                        };
                     });
-                    app.save_downloads();
+                    if format == DownloadFormat::Original {
+                        app.download_done(id);
+                    } else {
+                        app.save_downloads();
+                        app.convert_download(id, target);
+                    }
                 }
+                Err(error) => app.download_failed(id, error),
             },
         );
+    }
+
+    /// Converts the saved original `source` into the download's format,
+    /// then replaces it with the MP4.
+    fn convert_download(&self, id: u64, source: PathBuf) {
+        let Some((stem, cancel, format)) = self.downloads.peek(|l| {
+            l.iter().find(|d| d.id == id).map(|d| (d.stem.clone(), d.cancel.clone(), d.format))
+        }) else {
+            return;
+        };
+        self.update_download(id, |d| {
+            d.status = DownloadStatus::Converting;
+            d.converted = 0.0;
+            d.encoder = None;
+        });
+        self.save_downloads();
+        spawn(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let temp = folder().join(format!("{stem}.converting.mp4"));
+                    let encoder = crate::convert::encoder();
+                    ui(move |app| app.update_download(id, |d| d.encoder = encoder.map(|e| e.label)));
+                    let last = std::sync::Mutex::new(Instant::now());
+                    let used = crate::convert::convert(&source, &temp, format, &cancel, |share| {
+                        let mut last = last.lock().unwrap();
+                        if last.elapsed() >= Duration::from_millis(400) || share >= 1.0 {
+                            *last = Instant::now();
+                            ui(move |app| app.update_download(id, |d| d.converted = share));
+                        }
+                    })?;
+                    // The original goes; the MP4 takes its place.
+                    let _ = std::fs::remove_file(&source);
+                    let target = unique_file(&stem, "mp4");
+                    std::fs::rename(&temp, &target).map_err(|e| format!("Could not save: {e}"))?;
+                    Ok::<_, String>((target, used))
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            },
+            move |app, result| match result {
+                Ok((target, used)) => {
+                    let total = std::fs::metadata(&target).map(|m| m.len()).ok();
+                    app.update_download(id, |d| {
+                        d.file = Some(target);
+                        d.total = total;
+                        d.received = total.unwrap_or(d.received);
+                        // `None`: the video was already compatible and only copied.
+                        d.encoder = used.map(|e| e.label);
+                    });
+                    app.download_done(id);
+                }
+                Err(error) => app.download_failed(id, error),
+            },
+        );
+    }
+
+    fn download_done(&self, id: u64) {
+        self.update_download(id, |d| {
+            d.status = DownloadStatus::Done;
+            d.speed = 0.0;
+        });
+        let title = self.downloads.peek(|l| l.iter().find(|d| d.id == id).map(|d| d.title.clone()));
+        self.notify(format!("Downloaded {}", title.unwrap_or_default()));
+        self.save_downloads();
+    }
+
+    fn download_failed(&self, id: u64, error: String) {
+        self.update_download(id, |d| {
+            d.speed = 0.0;
+            d.status = if error == "cancelled" {
+                DownloadStatus::Cancelled
+            } else {
+                DownloadStatus::Failed(error)
+            };
+        });
+        self.save_downloads();
     }
 
     pub fn cancel_download(&self, id: u64) {
@@ -440,14 +601,20 @@ impl App {
         if let Some(item) = removed {
             item.cancel.store(true, Ordering::Release);
             let part = part_path(&item.stem);
+            let converting = folder().join(format!("{}.converting.mp4", item.stem));
             let file = item.file.clone();
+            let hash = item.info_hash();
             // Give a running task a moment to notice the cancel and close
-            // its handle before the file goes.
+            // its handle before the files go.
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(800));
                 let _ = std::fs::remove_file(part);
+                let _ = std::fs::remove_file(converting);
                 if let Some(file) = file {
                     let _ = std::fs::remove_file(file);
+                }
+                if let Some(hash) = hash {
+                    crate::streaming::finish_download(&hash, &staging_folder());
                 }
             });
         }

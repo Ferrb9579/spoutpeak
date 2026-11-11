@@ -449,6 +449,11 @@ impl App {
             });
         }
         self.start_streaming();
+        self.downloads.peek(|list| crate::downloads::clean_staging(list));
+        // Find the video encoder off the UI thread (it test-encodes a clip).
+        std::thread::spawn(|| {
+            let _ = crate::convert::encoder();
+        });
         // Never hold the startup screen hostage to a slow network.
         spawn(
             async { tokio::time::sleep(std::time::Duration::from_secs(8)).await },

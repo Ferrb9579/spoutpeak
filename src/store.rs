@@ -115,6 +115,7 @@ pub struct Settings {
     pub default_speed: f64,
     /// Where downloads go; empty means `<Downloads>/Spoutpeak`.
     pub download_dir: String,
+    pub download_format: DownloadFormat,
     pub volume: f32,
     pub hardware_decoding: bool,
     /// Most recent first.
@@ -142,9 +143,43 @@ impl Default for Settings {
             controls_hide_seconds: 3,
             default_speed: 1.0,
             download_dir: String::new(),
+            download_format: DownloadFormat::Original,
             volume: 1.0,
             hardware_decoding: true,
             recent_searches: Vec::new(),
+        }
+    }
+}
+
+/// What downloads are saved as (see `crate::convert`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DownloadFormat {
+    /// The file exactly as the source has it.
+    #[default]
+    Original,
+    /// MP4 with H.264 video and AAC audio, same resolution.
+    Mp4,
+    Mp4At1080,
+    Mp4At720,
+}
+
+impl DownloadFormat {
+    pub const ALL: [DownloadFormat; 4] = [Self::Original, Self::Mp4, Self::Mp4At1080, Self::Mp4At720];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Original => "Original file",
+            Self::Mp4 => "MP4",
+            Self::Mp4At1080 => "MP4 1080p",
+            Self::Mp4At720 => "MP4 720p",
+        }
+    }
+
+    pub fn max_height(self) -> Option<u32> {
+        match self {
+            Self::Original | Self::Mp4 => None,
+            Self::Mp4At1080 => Some(1080),
+            Self::Mp4At720 => Some(720),
         }
     }
 }
@@ -187,10 +222,20 @@ fn library_path() -> PathBuf {
 }
 
 pub fn load_profile() -> Profile {
-    std::fs::read(profile_path())
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    let bytes = std::fs::read(profile_path()).ok();
+    let profile: Profile = bytes
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice(bytes).ok())
+        .unwrap_or_default();
+    // Older versions stored an online-account login token; rewrite the file
+    // without it now that accounts are gone.
+    let has_old_login = bytes
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|value| value.get("auth").is_some());
+    if has_old_login {
+        save_profile(&profile);
+    }
+    profile
 }
 
 pub fn load_library() -> HashMap<String, LibraryItem> {

@@ -133,7 +133,7 @@ pub fn screen(app: &App) -> Widget {
         row(vec![
             input(
                 &app.controllers.addon_url,
-                "Paste an addon URL (https://…/manifest.json or media://…)",
+                "Paste an addon URL (https://…/manifest.json or an install link)",
                 460.0,
                 move |_| submit.install_addon_from_input(),
             )

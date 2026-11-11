@@ -5,6 +5,7 @@
 )]
 
 mod addons;
+mod convert;
 mod devtools;
 mod downloads;
 mod images;

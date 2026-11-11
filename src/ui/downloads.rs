@@ -33,6 +33,14 @@ fn status_line(item: &Download) -> (String, Color) {
     };
     match &item.status {
         DownloadStatus::Preparing => ("Preparing…".to_owned(), MUTED),
+        DownloadStatus::Converting => {
+            let mut parts = vec![format!("Converting to {}", item.format.label())];
+            parts.push(format!("{:.0}%", item.converted * 100.0));
+            if let Some(encoder) = item.encoder {
+                parts.push(encoder.to_owned());
+            }
+            (parts.join("  ·  "), MUTED)
+        }
         DownloadStatus::Downloading => {
             let mut parts = vec![size];
             if let Some(fraction) = item.fraction() {
@@ -60,7 +68,7 @@ fn row_actions(app: &App, item: &Download) -> Vec<Widget> {
     };
     let mut actions = Vec::new();
     match item.status {
-        DownloadStatus::Preparing | DownloadStatus::Downloading => {
+        DownloadStatus::Preparing | DownloadStatus::Downloading | DownloadStatus::Converting => {
             actions.push(action(icons::x(), Tone::Neutral, |app, id| app.cancel_download(id)));
         }
         DownloadStatus::Done => {

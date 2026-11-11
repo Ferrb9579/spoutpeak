@@ -26,7 +26,7 @@ use std::num::NonZeroU32;
 use std::path::{Path as FsPath, PathBuf};
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
@@ -121,7 +121,7 @@ pub async fn stream_url(
     let engine = engine().await?;
     let (hash, id) = parse_hash(info_hash)?;
     let wanted = file_idx.map(|i| i as usize);
-    let handle = engine.torrent(&hash, id, trackers.to_vec(), wanted).await?;
+    let handle = engine.torrent(&hash, id, trackers.to_vec(), wanted, None).await?;
     let files = file_list(&handle);
     let index = match wanted {
         Some(index) if index < files.len() => index,
@@ -164,6 +164,120 @@ pub fn cache_folder() -> PathBuf {
     crate::util::cache_dir().join("torrents")
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DownloadProgress {
+    pub received: u64,
+    pub total: u64,
+    /// Bytes per second.
+    pub speed: f64,
+}
+
+/// A torrent file downloaded in full by [`download_file`].
+pub struct Downloaded {
+    pub path: PathBuf,
+    /// The file's name inside the torrent.
+    pub name: String,
+}
+
+/// Downloads one file of a torrent completely, fetching pieces in whatever
+/// order the swarm serves fastest, and returns where it is on disk.
+///
+/// A torrent that is not open yet is written to `staging/<hash>`, a folder
+/// the caller keeps on the same drive as the final file so it can be
+/// hard-linked there instead of copied. If the torrent is already open for
+/// streaming, or the cache still has it, that copy is completed instead.
+/// Call [`finish_download`] once the file has been saved elsewhere.
+pub async fn download_file(
+    info_hash: &str,
+    file_idx: Option<u32>,
+    trackers: &[String],
+    staging: &FsPath,
+    cancel: &AtomicBool,
+    progress: impl Fn(DownloadProgress),
+) -> Result<Downloaded, String> {
+    let engine = engine().await?;
+    let (hash, id) = parse_hash(info_hash)?;
+    let cached = engine.root.join(&hash);
+    let folder = if cached.is_dir() { cached } else { staging.join(&hash) };
+    let wanted = file_idx.map(|i| i as usize);
+    let handle = engine.torrent(&hash, id, trackers.to_vec(), wanted, Some(folder)).await?;
+    let files = file_list(&handle);
+    let index = match wanted {
+        Some(index) if index < files.len() => index,
+        Some(_) => return Err("the torrent has no such file".into()),
+        None => guess_video(&files).ok_or("the torrent has no video file")?,
+    };
+    let (name, total, _) = files[index].clone();
+    engine.select(&handle, index).await?;
+    let Some((active, last_used)) = engine.counters(&hash) else {
+        return Err("the torrent closed unexpectedly".into());
+    };
+    let _hold = Hold::new(active, last_used);
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            // Stop fetching unless someone is also streaming it; pieces so
+            // far stay on disk for Resume.
+            if _hold.active.load(Ordering::SeqCst) == 1 {
+                let _ = engine.session.pause(&handle).await;
+            }
+            return Err("cancelled".into());
+        }
+        let stats = handle.stats();
+        if let Some(error) = stats.error {
+            return Err(format!("torrent error: {error}"));
+        }
+        let received = stats.file_progress.get(index).copied().unwrap_or(0);
+        let speed = stats.live.as_ref().map_or(0.0, |l| l.download_speed.as_bytes() as f64);
+        progress(DownloadProgress { received, total, speed });
+        if received >= total {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let path = handle.output_folder().join(
+        handle
+            .metadata
+            .load_full()
+            .and_then(|m| m.file_infos.get(index).map(|f| f.relative_filename.clone()))
+            .ok_or("the torrent lost its file list")?,
+    );
+    let name = name.rsplit('/').next().unwrap_or(&name).to_owned();
+    Ok(Downloaded { path, name })
+}
+
+/// The download of `info_hash` has been saved (or deleted): its staging
+/// copy can go once nothing streams from it any more.
+pub fn finish_download(info_hash: &str, staging: &FsPath) {
+    let hash = info_hash.to_ascii_lowercase();
+    let open = ENGINE.get().and_then(|engine| {
+        let torrents = engine.torrents.lock().unwrap();
+        torrents.get(&hash).map(|e| e.discard.store(true, Ordering::SeqCst))
+    });
+    if open.is_none() {
+        let _ = std::fs::remove_dir_all(staging.join(&hash));
+    }
+}
+
+/// Counts a running download (or open stream) against its torrent.
+struct Hold {
+    active: Arc<AtomicUsize>,
+    last_used: Arc<Mutex<Instant>>,
+}
+
+impl Hold {
+    fn new(active: Arc<AtomicUsize>, last_used: Arc<Mutex<Instant>>) -> Self {
+        active.fetch_add(1, Ordering::SeqCst);
+        Self { active, last_used }
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        *self.last_used.lock().unwrap() = Instant::now();
+    }
+}
+
 // ------------------------------------------------------------- engine
 
 static ENGINE: tokio::sync::OnceCell<Arc<Engine>> = tokio::sync::OnceCell::const_new();
@@ -179,9 +293,15 @@ async fn engine() -> Result<&'static Arc<Engine>, String> {
 
 struct Entry {
     handle: Handle,
-    /// Open HTTP responses reading from this torrent.
+    /// Open HTTP responses and running downloads using this torrent.
     active: Arc<AtomicUsize>,
     last_used: Arc<Mutex<Instant>>,
+    /// Set for torrents a download added: they are written to a staging
+    /// folder next to the downloads instead of the cache.
+    staging: Option<PathBuf>,
+    /// Delete `staging` once the torrent is closed (its download finished
+    /// or was deleted).
+    discard: Arc<AtomicBool>,
 }
 
 struct Engine {
@@ -290,6 +410,7 @@ impl Engine {
         id: Id20,
         trackers: Vec<String>,
         file: Option<usize>,
+        folder: Option<PathBuf>,
     ) -> Result<Handle, String> {
         if let Some(handle) = self.lookup(hash) {
             return Ok(handle);
@@ -299,16 +420,18 @@ impl Engine {
         if let Some(handle) = self.lookup(hash) {
             return Ok(handle);
         }
+        let folder = folder.unwrap_or_else(|| self.root.join(hash));
+        let staging = (!folder.starts_with(&self.root)).then(|| folder.clone());
         if let Some(handle) = self.session.get(TorrentIdOrHash::Hash(id)) {
-            return Ok(self.remember(hash, handle));
+            return Ok(self.remember(hash, handle, staging));
         }
         let settings = config().lock().unwrap().clone();
         let options = AddTorrentOptions {
             paused: file.is_none(),
             only_files: file.map(|f| vec![f]),
-            // Reuse pieces already in the cache from an earlier session.
+            // Reuse pieces already on disk from an earlier session.
             overwrite: true,
-            output_folder: Some(self.root.join(hash).to_string_lossy().into_owned()),
+            output_folder: Some(folder.to_string_lossy().into_owned()),
             trackers: (!trackers.is_empty()).then_some(trackers),
             peer_limit: (settings.max_connections > 0).then_some(settings.max_connections as usize),
             ..Default::default()
@@ -322,16 +445,18 @@ impl Engine {
         .map_err(|_| "no peers sent the torrent's details in time".to_owned())?
         .map_err(|e| format!("could not open the torrent: {e:#}"))?;
         let handle = added.into_handle().ok_or("the torrent was not added")?;
-        Ok(self.remember(hash, handle))
+        Ok(self.remember(hash, handle, staging))
     }
 
-    fn remember(&self, hash: &str, handle: Handle) -> Handle {
+    fn remember(&self, hash: &str, handle: Handle, staging: Option<PathBuf>) -> Handle {
         self.torrents.lock().unwrap().insert(
             hash.to_owned(),
             Entry {
                 handle: handle.clone(),
                 active: Arc::new(AtomicUsize::new(0)),
                 last_used: Arc::new(Mutex::new(Instant::now())),
+                staging,
+                discard: Arc::new(AtomicBool::new(false)),
             },
         );
         handle
@@ -363,21 +488,28 @@ impl Engine {
 
     /// Stops torrents nobody is watching and trims the cache to its limit.
     async fn housekeeping(&self) {
-        let idle: Vec<Handle> = {
+        let idle: Vec<Entry> = {
             let mut torrents = self.torrents.lock().unwrap();
             let hashes: Vec<String> = torrents
                 .iter()
                 .filter(|(_, e)| {
-                    e.active.load(Ordering::SeqCst) == 0
-                        && e.last_used.lock().unwrap().elapsed() > IDLE_AFTER
+                    let unused = e.active.load(Ordering::SeqCst) == 0;
+                    // A finished download's staging copy goes right away.
+                    let expired = e.discard.load(Ordering::SeqCst)
+                        || e.last_used.lock().unwrap().elapsed() > IDLE_AFTER;
+                    unused && expired
                 })
                 .map(|(hash, _)| hash.clone())
                 .collect();
-            hashes.iter().filter_map(|h| torrents.remove(h)).map(|e| e.handle).collect()
+            hashes.iter().filter_map(|h| torrents.remove(h)).collect()
         };
-        for handle in idle {
-            // Keep the files: they are the cache.
-            let _ = self.session.delete(TorrentIdOrHash::Id(handle.id()), false).await;
+        for entry in idle {
+            // Keep the files: in the cache they speed up replays, in a
+            // staging folder they let an unfinished download resume.
+            let _ = self.session.delete(TorrentIdOrHash::Id(entry.handle.id()), false).await;
+            if let Some(folder) = entry.staging.filter(|_| entry.discard.load(Ordering::SeqCst)) {
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(folder)).await;
+            }
         }
         let Some(limit) = config().lock().unwrap().cache_size else { return };
         let in_use: HashSet<String> = self.torrents.lock().unwrap().keys().cloned().collect();
@@ -550,7 +682,7 @@ async fn serve_file(
     // The torrent may have been stopped while idle (e.g. a long pause):
     // reopen it with the trackers carried in the URL.
     let trackers = trackers_from_query(query.as_deref());
-    let handle = match engine.torrent(&hash, id, trackers, Some(file)).await {
+    let handle = match engine.torrent(&hash, id, trackers, Some(file), None).await {
         Ok(handle) => handle,
         Err(error) => return fail(StatusCode::BAD_GATEWAY, error),
     };

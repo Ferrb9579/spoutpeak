@@ -2,7 +2,7 @@
 
 use super::widgets::*;
 use crate::state::App;
-use crate::store::{PlayerKind, Settings};
+use crate::store::{DownloadFormat, PlayerKind, Settings};
 use crate::streaming::TorrentProfile;
 use crate::theme::*;
 use crate::util::language_name;
@@ -179,7 +179,7 @@ fn autoplay_card(app: &App, settings: &Settings) -> Widget {
     card(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
 }
 
-fn downloads_card(app: &App) -> Widget {
+fn downloads_card(app: &App, format: DownloadFormat) -> Widget {
     let (save, open, reset) = (app.clone(), app.clone(), app.clone());
     let current = crate::downloads::folder().display().to_string();
     card(
@@ -205,6 +205,30 @@ fn downloads_card(app: &App) -> Widget {
                 ])
                 .into(),
             ),
+            setting_row(
+                "Save as",
+                "MP4 plays on phones and TVs; 1080p and 720p also save space",
+                choices(
+                    app,
+                    DownloadFormat::ALL
+                        .iter()
+                        .map(|format| (format.label().to_owned(), *format))
+                        .collect(),
+                    format,
+                    |s, v| s.download_format = v,
+                ),
+            ),
+            text(
+                match crate::convert::encoder_if_known() {
+                    Some(Some(encoder)) => format!("Conversion uses: {}", encoder.label),
+                    Some(None) => "No video encoder works on this PC, so conversion is unavailable.".to_owned(),
+                    None => "Checking for a video encoder…".to_owned(),
+                },
+                12.0,
+                FontWeight::W400,
+                FAINT,
+            )
+            .into(),
         ])
         .cross_axis_alignment(CrossAxisAlignment::Stretch),
     )
@@ -506,7 +530,7 @@ pub fn screen(app: &App) -> Widget {
                 gap(16.0),
                 streaming_card(app, &settings),
                 gap(16.0),
-                downloads_card(app),
+                downloads_card(app, settings.download_format),
                 gap(16.0),
                 shortcuts_card(),
                 gap(16.0),
