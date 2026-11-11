@@ -3,7 +3,8 @@
 //!
 //! `SPOUTPEAK_SCRIPT="wait:4;shot:board;click:Discover;wait:3;shot:discover;exit"`
 //! Steps: `wait:<seconds>`, `shot:<name>`, `click:<label>`,
-//! `clickat:<x>,<y>`, `type:<text>`, `key:<Code>`, `scroll:<dy>`, `exit`.
+//! `clickat:<x>,<y>`, `move:<x>,<y>` (pointer, for `scroll`), `type:<text>`,
+//! `key:<Code>`, `scroll:<dy>` (at the pointer), `exit`.
 //! Screenshots go to `SPOUTPEAK_SHOT_DIR` (default `target/shots`).
 
 use incular::prelude::{Code, Offset};
@@ -49,6 +50,13 @@ fn run(simulation: &Simulation, script: &str, dir: &PathBuf) {
             "clickat" => {
                 let (x, y) = argument.split_once(',').unwrap_or(("0", "0"));
                 simulation.click_at(Offset::new(
+                    x.trim().parse().unwrap_or(0.0),
+                    y.trim().parse().unwrap_or(0.0),
+                ))
+            }
+            "move" => {
+                let (x, y) = argument.split_once(',').unwrap_or(("0", "0"));
+                simulation.move_mouse_to(Offset::new(
                     x.trim().parse().unwrap_or(0.0),
                     y.trim().parse().unwrap_or(0.0),
                 ))

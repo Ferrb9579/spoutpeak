@@ -1,5 +1,6 @@
 //! Title details: metadata on the left, episodes and streams on the right.
 
+use super::motion;
 use super::widgets::*;
 use crate::state::{App, Load, Quality, StreamGroup};
 use crate::addons::types::{Meta, Stream, StreamSource, Video};
@@ -170,17 +171,20 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
     }
 
     let poster = net_image(meta.poster.as_deref(), 200.0, 300.0, 14.0, 342, meta.title());
-    SingleChildScrollView::new(Padding::new(
-        EdgeInsets::only(40.0, 8.0, 36.0, 40.0),
-        hrow(vec![
-            poster,
-            hgap(30.0),
-            Expanded::new(col(children)).into(),
-        ])
-        .cross_axis_alignment(CrossAxisAlignment::Start),
-    ))
-    .controller(app.controllers.detail.clone())
-    .into()
+    smooth(
+        &app.controllers.detail,
+        SingleChildScrollView::new(Padding::new(
+            EdgeInsets::only(40.0, 8.0, 36.0, 40.0),
+            hrow(vec![
+                poster,
+                hgap(30.0),
+                Expanded::new(col(children)).into(),
+            ])
+            .cross_axis_alignment(CrossAxisAlignment::Start),
+        ))
+        .physics(motion::APP_SCROLLED)
+        .controller(app.controllers.detail.clone()),
+    )
 }
 
 trait Pipe: Sized {
@@ -372,12 +376,12 @@ fn streams_pane(app: &App, groups: &[StreamGroup], video: &Video, is_series: boo
             "No streams were found for this title."
         }));
     }
-    SingleChildScrollView::new(Padding::new(
-        EdgeInsets::all(20.0),
-        col(children),
-    ))
-    .controller(app.controllers.streams.clone())
-    .into()
+    smooth(
+        &app.controllers.streams,
+        SingleChildScrollView::new(Padding::new(EdgeInsets::all(20.0), col(children)))
+            .physics(motion::APP_SCROLLED)
+            .controller(app.controllers.streams.clone()),
+    )
 }
 
 fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
@@ -444,10 +448,12 @@ fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
         }));
         children.push(gap(8.0));
     }
-    let list: Widget =
+    let list: Widget = smooth(
+        &app.controllers.streams,
         SingleChildScrollView::new(Padding::new(EdgeInsets::all(20.0), col(children)))
-            .controller(app.controllers.streams.clone())
-            .into();
+            .physics(motion::APP_SCROLLED)
+            .controller(app.controllers.streams.clone()),
+    );
     if !picker {
         return list;
     }
@@ -456,7 +462,10 @@ fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
     let app = app.clone();
     Builder::new(move |_| {
         if app.season_open.get() {
-            layers(vec![list.clone(), season_overlay(&app, entries.clone(), season)])
+            layers(vec![
+                list.clone(),
+                season_overlay(&app, entries.clone(), season),
+            ])
                 .fit(StackFit::Expand)
                 .into()
         } else {
@@ -565,7 +574,7 @@ fn season_overlay(app: &App, entries: Rc<Vec<SeasonEntry>>, current: Option<u32>
             .behavior(HitTestBehavior::Opaque)
             .on_tap(move || close.close_season_picker())
             .into(),
-        Positioned::new(season_dropdown(app, entries, current))
+        Positioned::new(motion::pop_in(season_dropdown(app, entries, current), -6.0))
             .left(20.0)
             .top(20.0 + PICKER_HEIGHT + 6.0)
             .into(),
@@ -611,14 +620,16 @@ fn season_dropdown(app: &App, entries: Rc<Vec<SeasonEntry>>, current: Option<u32
             let count = found.len();
             SizedBox::new()
                 .height(height)
-                .child(
+                .child(smooth(
+                    &controller,
                     ListView::builder(count, move |index| {
                         let entry = &entries[found[index]];
                         season_option(&app, entry, Some(entry.number) == current)
                     })
                     .item_extent(PICKER_ROW)
-                    .controller(controller),
-                )
+                    .physics(motion::APP_SCROLLED)
+                    .controller(controller.clone()),
+                ))
                 .into()
         })
     };

@@ -1,5 +1,6 @@
 //! Board, Discover, Library and Search.
 
+use super::motion;
 use super::widgets::*;
 use crate::state::{App, LibrarySort, Load, ui};
 use crate::addons::types::{LibraryItem, Meta};
@@ -49,36 +50,36 @@ fn continue_watching(app: &App) -> Option<Widget> {
     let items = Rc::new(items);
     let count = items.len();
     let builder_app = app.clone();
-    let strip = SizedBox::new()
-        .height(size.height + CARD_TEXT)
-        .child(
-            ListView::builder(count, move |index| {
-                let item = &items[index];
-                let caption = if item.state.duration > 0.0 {
-                    format!("{}% watched", (item.progress() * 100.0).round())
-                } else {
-                    "Up next".to_owned()
-                };
-                Padding::new(
-                    EdgeInsets::only(0.0, 0.0, CARD_GAP, 0.0),
-                    poster_card(
-                        &builder_app,
-                        &item.as_meta(),
-                        size,
-                        Some(caption),
-                        Some(item.progress()),
-                    ),
-                )
-            })
-            .scroll_direction(Axis::Horizontal)
-            .item_extent(size.width + CARD_GAP)
-            .controller(app.controllers.row("continue-watching")),
-        );
+    let strip = sideways_row(
+        &app.controllers.row("continue-watching"),
+        count,
+        size.width + CARD_GAP,
+        size.height + CARD_TEXT,
+        move |index| {
+            let item = &items[index];
+            let caption = if item.state.duration > 0.0 {
+                format!("{}% watched", (item.progress() * 100.0).round())
+            } else {
+                "Up next".to_owned()
+            };
+            Padding::new(
+                EdgeInsets::only(0.0, 0.0, CARD_GAP, 0.0),
+                poster_card(
+                    &builder_app,
+                    &item.as_meta(),
+                    size,
+                    Some(caption),
+                    Some(item.progress()),
+                ),
+            )
+            .into()
+        },
+    );
     Some(
         col(vec![
             text("Continue watching", 17.0, FontWeight::W600, TEXT).into(),
             gap(10.0),
-            page_wheel(app, strip),
+            strip,
             gap(22.0),
         ])
         .cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -204,12 +205,15 @@ pub fn board(app: &App) -> Widget {
     page(
         "Home",
         vec![refresh],
-        SingleChildScrollView::new(Padding::new(
-            PAGE_PADDING,
-            col(sections).cross_axis_alignment(CrossAxisAlignment::Stretch),
-        ))
-        .controller(app.controllers.board.clone())
-        .into(),
+        smooth(
+            &app.controllers.board,
+            SingleChildScrollView::new(Padding::new(
+                PAGE_PADDING,
+                col(sections).cross_axis_alignment(CrossAxisAlignment::Stretch),
+            ))
+            .physics(motion::APP_SCROLLED)
+            .controller(app.controllers.board.clone()),
+        ),
     )
 }
 
@@ -502,13 +506,15 @@ pub fn search(app: &App) -> Widget {
                 row(bar),
             )
             .into(),
-            Expanded::new(
+            Expanded::new(smooth(
+                &app.controllers.search_results,
                 SingleChildScrollView::new(Padding::new(
                     PAGE_PADDING,
                     col(sections).cross_axis_alignment(CrossAxisAlignment::Stretch),
                 ))
+                .physics(motion::APP_SCROLLED)
                 .controller(app.controllers.search_results.clone()),
-            )
+            ))
             .into(),
         ])
         .cross_axis_alignment(CrossAxisAlignment::Stretch)

@@ -1,5 +1,6 @@
 //! The player screen: picture, subtitles and transport controls.
 
+use super::motion::{self, WheelAxis};
 use crate::player::{Menu, Status, SubChoice};
 use crate::player::engine::MAX_VOLUME;
 use crate::state::App;
@@ -11,6 +12,7 @@ use incular::prelude::*;
 use incular::widgets::{HitTestBehavior, StackFit};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 const OVERLAY: Color = Color::rgba(8, 9, 14, 205);
 
@@ -722,8 +724,13 @@ fn menu_panel(app: &App, menu: Menu) -> Option<Widget> {
                 Constraints::tight(Size::new(PANEL_INNER, height)),
                 // A shared controller: the panel is rebuilt whenever player
                 // state changes, and a fresh controller would jump to the top.
-                SingleChildScrollView::new(col(panel.children))
-                    .controller(app.controllers.player_menu.clone()),
+                motion::wheel(
+                    &app.controllers.player_menu,
+                    WheelAxis::Vertical,
+                    SingleChildScrollView::new(col(panel.children))
+                        .physics(motion::APP_SCROLLED)
+                        .controller(app.controllers.player_menu.clone()),
+                ),
             ))
             .into(),
     )
@@ -841,9 +848,10 @@ fn sync_panel(app: &App) -> Widget {
         .into()
     } else {
         let controller = app.controllers.sync_list.clone();
+        let wheel_controller = controller.clone();
         let app = app.clone();
         let count = cues.len();
-        ListView::builder(count, move |index| {
+        let list = ListView::builder(count, move |index| {
             let cue = &cues[index];
             let selected = current == Some(index);
             let start = cue.start;
@@ -880,8 +888,9 @@ fn sync_panel(app: &App) -> Widget {
             .on_click(move || app.sync_subtitle_to(start))
         })
         .item_extent(App::SYNC_ROW)
-        .controller(controller)
-        .into()
+        .physics(motion::APP_SCROLLED)
+        .controller(controller);
+        motion::wheel(&wheel_controller, WheelAxis::Vertical, list)
     };
 
     Container::new()
@@ -1181,6 +1190,15 @@ fn status_card(children: Vec<Widget>) -> Widget {
     .into()
 }
 
+const CHROME_FADE: Duration = Duration::from_millis(180);
+
+thread_local! {
+    /// The controls' fade, kept across rebuilds of the player screen.
+    static CHROME: motion::Entrance = motion::Entrance::new();
+    /// Whether the controls were showing at the last build.
+    static CHROME_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
 pub fn screen(app: &App) -> Widget {
     let (stage, status, title, subtitle, visible, menu, stalled, has_video, torrent, next, brightness) =
         app.player.state.read(|s| {
@@ -1234,12 +1252,15 @@ pub fn screen(app: &App) -> Widget {
             // One widget per line, centred by the column: `TextAlign::Center`
             // on shrink-wrapped text clips in Incular 0.1.1.
             let lines: Vec<&str> = cue.lines().collect();
+            // Captions move up with the controls, and back down when they hide.
             Align::new(
                 Alignment::BOTTOM_CENTER,
-                Padding::new(
+                AnimatedPadding::new(
                     EdgeInsets::only(48.0, 0.0, 48.0, if lifted { 128.0 } else { 44.0 }),
+                    CHROME_FADE,
                     IgnorePointer::new(caption_block(&lines, size, &sub_style)),
-                ),
+                )
+                .curve(Curve::EaseOutCubic),
             )
             .into()
         })
@@ -1355,7 +1376,19 @@ pub fn screen(app: &App) -> Widget {
         layers.push(up_next_card(app, &next_video, left, visible));
     }
 
-    if visible {
+    // The controls fade in and out. While fading out they stay in the tree
+    // but ignore the pointer; a rebuild after the fade removes them.
+    let fade = CHROME.with(|c| c.clone());
+    if CHROME_SHOWN.with(|shown| shown.replace(visible)) != visible {
+        fade.fade_to(if visible { 1.0 } else { 0.0 }, CHROME_FADE);
+        if !visible {
+            crate::state::spawn(
+                async { tokio::time::sleep(CHROME_FADE + Duration::from_millis(40)).await },
+                |app, ()| app.player.state.write(|_| ()),
+            );
+        }
+    }
+    if visible || fade.opacity() > 0.0 {
         let mut chrome: Vec<Widget> = vec![
             top_bar(app, &title, &subtitle),
             Spacer::new().into(),
@@ -1364,17 +1397,21 @@ pub fn screen(app: &App) -> Widget {
             chrome.push(
                 Align::new(
                     Alignment::BOTTOM_RIGHT,
-                    Padding::new(EdgeInsets::only(0.0, 0.0, 20.0, 10.0), panel),
+                    Padding::new(
+                        EdgeInsets::only(0.0, 0.0, 20.0, 10.0),
+                        motion::pop_in(panel, 8.0),
+                    ),
                 )
                 .into(),
             );
         }
         chrome.push(bottom_bar(app));
-        layers.push(
-            Column::new(chrome)
-                .cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .into(),
-        );
+        layers.push(fade.wrap(
+            IgnorePointer::new(
+                Column::new(chrome).cross_axis_alignment(CrossAxisAlignment::Stretch),
+            )
+            .ignoring(!visible),
+        ));
     }
 
     // The player owns keyboard focus while it is on screen, and its buttons

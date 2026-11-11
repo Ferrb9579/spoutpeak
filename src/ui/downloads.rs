@@ -1,5 +1,6 @@
 //! The Downloads page: progress of running downloads and the saved files.
 
+use super::motion;
 use super::widgets::*;
 use crate::downloads::{self, Download, DownloadStatus};
 use crate::state::App;
@@ -160,11 +161,14 @@ pub fn screen(app: &App) -> Widget {
     } else {
         let controller = app.controllers.downloads.clone();
         let app = app.clone();
-        ListView::builder(items.len(), move |index| download_row(&app, &items[index]))
-            .item_extent(ROW_HEIGHT)
-            .padding(PAGE_PADDING)
-            .controller(controller)
-            .into()
+        smooth(
+            &controller,
+            ListView::builder(items.len(), move |index| download_row(&app, &items[index]))
+                .item_extent(ROW_HEIGHT)
+                .padding(PAGE_PADDING)
+                .physics(motion::APP_SCROLLED)
+                .controller(controller.clone()),
+        )
     };
     page("Downloads", trailing, body)
 }

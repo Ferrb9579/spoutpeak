@@ -112,11 +112,16 @@ pub fn screen(app: &App) -> Widget {
                 gap(22.0),
                 layers(vec![
                     Container::new().width(WIDTH).height(6.0).radius(3.0).color(SURFACE_HI).into(),
-                    Container::new()
+                    // Fills smoothly as each step arrives.
+                    AnimatedContainer::new(std::time::Duration::from_millis(450))
+                        .curve(Curve::EaseOutCubic)
                         .width((WIDTH * fraction).max(6.0))
                         .height(6.0)
-                        .radius(3.0)
-                        .color(ACCENT)
+                        .decoration(
+                            BoxDecoration::new()
+                                .color(ACCENT)
+                                .border_radius(BorderRadius::all(Radius::circular(3.0))),
+                        )
                         .into(),
                 ])
                 .into(),

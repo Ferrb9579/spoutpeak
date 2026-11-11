@@ -1,5 +1,6 @@
 //! Addon management: installed list, community catalog, install by URL.
 
+use super::motion;
 use super::widgets::*;
 use crate::state::{AddonsTab, App, Load};
 use crate::addons::configure_url;
@@ -163,13 +164,16 @@ pub fn screen(app: &App) -> Widget {
             let controller = app.controllers.addons.clone();
             let app = app.clone();
             let items = installed.clone();
-            ListView::builder(items.len(), move |index| {
-                addon_card(&app, &items[index], true, true)
-            })
-            .item_extent(CARD_HEIGHT)
-            .padding(PAGE_PADDING)
-            .controller(controller)
-            .into()
+            smooth(
+                &controller,
+                ListView::builder(items.len(), move |index| {
+                    addon_card(&app, &items[index], true, true)
+                })
+                .item_extent(CARD_HEIGHT)
+                .padding(PAGE_PADDING)
+                .physics(motion::APP_SCROLLED)
+                .controller(controller.clone()),
+            )
         }
         AddonsTab::Community => match community {
             Load::Ready(all) => {
@@ -188,18 +192,24 @@ pub fn screen(app: &App) -> Widget {
                         })
                         .collect(),
                 );
+                let controller = app.controllers.row("list:community-addons");
                 let app = app.clone();
                 let installed = installed.clone();
-                ListView::builder(filtered.len(), move |index| {
-                    let addon = &filtered[index];
-                    let is_installed = installed.iter().any(|i| {
-                        i.transport_url == addon.transport_url || i.manifest.id == addon.manifest.id
-                    });
-                    addon_card(&app, addon, is_installed, false)
-                })
-                .item_extent(CARD_HEIGHT)
-                .padding(PAGE_PADDING)
-                .into()
+                smooth(
+                    &controller,
+                    ListView::builder(filtered.len(), move |index| {
+                        let addon = &filtered[index];
+                        let is_installed = installed.iter().any(|i| {
+                            i.transport_url == addon.transport_url
+                                || i.manifest.id == addon.manifest.id
+                        });
+                        addon_card(&app, addon, is_installed, false)
+                    })
+                    .item_extent(CARD_HEIGHT)
+                    .padding(PAGE_PADDING)
+                    .physics(motion::APP_SCROLLED)
+                    .controller(controller.clone()),
+                )
             }
             Load::Failed(error) => Padding::new(
                 PAGE_PADDING,

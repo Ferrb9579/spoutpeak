@@ -1,5 +1,6 @@
 //! Settings: playback, streaming, downloads.
 
+use super::motion;
 use super::widgets::*;
 use crate::state::App;
 use crate::store::{DownloadFormat, PlayerKind, Settings};
@@ -519,7 +520,7 @@ pub fn screen(app: &App) -> Widget {
     page(
         "Settings",
         vec![],
-        SingleChildScrollView::new(Padding::new(
+        smooth(&app.controllers.settings, SingleChildScrollView::new(Padding::new(
             PAGE_PADDING,
             col(vec![
                 playback_card(app, &settings),
@@ -540,7 +541,7 @@ pub fn screen(app: &App) -> Widget {
             ])
             .cross_axis_alignment(CrossAxisAlignment::Stretch),
         ))
-        .controller(app.controllers.settings.clone())
-        .into(),
+        .physics(motion::APP_SCROLLED)
+        .controller(app.controllers.settings.clone())),
     )
 }

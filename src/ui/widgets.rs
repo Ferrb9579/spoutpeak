@@ -1,7 +1,8 @@
 //! Shared visual pieces: network images, poster cards, catalog rows.
 
+use super::motion::{self, Feel, WheelAxis};
 use crate::images::{self, Picture};
-use crate::state::{App, CatalogRow, Load, Route};
+use crate::state::{App, CatalogRow, Load};
 use crate::addons::types::Meta;
 use crate::theme::*;
 use incular::controls::{Button, ButtonStyle, StateColor};
@@ -51,18 +52,29 @@ pub fn net_image(
     // clips to the bounding rectangle.
     let shape = (radius > 0.0).then_some(images::Shape { width, height, radius });
     let picture = images::shaped(url, max_pixels, shape);
+    // Fade in over the placeholder only when the download finishes while
+    // this is on screen; cached images appear straight away.
+    let waited = std::cell::Cell::new(false);
     Builder::new(move |_| match picture.get() {
-        Picture::Ready(handle) => SizedBox::new()
-            .width(width)
-            .height(height)
-            .child(
-                Image::new(handle)
-                    .width(width)
-                    .height(height)
-                    .fit(BoxFit::Cover),
-            )
-            .into(),
-        _ => placeholder(width, height, radius, &label),
+        Picture::Ready(handle) => {
+            let image: Widget = Image::new(handle)
+                .width(width)
+                .height(height)
+                .fit(BoxFit::Cover)
+                .into();
+            let image = if waited.replace(false) {
+                let fade = motion::Entrance::new();
+                fade.play(std::time::Duration::from_millis(260), 0.0);
+                layers(vec![placeholder(width, height, radius, &label), fade.wrap(image)]).into()
+            } else {
+                image
+            };
+            SizedBox::new().width(width).height(height).child(image).into()
+        }
+        _ => {
+            waited.set(true);
+            placeholder(width, height, radius, &label)
+        }
     })
     .into()
 }
@@ -219,18 +231,20 @@ pub fn poster_card(
 /// wheel. Incular's horizontal viewports only read the wheel's x delta, which
 /// a plain mouse never produces.
 pub fn horizontal_scroller(controller: &ScrollController, child: impl Into<Widget>) -> Widget {
-    let wheel = controller.clone();
-    Listener::new(
+    motion::wheel(
+        controller,
+        WheelAxis::HorizontalOrVertical,
         SingleChildScrollView::new(child)
             .scroll_direction(Axis::Horizontal)
+            .physics(motion::APP_SCROLLED)
             .controller(controller.clone()),
     )
-    .on_pointer_signal(move |event| {
-        if event.scroll_delta.y != 0.0 {
-            wheel.scroll_by(event.scroll_delta.y);
-        }
-    })
-    .into()
+}
+
+/// A vertical page or list that scrolls with a smooth, spring-driven wheel.
+/// `view` must set `motion::APP_SCROLLED` physics.
+pub fn smooth(controller: &ScrollController, view: impl Into<Widget>) -> Widget {
+    motion::wheel(controller, WheelAxis::Vertical, view)
 }
 
 /// A status line for loading / empty / failed states.
@@ -249,10 +263,14 @@ fn row_header(app: &App, title: &str, subtitle: &str, key: &str, scrollable: boo
         Spacer::new().into(),
     ];
     if scrollable {
-        for (glyph, delta) in [(icons::chevron_left(), -720.0_f32), (icons::chevron_right(), 720.0)] {
+        for (glyph, direction) in [(icons::chevron_left(), -1.0_f32), (icons::chevron_right(), 1.0)] {
             let controller = app.controllers.row(key);
             children.push(small_icon_button(glyph, None, Tone::Neutral, move || {
-                controller.scroll_by(delta);
+                // Most of a row's visible width, so one card stays in view
+                // for context.
+                let width = controller.viewport_extent();
+                let page = if width > 0.0 { width * 0.8 } else { 720.0 };
+                motion::glide_by(&controller, direction * page, Feel::Page);
             }));
             children.push(hgap(6.0));
         }
@@ -262,44 +280,44 @@ fn row_header(app: &App, title: &str, subtitle: &str, key: &str, scrollable: boo
         .into()
 }
 
-/// Passes a vertical mouse wheel over a sideways row on to the page that
-/// contains it. Incular hands the wheel to the innermost (horizontal) view
-/// only, so without this the page stops scrolling under the cursor.
-pub fn page_wheel(app: &App, row: impl Into<Widget>) -> Widget {
-    let app = app.clone();
-    Listener::new(row)
-        .on_pointer_signal(move |event| {
-            if event.scroll_delta.y == 0.0 {
-                return;
-            }
-            let page = match app.route.get_untracked().last() {
-                Some(Route::Search) => &app.controllers.search_results,
-                _ => &app.controllers.board,
-            };
-            page.scroll_by(event.scroll_delta.y);
-        })
-        .into()
+/// A horizontally scrolling, lazily built row of `count` equal-width items.
+/// It follows a sideways wheel or trackpad; a vertical wheel passes through
+/// to the page around it.
+pub fn sideways_row(
+    controller: &ScrollController,
+    count: usize,
+    item_extent: f32,
+    height: f32,
+    item: impl Fn(usize) -> Widget + 'static,
+) -> Widget {
+    motion::wheel(
+        controller,
+        WheelAxis::Horizontal,
+        SizedBox::new().height(height).child(
+            ListView::builder(count, item)
+                .scroll_direction(Axis::Horizontal)
+                .item_extent(item_extent)
+                .physics(motion::APP_SCROLLED)
+                .controller(controller.clone()),
+        ),
+    )
 }
 
 /// A horizontally scrolling, lazily built strip of poster cards.
 pub fn poster_strip(app: &App, key: &str, items: Rc<Vec<Meta>>, size: CardSize) -> Widget {
     let app_for_items = app.clone();
-    let count = items.len();
-    page_wheel(
-        app,
-        SizedBox::new()
-            .height(size.height + CARD_TEXT)
-            .child(
-                ListView::builder(count, move |index| {
-                    Padding::new(
-                        EdgeInsets::only(0.0, 0.0, CARD_GAP, 0.0),
-                        poster_card(&app_for_items, &items[index], size, None, None),
-                    )
-                })
-                .scroll_direction(Axis::Horizontal)
-                .item_extent(size.width + CARD_GAP)
-                .controller(app.controllers.row(key)),
-            ),
+    sideways_row(
+        &app.controllers.row(key),
+        items.len(),
+        size.width + CARD_GAP,
+        size.height + CARD_TEXT,
+        move |index| {
+            Padding::new(
+                EdgeInsets::only(0.0, 0.0, CARD_GAP, 0.0),
+                poster_card(&app_for_items, &items[index], size, None, None),
+            )
+            .into()
+        },
     )
 }
 
@@ -367,7 +385,7 @@ pub fn poster_grid(
     let size = card_size(items.first().and_then(|m| m.poster_shape.as_deref()));
     let app = app.clone();
     let count = items.len();
-    GridView::builder(
+    smooth(controller, GridView::builder(
         count,
         SliverGridDelegate::max_cross_axis_extent(size.width + CARD_GAP)
             .main_axis_extent(size.height + CARD_TEXT + CARD_GAP),
@@ -383,6 +401,6 @@ pub fn poster_grid(
         },
     )
     .controller(controller.clone())
-    .padding(PAGE_PADDING)
-    .into()
+    .physics(motion::APP_SCROLLED)
+    .padding(PAGE_PADDING))
 }

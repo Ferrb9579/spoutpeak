@@ -4,6 +4,7 @@ mod addons;
 mod browse;
 mod detail;
 mod downloads;
+mod motion;
 mod player;
 mod settings;
 mod splash;
@@ -14,7 +15,9 @@ use crate::theme::*;
 use incular::controls::{Button, ButtonStyle, ControlTheme, ControlThemeScope, StateColor};
 use incular::prelude::*;
 use incular::widgets::StackFit;
+use std::cell::Cell;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Wraps a screen so it rebuilds on its own when the state it reads changes.
 fn island(app: &App, build: fn(&App) -> Widget) -> Widget {
@@ -180,7 +183,7 @@ fn toast(app: &App) -> Widget {
             Alignment::BOTTOM_CENTER,
             Padding::new(
                 EdgeInsets::only(0.0, 0.0, 0.0, 34.0),
-                IgnorePointer::new(
+                IgnorePointer::new(motion::pop_in(
                     Container::new()
                         .padding(EdgeInsets::symmetric(18.0, 11.0))
                         .decoration(
@@ -189,7 +192,8 @@ fn toast(app: &App) -> Widget {
                                 .border_radius(BorderRadius::all(Radius::circular(12.0))),
                         )
                         .child(text(message, 13.5, FontWeight::W500, Color::rgba(18, 20, 30, 255))),
-                ),
+                    14.0,
+                )),
             ),
         )
         .into(),
@@ -282,14 +286,55 @@ pub(super) fn handle_key(app: &App, event: &KeyboardEvent) -> bool {
     true
 }
 
+const PAGE_ENTRANCE: Duration = Duration::from_millis(220);
+const SPLASH_FADE: Duration = Duration::from_millis(320);
+
+thread_local! {
+    /// Fade and rise of the screen that just opened.
+    static PAGE: motion::Entrance = motion::Entrance::new();
+    static LAST_ROUTE: Cell<Option<Route>> = const { Cell::new(None) };
+    /// Set once the startup screen has finished fading out.
+    static SPLASH_GONE: Signal<bool> = Signal::new(false);
+}
+
+/// The startup screen; fades out once startup finishes, then leaves the tree.
+fn splash_layer(app: &App) -> Widget {
+    let app = app.clone();
+    Builder::new(move |_| {
+        if !app.booted.get() {
+            return island(&app, splash::screen);
+        }
+        IgnorePointer::new(
+            island(&app, splash::screen)
+                .animate()
+                .duration(SPLASH_FADE)
+                .curve(Curve::EaseOut)
+                .fade_out()
+                .on_complete(|| {
+                    SPLASH_GONE.with(|gone| gone.set(true));
+                }),
+        )
+        .into()
+    })
+    .into()
+}
+
 pub fn root(app: &App) -> Widget {
     let stack = app.route.get();
     let route = stack.last().copied().unwrap_or(Route::Board);
     let base = stack.first().copied().unwrap_or(Route::Board);
 
+    // Each newly opened screen fades in and rises a little. Compositor-only:
+    // the screen itself builds once.
+    let page = PAGE.with(|p| p.clone());
+    let previous = LAST_ROUTE.with(|last| last.replace(Some(route)));
+    if previous.is_some_and(|previous| previous != route) {
+        page.play(PAGE_ENTRANCE, if route == Route::Player { 0.0 } else { 10.0 });
+    }
+
     let content: Widget = match route {
-        Route::Player => island(app, player::screen),
-        Route::Detail => island(app, detail::screen),
+        Route::Player => page.wrap(island(app, player::screen)),
+        Route::Detail => page.wrap(island(app, detail::screen)),
         _ => {
             let screen = match route {
                 Route::Board => island(app, browse::board),
@@ -300,16 +345,15 @@ pub fn root(app: &App) -> Widget {
                 Route::Downloads => island(app, downloads::screen),
                 _ => island(app, settings::screen),
             };
-            hrow(vec![sidebar(app, base), Expanded::new(screen).into()])
+            hrow(vec![sidebar(app, base), Expanded::new(page.wrap(screen)).into()])
                 .cross_axis_alignment(CrossAxisAlignment::Stretch)
                 .into()
         }
     };
 
     let mut stacked = vec![content, IgnorePointer::new(toast(app)).into()];
-    // Reading `booted` here rebuilds the root once, when startup finishes.
-    if !app.booted.get() && route != Route::Player {
-        stacked.push(island(app, splash::screen));
+    if !SPLASH_GONE.with(|gone| gone.get()) && route != Route::Player {
+        stacked.push(splash_layer(app));
     }
     let layered = layers(stacked).fit(StackFit::Expand);
     let keys = app.clone();
@@ -317,7 +361,9 @@ pub fn root(app: &App) -> Widget {
         ControlTheme::dark(),
         DefaultTextStyle::new(
             style(14.0, FontWeight::W400, TEXT),
-            Container::new().color(BG).child(layered),
+            // The frame clock for smooth scrolling (Incular has no public
+            // ticker; see INCULAR-GAPS-2.md).
+            motion::clock(Container::new().color(BG).child(layered)),
         ),
     );
     Directionality::new(
