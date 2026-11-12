@@ -142,7 +142,9 @@ fn step() {
             .last_step
             .replace(Some(now))
             .map_or(1.0 / 60.0, |last| now.duration_since(last).as_secs_f32());
-        (std::mem::take(&mut *m.glides.borrow_mut()), dt.clamp(0.0, 1.0 / 20.0))
+        // The spring is solved exactly, so a long frame is fine: clamping it
+        // made the glide run slower than real time on a busy screen.
+        (std::mem::take(&mut *m.glides.borrow_mut()), dt.clamp(0.0, 0.25))
     });
     glides.retain_mut(|glide| {
         let controller = glide.controller.clone();
@@ -225,6 +227,29 @@ pub fn glide_by(controller: &ScrollController, delta: f32, feel: Feel) -> bool {
     started
 }
 
+thread_local! {
+    /// When the last wheel notch arrived, and the boost it got.
+    static LAST_NOTCH: Cell<Option<(Instant, f32)>> = const { Cell::new(None) };
+}
+
+/// Wheel acceleration: notches in quick succession travel further (up to
+/// 4x), so a fast flick covers the page while a single notch stays precise.
+fn wheel_boost(at: Instant) -> f32 {
+    LAST_NOTCH.with(|last| {
+        let boost = match last.get() {
+            // The same event seen by an outer view: same boost.
+            Some((then, boost)) if then == at => return boost,
+            Some((then, boost)) => {
+                let gap = at.saturating_duration_since(then).as_secs_f32();
+                if gap < 0.12 { (boost * 1.35).min(4.0) } else { 1.0 }
+            }
+            None => 1.0,
+        };
+        last.set(Some((at, boost)));
+        boost
+    })
+}
+
 /// Which wheel axis a scroll view follows.
 #[derive(Clone, Copy)]
 pub enum WheelAxis {
@@ -259,6 +284,7 @@ pub fn wheel(controller: &ScrollController, axis: WheelAxis, view: impl Into<Wid
                 return;
             }
             let claimed = MOTION.with(|m| m.claimed.get() == Some(event.time));
+            let delta = delta * wheel_boost(event.time);
             if !claimed && glide_by(&controller, delta, Feel::Wheel) {
                 MOTION.with(|m| m.claimed.set(Some(event.time)));
             }

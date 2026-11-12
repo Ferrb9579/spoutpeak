@@ -210,18 +210,22 @@ pub fn poster_card(
             gap(7.0),
             SizedBox::new()
                 .width(inner_width)
-                .child(line(title, 13.0, FontWeight::W600, TEXT))
+                .child(line(title.clone(), 13.0, FontWeight::W600, TEXT))
                 .into(),
             gap(2.0),
             SizedBox::new()
                 .width(inner_width)
-                .child(line(caption, 11.5, FontWeight::W400, MUTED))
+                .child(line(caption.clone(), 11.5, FontWeight::W400, MUTED))
                 .into(),
         ]),
     );
+    let full = if caption.is_empty() { title.clone() } else { format!("{title}
+{caption}") };
     let (app, meta) = (app.clone(), meta.clone());
+    // Inside the button: wrapped around it, a MouseRegion keeps the button
+    // from seeing the pointer at all.
     card_button(
-        content.into(),
+        super::tooltip::tooltip(full, content),
         Size::new(size.width, size.height + CARD_TEXT),
         move || app.open_detail(meta.clone()),
     )

@@ -7,6 +7,7 @@ mod downloads;
 mod motion;
 mod player;
 mod together;
+pub mod tooltip;
 mod settings;
 mod splash;
 mod widgets;
@@ -125,13 +126,15 @@ fn sidebar(app: &App, current: Route) -> Widget {
             };
             let titles = app.library.read(|l| l.values().filter(|i| !i.removed).count());
             let open = app.clone();
-            GestureDetector::new(
+            let hovered = FOOTER_HOVER.with(|h| h.clone());
+            let (enter, exit) = (hovered.clone(), hovered.clone());
+            let card = GestureDetector::new(
                 Container::new()
                     .width(NAV_WIDTH)
                     .padding(EdgeInsets::all(12.0))
                     .decoration(
                         BoxDecoration::new()
-                            .color(SURFACE)
+                            .color(if hovered.get() { SURFACE_HI } else { SURFACE })
                             .border_radius(BorderRadius::all(Radius::circular(14.0))),
                     )
                     .child(col(vec![
@@ -152,8 +155,15 @@ fn sidebar(app: &App, current: Route) -> Widget {
                         .into(),
                     ])),
             )
-            .on_tap(move || open.go(Route::Settings))
-            .into()
+            .on_tap(move || open.go(Route::Settings));
+            MouseRegion::new(card)
+                .on_enter(move |_| {
+                    enter.set(true);
+                })
+                .on_exit(move |_| {
+                    exit.set(false);
+                })
+                .into()
         })
     };
     items.push(footer.into());
@@ -301,6 +311,8 @@ const PAGE_ENTRANCE: Duration = Duration::from_millis(220);
 const SPLASH_FADE: Duration = Duration::from_millis(320);
 
 thread_local! {
+    /// The pointer is over the sidebar's library card.
+    static FOOTER_HOVER: Signal<bool> = Signal::new(false);
     /// Fade and rise of the screen that just opened.
     static PAGE: motion::Entrance = motion::Entrance::new();
     static LAST_ROUTE: Cell<Option<Route>> = const { Cell::new(None) };
@@ -340,6 +352,8 @@ pub fn root(app: &App) -> Widget {
     let page = PAGE.with(|p| p.clone());
     let previous = LAST_ROUTE.with(|last| last.replace(Some(route)));
     if previous.is_some_and(|previous| previous != route) {
+        // Not during the build: Incular forbids state changes there.
+        crate::state::spawn(async {}, |_, ()| tooltip::hide());
         page.play(PAGE_ENTRANCE, if route == Route::Player { 0.0 } else { 10.0 });
     }
 
@@ -363,7 +377,17 @@ pub fn root(app: &App) -> Widget {
         }
     };
 
-    let mut stacked = vec![content, IgnorePointer::new(toast(app)).into()];
+    let tip = Builder::new(|_| {
+        LayoutBuilder::new(|_, constraints| {
+            tooltip::layer(constraints.biggest()).unwrap_or_else(|| SizedBox::shrink().into())
+        })
+        .into()
+    });
+    let mut stacked = vec![
+        content,
+        IgnorePointer::new(toast(app)).into(),
+        IgnorePointer::new(tip).into(),
+    ];
     if !SPLASH_GONE.with(|gone| gone.get()) && route != Route::Player {
         stacked.push(splash_layer(app));
     }

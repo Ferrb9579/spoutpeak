@@ -13,18 +13,31 @@ use std::rc::Rc;
 const PANEL_WIDTH: f32 = 460.0;
 const PANEL_INNER: f32 = PANEL_WIDTH - 40.0;
 
+/// Frosted-glass fills (over the blurred panel).
+const GLASS: Color = Color::rgba(255, 255, 255, 12);
+const GLASS_HOVER: Color = Color::rgba(255, 255, 255, 26);
+/// Selected / "continue" tiles: the accent, see-through.
+const GLASS_ACCENT: Color = Color::rgba(255, 138, 76, 52);
+const GLASS_ACCENT_HOVER: Color = Color::rgba(255, 138, 76, 84);
+
+/// Acrylic: what lies behind `child` is blurred, then `child` (a translucent
+/// tint) is drawn over it. Incular 0.1.1 clips the blur to the bounding box,
+/// not the rounded corners, so keep tints dark enough to hide that.
+fn acrylic(child: impl Into<Widget>, radius: f32, sigma: f32) -> Widget {
+    ClipRRect::new(radius, incular::widgets::BackdropFilter::blur(sigma, child)).into()
+}
+
 /// A list tile that grows with its content (controls `Button` has a fixed
 /// height), with its own hover state.
 fn list_button(child: Widget, width: f32, selected: bool, on_click: impl Fn() + 'static) -> Widget {
     let hovered = Signal::new(false);
     let on_click = std::rc::Rc::new(on_click);
     Builder::new(move |_| {
-        let background = if selected {
-            ACCENT_DIM
-        } else if hovered.get() {
-            SURFACE_HOVER
-        } else {
-            SURFACE
+        let background = match (selected, hovered.get()) {
+            (true, true) => GLASS_ACCENT_HOVER,
+            (true, false) => GLASS_ACCENT,
+            (false, true) => GLASS_HOVER,
+            (false, false) => GLASS,
         };
         let (enter, exit, click) = (hovered.clone(), hovered.clone(), on_click.clone());
         MouseRegion::new(
@@ -90,7 +103,7 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
         icon_text_button(
             if in_library { icons::check() } else { icons::plus() },
             if in_library { "In library" } else { "Add to library" },
-            if in_library { Tone::Neutral } else { Tone::Primary },
+            if in_library { Tone::Glass } else { Tone::Primary },
             move || app.toggle_library(&meta),
         )
     }];
@@ -103,7 +116,7 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
     if let Some(id) = trailer {
         actions.push(hgap(10.0));
         let app = app.clone();
-        actions.push(button("Trailer", Tone::Neutral, move || {
+        actions.push(button("Trailer", Tone::Glass, move || {
             app.play_stream(&Stream {
                 yt_id: Some(id.clone()),
                 ..Stream::default()
@@ -114,7 +127,7 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
         actions.push(hgap(10.0));
         let url = format!("https://www.imdb.com/title/{}/", meta.id());
         let app = app.clone();
-        actions.push(button("IMDb", Tone::Ghost, move || {
+        actions.push(button("IMDb", Tone::Glass, move || {
             app.play_stream(&Stream {
                 external_url: Some(url.clone()),
                 ..Stream::default()
@@ -218,6 +231,8 @@ fn stream_tile(app: &App, stream: &Stream) -> Widget {
         lines.push(
             Text::new(breakable(&details))
                 .style(style(12.0, FontWeight::W400, MUTED))
+                .max_lines(Some(3))
+                .overflow(TextOverflow::Ellipsis)
                 .into(),
         );
     }
@@ -229,11 +244,11 @@ fn stream_tile(app: &App, stream: &Stream) -> Widget {
     // nested button would also reach the tile's own gesture detector.
     let tile_width = if downloadable { PANEL_INNER - DOWNLOAD_BUTTON - 8.0 } else { PANEL_INNER };
     let (play, play_stream) = (app.clone(), stream.clone());
+    // The full, untruncated text on hover.
+    let full = if details.is_empty() { headline } else { format!("{headline}
+{details}") };
     let tile = list_button(
-        SizedBox::new()
-            .width(tile_width - 26.0)
-            .child(col(lines))
-            .into(),
+        super::tooltip::tooltip(full, SizedBox::new().width(tile_width - 26.0).child(col(lines))),
         tile_width,
         false,
         move || play.play_stream(&play_stream),
@@ -271,8 +286,8 @@ fn download_button(on_click: impl Fn() + 'static) -> Widget {
     use incular::controls::{Button, ButtonStyle, StateColor};
     Button::with_child(icon(icons::download(), 18.0, MUTED))
         .style(ButtonStyle {
-            background: Some(SURFACE),
-            background_states: Some(StateColor::new(SURFACE).hovered(SURFACE_HOVER)),
+            background: Some(GLASS),
+            background_states: Some(StateColor::new(GLASS).hovered(GLASS_HOVER)),
             foreground: Some(TEXT),
             border: Some(Border::new(0.0, Color::TRANSPARENT)),
             border_radius: Some(12.0),
@@ -293,7 +308,7 @@ fn streams_pane(app: &App, groups: &[StreamGroup], video: &Video, is_series: boo
         let app = app.clone();
         children.push(
             row(vec![
-                small_icon_button(icons::chevron_left(), Some("Episodes"), Tone::Neutral, move || {
+                small_icon_button(icons::chevron_left(), Some("Episodes"), Tone::Glass, move || {
                     app.clear_video()
                 }),
                 hgap(12.0),
@@ -432,6 +447,55 @@ fn streams_pane(app: &App, groups: &[StreamGroup], video: &Video, is_series: boo
     )
 }
 
+/// "Continue" for the episode watched last: resumes it with the stream used
+/// last time, or opens its streams when none is remembered.
+fn continue_card(app: &App, meta: &Meta, resume: Option<&str>) -> Option<Widget> {
+    let video = meta.videos.iter().find(|v| Some(v.id()) == resume)?.clone();
+    let progress = app.library.read(|l| l.get(meta.id()).map(|i| i.progress())).unwrap_or(0.0);
+    let last = app.last_stream(meta.id(), Some(video.id()));
+    let detail = match (&last, progress > 0.01) {
+        (Some(_), true) => format!("{:.0}% watched · resumes with the stream you used", progress * 100.0),
+        (Some(_), false) => "Plays with the stream you used last time".to_owned(),
+        (None, true) => format!("{:.0}% watched · pick a stream to resume", progress * 100.0),
+        (None, false) => "Pick a stream to start".to_owned(),
+    };
+    let content = hrow(vec![
+        Container::new()
+            .width(38.0)
+            .height(38.0)
+            .radius(19.0)
+            .color(ACCENT)
+            .alignment(Alignment::CENTER)
+            .child(icon_with(icons::play(), 16.0, ON_ACCENT, ICON_STROKE, true))
+            .into(),
+        hgap(14.0),
+        SizedBox::new()
+            .width(PANEL_INNER - 38.0 - 14.0 - 32.0)
+            .child(col(vec![
+                Text::new(format!("Continue {}", video.label()))
+                    .style(style(14.0, FontWeight::W700, TEXT))
+                    .max_lines(Some(1))
+                    .overflow(TextOverflow::Ellipsis)
+                    .into(),
+                gap(3.0),
+                text(detail, 11.5, FontWeight::W500, ACCENT).into(),
+            ]))
+            .into(),
+    ])
+    .main_axis_size(MainAxisSize::Min)
+    .cross_axis_alignment(CrossAxisAlignment::Center);
+    let (app, meta) = (app.clone(), meta.clone());
+    Some(list_button(content.into(), PANEL_INNER, true, move || {
+        // Open the episode either way: its streams (with the last one on
+        // top) are there when the player is closed again.
+        app.select_video(video.clone());
+        if let Some(stream) = app.last_stream(meta.id(), Some(video.id())) {
+            let meta = app.detail.peek(|d| d.best_meta()).unwrap_or_else(|| meta.clone());
+            app.play_with(&stream, Some(meta), Some(video.clone()));
+        }
+    }))
+}
+
 fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
     let seasons = meta.seasons();
     let resume = app
@@ -449,6 +513,10 @@ fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
             })
             .collect(),
     );
+    if let Some(card) = continue_card(app, meta, resume.as_deref()) {
+        children.push(card);
+        children.push(gap(14.0));
+    }
     if picker {
         children.push(season_trigger(app, entries.clone(), season));
         children.push(gap(14.0));
@@ -491,9 +559,13 @@ fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
         .main_axis_size(MainAxisSize::Min)
         .cross_axis_alignment(CrossAxisAlignment::Center);
         let app = app.clone();
-        children.push(list_button(tile.into(), PANEL_INNER, is_resume, move || {
-            app.select_video(video.clone())
-        }));
+        let label = video.label();
+        children.push(list_button(
+            super::tooltip::tooltip(label, tile),
+            PANEL_INNER,
+            is_resume,
+            move || app.select_video(video.clone()),
+        ));
         children.push(gap(8.0));
     }
     let list: Widget = smooth(
@@ -595,8 +667,8 @@ fn season_trigger(app: &App, entries: Rc<Vec<SeasonEntry>>, current: Option<u32>
                 ),
         )
         .style(ButtonStyle {
-            background: Some(SURFACE_HI),
-            background_states: Some(StateColor::new(SURFACE_HI).hovered(SURFACE_HOVER)),
+            background: Some(GLASS),
+            background_states: Some(StateColor::new(GLASS).hovered(GLASS_HOVER)),
             foreground: Some(TEXT),
             border: Some(Border::new(0.0, Color::TRANSPARENT)),
             border_radius: Some(12.0),
@@ -682,12 +754,12 @@ fn season_dropdown(app: &App, entries: Rc<Vec<SeasonEntry>>, current: Option<u32
         })
     };
 
-    Container::new()
+    let menu = Container::new()
         .width(PANEL_INNER)
         .padding(EdgeInsets::all(10.0))
         .decoration(
             BoxDecoration::new()
-                .color(Color::rgba(28, 33, 49, 255))
+                .color(Color::rgba(30, 33, 44, 170))
                 .border_radius(BorderRadius::all(Radius::circular(14.0)))
                 .box_shadow(vec![BoxShadow::new(
                     Color::rgba(0, 0, 0, 140),
@@ -700,12 +772,12 @@ fn season_dropdown(app: &App, entries: Rc<Vec<SeasonEntry>>, current: Option<u32
             vcol(vec![search.into(), gap(8.0), results.into()])
                 .main_axis_size(MainAxisSize::Min)
                 .cross_axis_alignment(CrossAxisAlignment::Start),
-        )
-        .into()
+        );
+    acrylic(menu, 14.0, 32.0)
 }
 
 fn season_option(app: &App, entry: &SeasonEntry, selected: bool) -> Widget {
-    let background = if selected { ACCENT_DIM } else { Color::TRANSPARENT };
+    let background = if selected { GLASS_ACCENT } else { Color::TRANSPARENT };
     let color = if selected { ACCENT } else { TEXT };
     let mut content: Vec<Widget> = vec![
         text(entry.label.clone(), 13.5, FontWeight::W600, color).into(),
@@ -727,9 +799,9 @@ fn season_option(app: &App, entry: &SeasonEntry, selected: bool) -> Widget {
     .style(ButtonStyle {
         background: Some(background),
         background_states: Some(StateColor::new(background).hovered(if selected {
-            ACCENT_DIM
+            GLASS_ACCENT_HOVER
         } else {
-            SURFACE_HOVER
+            GLASS_HOVER
         })),
         foreground: Some(color),
         border: Some(Border::new(0.0, Color::TRANSPARENT)),
@@ -789,16 +861,22 @@ pub fn screen(app: &App) -> Widget {
         Expanded::new(
             hrow(vec![
                 Expanded::new(info_pane(app, &meta, loading, failure.as_deref())).into(),
-                Container::new()
-                    .width(PANEL_WIDTH)
-                    .margin(EdgeInsets::only(0.0, 0.0, 24.0, 24.0))
-                    .decoration(
-                        BoxDecoration::new()
-                            .color(Color::rgba(15, 18, 28, 235))
-                            .border_radius(BorderRadius::all(Radius::circular(18.0))),
-                    )
-                    .child(panel)
-                    .into(),
+                Padding::new(
+                    EdgeInsets::only(0.0, 0.0, 24.0, 24.0),
+                    acrylic(
+                        Container::new()
+                            .width(PANEL_WIDTH)
+                            .decoration(
+                                BoxDecoration::new()
+                                    .color(Color::rgba(14, 16, 26, 105))
+                                    .border_radius(BorderRadius::all(Radius::circular(18.0))),
+                            )
+                            .child(panel),
+                        18.0,
+                        40.0,
+                    ),
+                )
+                .into(),
             ])
             .cross_axis_alignment(CrossAxisAlignment::Stretch),
         )
@@ -808,7 +886,7 @@ pub fn screen(app: &App) -> Widget {
 
     layers(vec![
         background.into(),
-        Container::new().color(Color::rgba(9, 11, 17, 222)).into(),
+        Container::new().color(Color::rgba(9, 11, 17, 165)).into(),
         content.into(),
     ])
     .fit(StackFit::Expand)

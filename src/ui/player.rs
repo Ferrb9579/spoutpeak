@@ -1334,7 +1334,7 @@ fn up_next_card(app: &App, next: &crate::addons::types::Video, left: u32, lifted
                     play.play_next(video.clone())
                 }),
                 hgap(8.0),
-                button("Cancel", Tone::Neutral, move || cancel.cancel_up_next()),
+                button("Cancel", Tone::Glass, move || cancel.cancel_up_next()),
             ])
             .into(),
         ]));
@@ -1635,7 +1635,7 @@ pub fn screen(app: &App) -> Widget {
         }
         Status::Ended => {
             let (replay, forward) = (app.clone(), app.clone());
-            let mut actions = vec![button("Replay", Tone::Neutral, move || replay.seek_to(0.0))];
+            let mut actions = vec![button("Replay", Tone::Glass, move || replay.seek_to(0.0))];
             if let Some(next) = next.clone() {
                 actions.push(hgap(10.0));
                 actions.push(button("Next episode", Tone::Primary, move || {

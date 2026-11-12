@@ -86,6 +86,8 @@ pub enum Tone {
     Neutral,
     Ghost,
     Danger,
+    /// See-through white, for buttons over pictures and video.
+    Glass,
 }
 
 fn button_style(tone: Tone, height: f32) -> ButtonStyle {
@@ -94,6 +96,7 @@ fn button_style(tone: Tone, height: f32) -> ButtonStyle {
         Tone::Neutral => (SURFACE_HI, SURFACE_HOVER, TEXT),
         Tone::Ghost => (Color::TRANSPARENT, SURFACE_HI, MUTED),
         Tone::Danger => (Color::rgba(70, 30, 36, 255), Color::rgba(98, 38, 46, 255), DANGER),
+        Tone::Glass => (Color::rgba(255, 255, 255, 34), Color::rgba(255, 255, 255, 60), TEXT),
     };
     ButtonStyle {
         background: Some(background),
@@ -103,6 +106,9 @@ fn button_style(tone: Tone, height: f32) -> ButtonStyle {
         border_radius: Some(height / 2.0),
         padding: Some(EdgeInsets::symmetric(16.0, 0.0)),
         height: Some(height),
+        // Labels sit in the middle (the default puts them at the top-left
+        // of the content box, a touch low and off to the side).
+        alignment: Some(Alignment::CENTER),
         text_style: Some(style(13.5, FontWeight::W600, foreground)),
         overlay_color: Some(Color::TRANSPARENT.into()),
         animation_duration: Some(std::time::Duration::ZERO),
