@@ -1,48 +1,35 @@
-//! Hover tooltips drawn in the window's top layer.
+//! Hover tooltips, shown next to the pointer after a short hover.
 //!
-//! Incular's own `Tooltip` paints in place, under whatever comes after it
-//! (a stream tile's tooltip vanished behind the next tile). Here the target
-//! only reports hover; one tooltip for the whole app is drawn by
-//! [`layer`], above every screen, next to the pointer.
+//! Not `incular::material::Tooltip`: its anchor is an action surface that
+//! takes the taps meant for the child (a stream tile stopped opening). Here
+//! the target only reports hover through a `MouseRegion`, and the bubble is
+//! drawn through `OverlayPortal`, above everything after it.
 
 use crate::theme::*;
 use incular::prelude::*;
+use incular::widgets::{TransientAlignment, TransientPlacement, TransientRole, TransientSide};
 use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 /// Hover this long before the tooltip appears.
 const DELAY: Duration = Duration::from_millis(550);
 const MAX_WIDTH: f32 = 420.0;
 
-#[derive(Clone, PartialEq)]
-struct Tip {
-    text: String,
-    at: Offset,
-}
-
 thread_local! {
-    static TIP: Signal<Option<Tip>> = Signal::new(None);
-    /// Bumped on every enter / exit / press, so a stale delayed show is
-    /// dropped.
-    static TURN: Cell<u64> = const { Cell::new(0) };
-    /// The latest pointer position over a tooltip target.
-    static POINTER: Cell<Offset> = const { Cell::new(Offset::new(0.0, 0.0)) };
+    /// Delayed shows waiting for their timer, by id.
+    static PENDING: std::cell::RefCell<std::collections::HashMap<u64, Box<dyn FnOnce()>>> =
+        std::cell::RefCell::default();
+    static NEXT_ID: Cell<u64> = const { Cell::new(0) };
 }
 
-fn next_turn() -> u64 {
-    TURN.with(|t| {
-        t.set(t.get() + 1);
-        t.get()
-    })
-}
-
-pub fn hide() {
-    next_turn();
-    TIP.with(|tip| {
-        if tip.get_untracked().is_some() {
-            tip.set(None);
-        }
+fn park(show: Box<dyn FnOnce()>) -> u64 {
+    let id = NEXT_ID.with(|n| {
+        n.set(n.get() + 1);
+        n.get()
     });
+    PENDING.with(|p| p.borrow_mut().insert(id, show));
+    id
 }
 
 /// Shows `text` after a short hover over `child`. Empty text: no tooltip.
@@ -52,72 +39,83 @@ pub fn tooltip(text: impl Into<String>, child: impl Into<Widget>) -> Widget {
     if text.trim().is_empty() {
         return child;
     }
+    // Where the bubble opens (window coordinates), or `None` while hidden.
+    let shown: Signal<Option<Offset>> = Signal::new(None);
+    // Bumped on every enter / exit, so a stale delayed show is dropped.
+    let turn = Rc::new(Cell::new(0u64));
+    let pointer = Rc::new(Cell::new(Offset::new(0.0, 0.0)));
+
+    let (enter_turn, enter_pointer, enter_shown) = (turn.clone(), pointer.clone(), shown.clone());
+    let hover_pointer = pointer.clone();
+    let (exit_turn, exit_shown) = (turn, shown.clone());
     // No pointer-down Listener here: wrapping a button in one stops the
-    // button from seeing the pointer. A click usually navigates, and the
-    // root hides the tooltip on every route change.
-    MouseRegion::new(child)
+    // button from seeing the pointer.
+    let anchor: Widget = MouseRegion::new(child)
         .on_enter(move |event| {
-            POINTER.with(|p| p.set(event.position));
-            let turn = next_turn();
-            let text = text.clone();
+            enter_pointer.set(event.position);
+            enter_turn.set(enter_turn.get() + 1);
+            let mine = enter_turn.get();
+            let (turn, pointer, shown) = (enter_turn.clone(), enter_pointer.clone(), enter_shown.clone());
+            // The completion must be `Send`: it carries an id, and the
+            // show itself waits on this thread.
+            let id = park(Box::new(move || {
+                if turn.get() == mine {
+                    shown.set(Some(pointer.get()));
+                }
+            }));
             crate::state::spawn(async { tokio::time::sleep(DELAY).await }, move |_, ()| {
-                if TURN.with(|t| t.get()) == turn {
-                    let at = POINTER.with(|p| p.get());
-                    TIP.with(|tip| tip.set(Some(Tip { text, at })));
+                if let Some(show) = PENDING.with(|p| p.borrow_mut().remove(&id)) {
+                    show();
                 }
             });
         })
-        .on_hover(|event| {
-            // Follow the pointer until the tooltip is up; then it stays put.
-            POINTER.with(|p| p.set(event.position));
+        // Follow the pointer until the tooltip is up; then it stays put.
+        .on_hover(move |event| hover_pointer.set(event.position))
+        .on_exit(move |_| {
+            exit_turn.set(exit_turn.get() + 1);
+            if exit_shown.get_untracked().is_some() {
+                exit_shown.set(None);
+            }
         })
-        .on_exit(|_| hide())
-        .into()
-}
+        .into();
 
-/// The tooltip layer for the window's root stack, or `None` while nothing
-/// is shown (an idle layer must not sit over the screens: in Incular an
-/// upper layer can swallow clicks meant for the ones below).
-pub fn layer(window: Size) -> Option<Widget> {
-    let tip = TIP.with(|tip| tip.get())?;
-    // Below-right of the pointer, kept inside the window.
-    // Right of the pointer, or ending at its left when there is more room
-    // there; never wider than the side it is on.
-    let room_right = window.width - tip.at.x - 22.0;
-    let room_left = tip.at.x - 14.0;
-    let on_right = room_right >= MAX_WIDTH || room_right >= room_left;
-    let width = MAX_WIDTH.min(if on_right { room_right } else { room_left }).max(120.0);
-    let below = tip.at.y + 22.0;
-    let bubble = Container::new()
-        .padding(EdgeInsets::symmetric(11.0, 8.0))
-        .decoration(
-            BoxDecoration::new()
-                .color(Color::rgba(236, 239, 247, 248))
-                .border_radius(BorderRadius::all(Radius::circular(9.0)))
-                .box_shadow(vec![BoxShadow::new(
-                    Color::rgba(0, 0, 0, 120),
-                    Offset::new(0.0, 6.0),
-                    18.0,
-                    0.0,
-                )]),
-        )
-        .child(
-            Text::new(tip.text)
-                .style(style(12.5, FontWeight::W500, Color::rgba(18, 20, 30, 255))),
+    Builder::new(move |_| {
+        let at = shown.get();
+        let bubble = Container::new()
+            .padding(EdgeInsets::symmetric(11.0, 8.0))
+            .decoration(
+                BoxDecoration::new()
+                    .color(Color::rgba(236, 239, 247, 248))
+                    .border_radius(BorderRadius::all(Radius::circular(9.0)))
+                    .box_shadow(vec![BoxShadow::new(
+                        Color::rgba(0, 0, 0, 120),
+                        Offset::new(0.0, 6.0),
+                        18.0,
+                        0.0,
+                    )]),
+            )
+            .child(
+                Text::new(text.clone())
+                    .style(style(12.5, FontWeight::W500, Color::rgba(18, 20, 30, 255))),
+            );
+        let bubble = ConstrainedBox::new(
+            Constraints::at_most(MAX_WIDTH, f32::INFINITY),
+            IgnorePointer::new(bubble),
         );
-    let bubble = ConstrainedBox::new(Constraints::loose(Size::new(width, window.height.max(1.0))), bubble);
-    // Near the bottom edge it goes above the pointer instead.
-    let positioned = Positioned::new(bubble);
-    let positioned = if on_right {
-        positioned.left(tip.at.x + 14.0)
-    } else {
-        positioned.right((window.width - tip.at.x + 6.0).max(8.0))
-    };
-    let positioned = if below > window.height - 90.0 {
-        positioned.bottom(window.height - tip.at.y + 10.0)
-    } else {
-        positioned.top(below)
-    };
-    let positioned: Widget = positioned.into();
-    Some(IgnorePointer::new(Stack::new(vec![positioned]).fit(incular::widgets::StackFit::Expand)).into())
+        let mut portal = OverlayPortal::new(anchor.clone())
+            .overlay_child(bubble)
+            .role(TransientRole::Tooltip)
+            .placement(
+                TransientPlacement::new()
+                    .side(TransientSide::Bottom)
+                    .alignment(TransientAlignment::Start)
+                    .side_offset(18.0),
+            )
+            .show(at.is_some());
+        if let Some(at) = at {
+            portal = portal.anchor_point(at);
+        }
+        portal.into()
+    })
+    .into()
 }

@@ -1,20 +1,19 @@
-//! Motion: spring-driven scrolling, the frame clock that drives it, and small
-//! helpers for entrance animations.
+//! Motion: spring-driven scrolling and small helpers for entrance
+//! animations.
 //!
-//! Incular 0.1.1 has no `ScrollController::animate_to` and no public ticker
-//! (see INCULAR-GAPS-2.md). Instead, one unbounded `AnimationController` is
-//! kept ticking by `Widget::animation_ticker` at the root of the tree while
-//! anything moves. Its listener runs [`step`] once per frame, which moves
+//! A `Ticker` runs [`step`] once per frame while anything glides, moving
 //! every gliding scroll view along a critically damped spring towards its
-//! target with `jump_to`.
+//! target with `jump_to`. Unlike `ScrollController::animate_to` (a fixed
+//! duration and curve), a spring keeps its velocity when new input arrives,
+//! so repeated wheel notches build speed smoothly.
 //!
-//! The mouse wheel goes through the same springs. Scroll views that use
-//! [`wheel`] must also set [`APP_SCROLLED`] physics, which turns off
-//! Incular's instant per-event jump (a `Listener` cannot claim the event
-//! from the viewport).
+//! Scroll views that use [`wheel`] set [`APP_SCROLLED`] physics: the wheel
+//! listener sits outside the viewport, and a viewport that can scroll would
+//! take the wheel event itself (as in Flutter).
 
+use incular::animation::{Ticker, add_post_frame_callback, schedule_frame};
 use incular::prelude::*;
-use incular::widgets::internal::{OpacityController, TranslationController};
+use incular::widgets::{OpacityController, PointerSignalResolver, TranslationController};
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
@@ -53,75 +52,32 @@ struct Glide {
     written: f32,
 }
 
-type Start = Box<dyn FnOnce(Instant)>;
-
 struct Motion {
-    clock: AnimationController,
+    ticker: Ticker,
     glides: RefCell<Vec<Glide>>,
-    /// Animations requested during a build, started on the next frame so a
-    /// slow build doesn't use up their duration before anything is shown.
-    starts: RefCell<Vec<Start>>,
     last_step: Cell<Option<Instant>>,
-    /// The wheel event the innermost scroll view already used. Incular
-    /// delivers one event to every `Listener` on the hit path, deepest
-    /// first, with the same timestamp.
-    claimed: Cell<Option<Instant>>,
 }
 
 thread_local! {
-    static MOTION: Motion = Motion::new();
+    static MOTION: Motion = Motion {
+        ticker: Ticker::with_frame_time(|now, _| step(now)),
+        glides: RefCell::new(Vec::new()),
+        last_step: Cell::new(None),
+    };
 }
 
-impl Motion {
-    fn new() -> Self {
-        let clock = AnimationController::unbounded();
-        clock.add_listener(|_| step());
-        Self {
-            clock,
-            glides: RefCell::new(Vec::new()),
-            starts: RefCell::new(Vec::new()),
-            last_step: Cell::new(None),
-            claimed: Cell::new(None),
-        }
-    }
-}
-
-/// Keeps the clock running for as long as any glide is in flight. The value
-/// is the elapsed time, so it changes (and notifies) on every frame.
-struct WhileGliding;
-
-impl Simulation for WhileGliding {
-    fn position(&self, t: Duration) -> f32 {
-        // Offset by one so the first frame of a run differs from where the
-        // last run stopped (0 for the very first run), which makes the
-        // controller notify on that frame too.
-        1.0 + t.as_secs_f32()
-    }
-    fn velocity(&self, _: Duration) -> f32 {
-        1.0
-    }
-    fn is_done(&self, _: Duration) -> bool {
-        MOTION.with(|m| m.glides.borrow().is_empty() && m.starts.borrow().is_empty())
-    }
-}
-
-/// Runs `start` with the time of the next frame.
+/// Runs `start` once the frame being built has been shown, so a slow build
+/// does not use up an animation's duration before anything is on screen.
 fn on_next_frame(start: impl FnOnce(Instant) + 'static) {
-    MOTION.with(|m| m.starts.borrow_mut().push(Box::new(start)));
-    ensure_running();
-}
-
-/// Wraps the app so the motion clock ticks with the tree's frames.
-pub fn clock(child: impl Into<Widget>) -> Widget {
-    let clock = MOTION.with(|m| m.clock.clone());
-    Widget::animation_ticker(clock, child)
+    add_post_frame_callback(start);
+    schedule_frame();
 }
 
 fn ensure_running() {
     MOTION.with(|m| {
-        if !m.clock.is_active() {
+        if !m.ticker.is_active() {
             m.last_step.set(None);
-            m.clock.animate_with(WhileGliding);
+            let _ = m.ticker.start();
         }
     });
 }
@@ -131,12 +87,7 @@ fn reduced_motion() -> bool {
 }
 
 /// One frame of every glide.
-fn step() {
-    let now = Instant::now();
-    let starts = MOTION.with(|m| std::mem::take(&mut *m.starts.borrow_mut()));
-    for start in starts {
-        start(now);
-    }
+fn step(now: Instant) {
     let (mut glides, dt) = MOTION.with(|m| {
         let dt = m
             .last_step
@@ -179,7 +130,32 @@ fn step() {
         let mut current = m.glides.borrow_mut();
         glides.append(&mut current);
         *current = glides;
+        if current.is_empty() {
+            // Stopped after the frame, not from inside the ticker's callback.
+            add_post_frame_callback(|_| {
+                MOTION.with(|m| {
+                    if m.glides.borrow().is_empty() {
+                        m.ticker.stop();
+                    }
+                });
+            });
+        }
     });
+}
+
+/// Whether a glide by `delta` would move `controller` at all.
+fn can_glide(controller: &ScrollController, delta: f32) -> bool {
+    if delta == 0.0 || !delta.is_finite() {
+        return false;
+    }
+    let from = MOTION.with(|m| {
+        m.glides
+            .borrow()
+            .iter()
+            .find(|g| g.controller == *controller)
+            .map_or_else(|| controller.offset(), |g| g.target)
+    });
+    ((from + delta).clamp(0.0, controller.max_offset()) - from).abs() >= 0.01
 }
 
 /// Glides `controller` by `delta` (added to any glide already in flight, so
@@ -237,8 +213,6 @@ thread_local! {
 fn wheel_boost(at: Instant) -> f32 {
     LAST_NOTCH.with(|last| {
         let boost = match last.get() {
-            // The same event seen by an outer view: same boost.
-            Some((then, boost)) if then == at => return boost,
             Some((then, boost)) => {
                 let gap = at.saturating_duration_since(then).as_secs_f32();
                 if gap < 0.12 { (boost * 1.35).min(4.0) } else { 1.0 }
@@ -280,14 +254,14 @@ pub fn wheel(controller: &ScrollController, axis: WheelAxis, view: impl Into<Wid
                     }
                 }
             };
-            if delta == 0.0 {
+            // At its end in that direction: an outer view takes the event.
+            if !can_glide(&controller, delta) {
                 return;
             }
-            let claimed = MOTION.with(|m| m.claimed.get() == Some(event.time));
-            let delta = delta * wheel_boost(event.time);
-            if !claimed && glide_by(&controller, delta, Feel::Wheel) {
-                MOTION.with(|m| m.claimed.set(Some(event.time)));
-            }
+            let controller = controller.clone();
+            PointerSignalResolver::register(&event, move |event| {
+                glide_by(&controller, delta * wheel_boost(event.time), Feel::Wheel);
+            });
         })
         .into()
 }

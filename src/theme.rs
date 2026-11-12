@@ -106,9 +106,6 @@ fn button_style(tone: Tone, height: f32) -> ButtonStyle {
         border_radius: Some(height / 2.0),
         padding: Some(EdgeInsets::symmetric(16.0, 0.0)),
         height: Some(height),
-        // Labels sit in the middle (the default puts them at the top-left
-        // of the content box, a touch low and off to the side).
-        alignment: Some(Alignment::CENTER),
         text_style: Some(style(13.5, FontWeight::W600, foreground)),
         overlay_color: Some(Color::TRANSPARENT.into()),
         animation_duration: Some(std::time::Duration::ZERO),
@@ -117,17 +114,26 @@ fn button_style(tone: Tone, height: f32) -> ButtonStyle {
 }
 
 pub fn button(label: impl Into<String>, tone: Tone, on_click: impl Fn() + 'static) -> Widget {
-    Button::new(label)
-        .style(button_style(tone, 36.0))
-        .on_click(on_click)
-        .into()
+    frosted(
+        tone,
+        36.0,
+        Button::new(label).style(button_style(tone, 36.0)).on_click(on_click).into(),
+    )
+}
+
+/// Glass buttons blur what lies behind them (a pill-shaped frosted glass).
+fn frosted(tone: Tone, height: f32, button: Widget) -> Widget {
+    if tone != Tone::Glass {
+        return button;
+    }
+    ClipRRect::new(height / 2.0, incular::widgets::BackdropFilter::blur(12.0, button)).into()
 }
 
 pub fn small_button(label: impl Into<String>, tone: Tone, on_click: impl Fn() + 'static) -> Widget {
     let mut style = button_style(tone, 28.0);
     style.padding = Some(EdgeInsets::symmetric(12.0, 0.0));
     style.text_style = Some(self::style(12.5, FontWeight::W600, style.foreground.unwrap_or(TEXT)));
-    Button::new(label).style(style).on_click(on_click).into()
+    frosted(tone, 28.0, Button::new(label).style(style).on_click(on_click).into())
 }
 
 /// A selectable pill, used for filters and segmented choices.
@@ -168,7 +174,6 @@ pub fn icon_button(child: impl Into<Widget>, size: f32, on_click: impl Fn() + 's
             border_radius: Some(size / 2.0),
             padding: Some(EdgeInsets::ZERO),
             fixed_size: Some(Size::new(size, size)),
-            alignment: Some(Alignment::CENTER),
             overlay_color: Some(Color::TRANSPARENT.into()),
             animation_duration: Some(std::time::Duration::ZERO),
             ..ButtonStyle::default()
@@ -183,9 +188,7 @@ pub fn field_style() -> TextFieldStyle {
         foreground: Some(TEXT),
         placeholder_color: Some(FAINT),
         border: Some(Border::new(0.0, Color::TRANSPARENT)),
-        // Left unset: Incular 0.1.1 draws the focused border around the
-        // inner editable area instead of the field's outer box.
-        border_focused: None,
+        border_focused: Some(Border::new(1.5, ACCENT)),
         border_radius: Some(10.0),
         padding: Some(EdgeInsets::symmetric(12.0, 0.0)),
     }
@@ -390,49 +393,6 @@ fn to_path(bez: &kurbo::BezPath) -> Path {
     builder.build()
 }
 
-/// Filled geometry for one icon at one size: the stroke expanded into an
-/// outline, plus the interior when the icon is drawn solid.
-#[derive(Clone)]
-struct IconMesh {
-    outline: Arc<Path>,
-    interior: Option<Arc<Path>>,
-}
-
-/// The 24-unit icon scaled to `size`, its stroke expanded on the CPU into a
-/// filled outline. Expanding here (rather than asking the renderer to
-/// stroke) matters for straight icons such as `minus`: their zero-height
-/// bounds would otherwise be culled inside any clipped area. Cached so an
-/// icon at a given size keeps one `PathId` and one GPU mesh across rebuilds.
-fn icon_mesh(path: &Arc<Path>, size: f32, stroke: f32, filled: bool) -> IconMesh {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    type Key = (PathId, u32, u32, bool);
-    thread_local! {
-        static MESHES: RefCell<HashMap<Key, IconMesh>> = RefCell::new(HashMap::new());
-    }
-    let key = (path.id(), size.to_bits(), stroke.to_bits(), filled);
-    MESHES.with(|cache| {
-        cache
-            .borrow_mut()
-            .entry(key)
-            .or_insert_with(|| {
-                let scale = f64::from(size) / 24.0;
-                let mut scaled = path.bez_path().clone();
-                scaled.apply_affine(kurbo::Affine::scale(scale));
-                let style = kurbo::Stroke::new(f64::from(stroke) * scale)
-                    .with_caps(kurbo::Cap::Round)
-                    .with_join(kurbo::Join::Round);
-                let outline =
-                    kurbo::stroke(scaled.iter(), &style, &kurbo::StrokeOpts::default(), 0.01);
-                IconMesh {
-                    outline: Arc::new(to_path(&outline)),
-                    interior: filled.then(|| Arc::new(to_path(&scaled))),
-                }
-            })
-            .clone()
-    })
-}
-
 /// A Lucide icon drawn the way Lucide intends: outlined, round caps and
 /// joins, 2-unit stroke, on a square `size` box.
 pub fn icon(path: Arc<Path>, size: f32, color: Color) -> Widget {
@@ -442,13 +402,18 @@ pub fn icon(path: Arc<Path>, size: f32, color: Color) -> Widget {
 /// [`icon`] with an explicit stroke width (in 24-grid units) and an optional
 /// solid fill, for tiny marks or filled glyphs such as the brand's play.
 pub fn icon_with(path: Arc<Path>, size: f32, color: Color, stroke: f32, filled: bool) -> Widget {
-    let mesh = icon_mesh(&path, size, stroke, filled);
-    let mut canvas = Canvas::default();
-    if let Some(interior) = mesh.interior {
-        canvas.fill_path(interior, color, FillRule::NonZero);
-    }
-    canvas.fill_path(mesh.outline, color, FillRule::NonZero);
-    CustomPaint::new(Size::new(size, size), canvas.finish()).into()
+    Icon::new(path)
+        .size(size)
+        .brush(color)
+        .view_box(Rect::from_origin_size(Offset::new(0.0, 0.0), Size::new(24.0, 24.0)))
+        .stroke(Stroke {
+            width: stroke,
+            cap: LineCap::Round,
+            join: LineJoin::Round,
+            ..Stroke::default()
+        })
+        .fill(filled)
+        .into()
 }
 
 fn icon_label(glyph: Arc<Path>, label: Option<String>, size: f32, text_size: f32, color: Color) -> Widget {
@@ -469,12 +434,11 @@ pub fn icon_text_button(
 ) -> Widget {
     let mut style = button_style(tone, 36.0);
     style.padding = Some(EdgeInsets::only(13.0, 0.0, 16.0, 0.0));
-    style.alignment = Some(Alignment::CENTER);
     let color = style.foreground.unwrap_or(TEXT);
-    Button::with_child(icon_label(glyph, Some(label.into()), 16.0, 13.5, color))
+    let button = Button::with_child(icon_label(glyph, Some(label.into()), 16.0, 13.5, color))
         .style(style)
-        .on_click(on_click)
-        .into()
+        .on_click(on_click);
+    frosted(tone, 36.0, button.into())
 }
 
 /// [`small_button`] holding a Lucide icon, optionally followed by a label.
@@ -486,7 +450,6 @@ pub fn small_icon_button(
     on_click: impl Fn() + 'static,
 ) -> Widget {
     let mut style = button_style(tone, 28.0);
-    style.alignment = Some(Alignment::CENTER);
     if label.is_some() {
         style.padding = Some(EdgeInsets::only(9.0, 0.0, 12.0, 0.0));
     } else {
@@ -494,10 +457,10 @@ pub fn small_icon_button(
         style.fixed_size = Some(Size::new(28.0, 28.0));
     }
     let color = style.foreground.unwrap_or(TEXT);
-    Button::with_child(icon_label(glyph, label.map(str::to_owned), 15.0, 12.5, color))
+    let button = Button::with_child(icon_label(glyph, label.map(str::to_owned), 15.0, 12.5, color))
         .style(style)
-        .on_click(on_click)
-        .into()
+        .on_click(on_click);
+    frosted(tone, 28.0, button.into())
 }
 
 /// `Column::new` over an explicitly typed child list (keeps `.into()`

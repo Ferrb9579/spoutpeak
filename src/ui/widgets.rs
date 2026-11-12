@@ -48,9 +48,7 @@ pub fn net_image(
     let Some(url) = url.filter(|u| u.starts_with("http")) else {
         return placeholder(width, height, radius, &label);
     };
-    // Corners are baked into the pixels: `ClipRRect` in Incular 0.1.1 only
-    // clips to the bounding rectangle.
-    let shape = (radius > 0.0).then_some(images::Shape { width, height, radius });
+    let shape = Some(images::Shape { width, height });
     let picture = images::shaped(url, max_pixels, shape);
     // Fade in over the placeholder only when the download finishes while
     // this is on screen; cached images appear straight away.
@@ -69,7 +67,8 @@ pub fn net_image(
             } else {
                 image
             };
-            SizedBox::new().width(width).height(height).child(image).into()
+            let image: Widget = SizedBox::new().width(width).height(height).child(image).into();
+            if radius > 0.0 { ClipRRect::new(radius, image).into() } else { image }
         }
         _ => {
             waited.set(true);
@@ -231,9 +230,8 @@ pub fn poster_card(
     )
 }
 
-/// A sideways-scrolling strip that also follows a regular (vertical) mouse
-/// wheel. Incular's horizontal viewports only read the wheel's x delta, which
-/// a plain mouse never produces.
+/// A sideways-scrolling strip with smooth wheel scrolling that also follows
+/// a regular (vertical) mouse wheel.
 pub fn horizontal_scroller(controller: &ScrollController, child: impl Into<Widget>) -> Widget {
     motion::wheel(
         controller,

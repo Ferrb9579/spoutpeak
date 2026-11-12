@@ -36,21 +36,19 @@ pub fn picture(url: &str, max_width: u32) -> Signal<Picture> {
     shaped(url, max_width, None)
 }
 
-/// How an image is cropped and rounded before upload: the box it will be
-/// shown in (logical units) and that box's corner radius.
+/// How an image is cropped before upload: the box it will be shown in
+/// (logical units).
 #[derive(Clone, Copy, Debug)]
 pub struct Shape {
     pub width: f32,
     pub height: f32,
-    pub radius: f32,
 }
 
-/// Like [`picture`], but cover-cropped to `shape` with rounded corners baked
-/// into the alpha channel (Incular 0.1.1's `ClipRRect` clips to the bounding
-/// rectangle only).
+/// Like [`picture`], but cover-cropped to `shape`, so the uploaded texture
+/// holds only what is shown.
 pub fn shaped(url: &str, max_width: u32, shape: Option<Shape>) -> Signal<Picture> {
     let key = match shape {
-        Some(s) => format!("{max_width}|{}x{}r{}|{url}", s.width, s.height, s.radius),
+        Some(s) => format!("{max_width}|{}x{}|{url}", s.width, s.height),
         None => format!("{max_width}|{url}"),
     };
     if let Some(existing) = CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
@@ -179,35 +177,8 @@ fn decode(bytes: &[u8], max_width: u32, shape: Option<Shape>) -> Option<ImageHan
             image::imageops::FilterType::Triangle,
         );
     }
-    let mut rgba = decoded.into_rgba8();
+    let rgba = decoded.into_rgba8();
     let (width, height) = (rgba.width(), rgba.height());
-    if let Some(shape) = shape.filter(|s| s.radius > 0.0 && s.width > 0.0) {
-        round_corners(&mut rgba, shape.radius * width as f32 / shape.width);
-    }
     ImageHandle::from_rgba8(width, height, rgba.into_raw()).ok()
 }
 
-/// Fades alpha outside a rounded rectangle of `radius` pixels, antialiased.
-fn round_corners(image: &mut image::RgbaImage, radius: f32) {
-    let (width, height) = (image.width(), image.height());
-    let radius = radius.min(width as f32 / 2.0).min(height as f32 / 2.0);
-    let reach = radius.ceil() as u32;
-    for y in 0..height {
-        let near_y = y < reach || y >= height.saturating_sub(reach);
-        if !near_y {
-            continue;
-        }
-        for x in (0..reach.min(width)).chain(width.saturating_sub(reach)..width) {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            let cx = px.clamp(radius, width as f32 - radius);
-            let cy = py.clamp(radius, height as f32 - radius);
-            let distance = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
-            let coverage = (radius - distance + 0.5).clamp(0.0, 1.0);
-            if coverage < 1.0 {
-                let pixel = image.get_pixel_mut(x, y);
-                pixel.0[3] = (pixel.0[3] as f32 * coverage) as u8;
-            }
-        }
-    }
-}

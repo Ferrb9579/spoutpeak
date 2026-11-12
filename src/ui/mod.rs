@@ -352,8 +352,6 @@ pub fn root(app: &App) -> Widget {
     let page = PAGE.with(|p| p.clone());
     let previous = LAST_ROUTE.with(|last| last.replace(Some(route)));
     if previous.is_some_and(|previous| previous != route) {
-        // Not during the build: Incular forbids state changes there.
-        crate::state::spawn(async {}, |_, ()| tooltip::hide());
         page.play(PAGE_ENTRANCE, if route == Route::Player { 0.0 } else { 10.0 });
     }
 
@@ -377,17 +375,7 @@ pub fn root(app: &App) -> Widget {
         }
     };
 
-    let tip = Builder::new(|_| {
-        LayoutBuilder::new(|_, constraints| {
-            tooltip::layer(constraints.biggest()).unwrap_or_else(|| SizedBox::shrink().into())
-        })
-        .into()
-    });
-    let mut stacked = vec![
-        content,
-        IgnorePointer::new(toast(app)).into(),
-        IgnorePointer::new(tip).into(),
-    ];
+    let mut stacked = vec![content, IgnorePointer::new(toast(app)).into()];
     if !SPLASH_GONE.with(|gone| gone.get()) && route != Route::Player {
         stacked.push(splash_layer(app));
     }
@@ -397,9 +385,7 @@ pub fn root(app: &App) -> Widget {
         ControlTheme::dark(),
         DefaultTextStyle::new(
             style(14.0, FontWeight::W400, TEXT),
-            // The frame clock for smooth scrolling (Incular has no public
-            // ticker; see INCULAR-GAPS-2.md).
-            motion::clock(Container::new().color(BG).child(layered)),
+            Container::new().color(BG).child(layered),
         ),
     );
     Directionality::new(

@@ -186,7 +186,6 @@ fn pill_content(
             }),
             height: Some(30.0),
             fixed_size: fixed,
-            alignment: Some(Alignment::CENTER),
             overlay_color: Some(Color::TRANSPARENT.into()),
             animation_duration: Some(std::time::Duration::ZERO),
             ..ButtonStyle::default()
@@ -576,7 +575,6 @@ fn swatch(color: [u8; 3], selected: bool, on_click: impl Fn() + 'static) -> Widg
             border_radius: Some(14.0),
             padding: Some(EdgeInsets::ZERO),
             fixed_size: Some(Size::new(28.0, 28.0)),
-            alignment: Some(Alignment::CENTER),
             overlay_color: Some(Color::TRANSPARENT.into()),
             animation_duration: Some(std::time::Duration::ZERO),
             ..ButtonStyle::default()
@@ -833,9 +831,8 @@ fn menu_panel(app: &App, menu: Menu) -> Option<Widget> {
     )
 }
 
-/// One caption line drawn with the chosen character edge. Edges are copies
-/// of the text offset underneath it (Incular 0.1.1 does not paint text
-/// shadows).
+/// One caption line drawn with the chosen character edge, as hard text
+/// shadows.
 fn edged_text(value: &str, size: f32, style: &SubtitleStyle) -> Widget {
     let weight = if style.bold { FontWeight::W700 } else { FontWeight::W500 };
     let alpha = style.text_opacity;
@@ -866,15 +863,15 @@ fn edged_text(value: &str, size: f32, style: &SubtitleStyle) -> Widget {
     if copies.is_empty() {
         return glyphs(text_color).into();
     }
-    let pad = d * 2.0;
-    let mut layers: Vec<Widget> = copies
-        .into_iter()
-        .map(|(x, y, color)| {
-            Positioned::new(glyphs(color)).left(pad + x).top(pad + y).into()
-        })
-        .collect();
-    layers.push(Padding::new(EdgeInsets::all(pad), glyphs(text_color)).into());
-    Stack::new(layers).into()
+    let shadows = copies.into_iter().map(|(x, y, color)| TextShadow {
+        color,
+        offset: Offset::new(x, y),
+        blur_radius: 0.0,
+    });
+    let text = Text::new(value.to_owned())
+        .style(self::style(size, weight, text_color).shadows(shadows));
+    // Room for the shadows, so they are not clipped by neighbours.
+    Padding::new(EdgeInsets::all(d * 2.0), text).into()
 }
 
 /// A subtitle cue: optional window behind the block, a background behind
@@ -1070,35 +1067,22 @@ fn top_bar(app: &App, title: &str, subtitle: &str) -> Widget {
 /// Gap under the popup panels: they sit just above the bottom bar.
 const PANEL_BOTTOM: f32 = 104.0;
 
-thread_local! {
-    /// The pointer went down on the open popup (not outside it).
-    static PRESS_IN_POPUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// An open popup, bottom right, in a full-screen layer where a click
-/// anywhere outside it closes it (and does nothing else).
-///
-/// One layer, not a barrier with the popup stacked above: in Incular an
-/// upper `Stack` layer takes every click in its bounds, even where it is
-/// transparent, so the barrier would never see one (INCULAR-GAPS.md). An
-/// ancestor GestureDetector also fires for taps inside its children, so the
-/// popup marks presses that start on it.
-fn popup_layer(app: &App, panel: impl Into<Widget>) -> Widget {
-    PRESS_IN_POPUP.with(|p| p.set(false));
+/// An open popup, bottom right, over a full-screen barrier: a click
+/// anywhere outside the popup closes it (and does nothing else).
+fn popup_layer(app: &App, panel: Widget) -> Widget {
     let close = app.clone();
-    let panel = Listener::new(panel).on_pointer_down(|_| PRESS_IN_POPUP.with(|p| p.set(true)));
-    GestureDetector::new(
-        Container::new().color(Color::TRANSPARENT).child(Align::new(
+    let barrier = GestureDetector::new(SizedBox::expand())
+        .behavior(HitTestBehavior::Opaque)
+        .on_tap(move || close.set_player_menu(Menu::None));
+    Stack::new(vec![
+        Widget::from(barrier),
+        Align::new(
             Alignment::BOTTOM_RIGHT,
             Padding::new(EdgeInsets::only(0.0, 0.0, 20.0, PANEL_BOTTOM), panel),
-        )),
-    )
-    .behavior(HitTestBehavior::Opaque)
-    .on_tap(move || {
-        if !PRESS_IN_POPUP.with(|p| p.replace(false)) {
-            close.set_player_menu(Menu::None);
-        }
-    })
+        )
+        .into(),
+    ])
+    .fit(StackFit::Expand)
     .into()
 }
 
@@ -1125,7 +1109,6 @@ fn menu_button(glyph: Arc<Path>, open: bool, changed: bool, on_click: impl Fn() 
             border_radius: Some(20.0),
             padding: Some(EdgeInsets::ZERO),
             fixed_size: Some(Size::new(40.0, 40.0)),
-            alignment: Some(Alignment::CENTER),
             overlay_color: Some(Color::TRANSPARENT.into()),
             animation_duration: Some(std::time::Duration::ZERO),
             ..ButtonStyle::default()
@@ -1538,8 +1521,8 @@ pub fn screen(app: &App) -> Widget {
                 .player
                 .state
                 .read(|s| (s.sub_size, s.controls_visible, s.sub_style.clone()));
-            // One widget per line, centred by the column: `TextAlign::Center`
-            // on shrink-wrapped text clips in Incular 0.1.1.
+            // One widget per line, centred by the column, so each line gets
+            // its own background box.
             let lines: Vec<&str> = cue.lines().collect();
             // Captions move up with the controls, and back down when they hide.
             Align::new(
@@ -1555,9 +1538,7 @@ pub fn screen(app: &App) -> Widget {
         })
     };
 
-    // The click-to-pause surface is a sibling layer underneath the controls
-    // rather than their ancestor: an ancestor GestureDetector also fires for
-    // taps that land on the buttons.
+    // The click-to-pause surface is a sibling layer underneath the controls.
     let (tap, double) = (app.clone(), app.clone());
     let surface = GestureDetector::new(Container::new().color(Color::TRANSPARENT))
         .behavior(HitTestBehavior::Opaque)
@@ -1706,21 +1687,21 @@ pub fn screen(app: &App) -> Widget {
         ));
         if let Some(panel) = menu_panel(app, menu) {
             layers.push(fade.wrap(
-                IgnorePointer::new(popup_layer(app, motion::pop_in(panel, 8.0))).ignoring(!visible),
+                IgnorePointer::new(popup_layer(app, motion::pop_in(panel, 8.0).into())).ignoring(!visible),
             ));
         }
     }
 
     // The player owns keyboard focus while it is on screen, and its buttons
-    // are kept out of the focus system: Incular has no way to hand focus
-    // back programmatically, and a focused button would swallow Space.
+    // are kept out of the focus system: a focused button would swallow
+    // Space.
     let (hover, keys) = (app.clone(), app.clone());
     let mut surface_layers: Vec<Widget> =
         vec![ExcludeFocus::new(Stack::new(layers).fit(StackFit::Expand)).into()];
     // The room panel takes focus for its chat field, so it sits outside the
     // focus exclusion.
     if menu == Menu::Together && (visible || fade.opacity() > 0.0) {
-        surface_layers.push(popup_layer(app, motion::pop_in(super::together::player_panel(app), 8.0)));
+        surface_layers.push(popup_layer(app, motion::pop_in(super::together::player_panel(app), 8.0).into()));
     }
     KeyboardListener::new(
         MouseRegion::new(Stack::new(surface_layers).fit(StackFit::Expand))

@@ -767,19 +767,7 @@ impl App {
 
     /// Clicking a control moves or clears keyboard focus; take it back so
     /// the player's shortcuts keep working.
-    fn keep_player_focus(&self) {
-        // The room panel's chat field has focus while it is open.
-        if self.player.state.peek(|s| s.menu == Menu::Together) {
-            return;
-        }
-        let focus = &self.controllers.player_focus;
-        if !focus.has_focus() {
-            focus.request_focus();
-        }
-    }
-
     fn player_tick(&self, seconds: f64, stalled: bool) {
-        self.keep_player_focus();
         if self.player.scrub.get().is_none() {
             self.player.position.set((seconds * 10.0).round() / 10.0);
         }
@@ -1239,6 +1227,9 @@ impl App {
         });
         if opened == Menu::Together {
             self.together_mark_read();
+        } else {
+            // Back from the room panel's chat field: keys go to the player.
+            self.controllers.player_focus.request_focus();
         }
         if opened != Menu::None && opened != Menu::Sync && opened != Menu::Together {
             // A freshly opened panel starts at its top; rebuilds while it

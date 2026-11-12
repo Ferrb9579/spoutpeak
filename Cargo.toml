@@ -6,7 +6,7 @@ default-run = "spoutpeak"
 description = "A native, addon-based media center built with Incular"
 
 [dependencies]
-incular = "0.1.1"
+incular = "0.1.2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "io-util", "macros", "net"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "brotli"] }
 serde = { version = "1", features = ["derive"] }

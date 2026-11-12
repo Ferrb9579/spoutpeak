@@ -84,6 +84,10 @@ fn run(simulation: &Simulation, script: &str, dir: &PathBuf) {
         };
         match outcome {
             Ok(()) => eprintln!("[script] {step}"),
+            Err(error @ incular::testing::SimulationError::AppPanicked(_)) => {
+                eprintln!("[script] {step} FAILED: {error}");
+                std::process::exit(101);
+            }
             Err(error) => eprintln!("[script] {step} FAILED: {error}"),
         }
         let _ = simulation.wait_for_frame();

@@ -2659,9 +2659,9 @@ dependencies = [
 
 [[package]]
 name = "incular"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2693091d1b45e09b766ec10a498c4248f8d899d24f4207c9df9890ddaf549f06"
+checksum = "43da2e6b7bca90db1bc35878b3e6251b2507e406d4eaf5bed537a205b161aab7"
 dependencies = [
  "incular-accessibility",
  "incular-animation",
@@ -2689,9 +2689,9 @@ dependencies = [
 
 [[package]]
 name = "incular-accessibility"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b04f50f3df3d7c6712e37b936b4f3e5782e1996b9c590672c74cbd9a790fc371"
+checksum = "5e8d341b42992290cc9e6588edff25be36ceea2842647d6dec8f99ee7cc8d195"
 dependencies = [
  "accesskit",
  "incular-core",
@@ -2700,24 +2700,24 @@ dependencies = [
 
 [[package]]
 name = "incular-animation"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f44f6cf53054065181418a7223055112166ab2bc120b446645be3a4e6a7f96a"
+checksum = "b0a074a0347bbc753128d6f9038b90c3cf53f5dae5a6e2bf13300708155207f9"
 dependencies = [
  "incular-core",
 ]
 
 [[package]]
 name = "incular-assets"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ae3d7fb9f9f3a4241c58e740965dcc5282c16f4ff47f5bf7803bece76cb08c1"
+checksum = "608bcb8e6f5496781df006492e1947c9b8f28e86dccffed5ad607dfee792c8b4"
 
 [[package]]
 name = "incular-config"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fdb40024009665fb79eb0b12eb5505c49f348471a6596c528e9fc0b1ab6c0bd"
+checksum = "4fb7dc6a4277ba0183a25fb375cfd3f919f0c47faa242e6054d9635859586857"
 dependencies = [
  "icu_datetime",
  "icu_decimal",
@@ -2730,9 +2730,9 @@ dependencies = [
 
 [[package]]
 name = "incular-controls"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1e1ebd34860bf5792a84197fded22e2bf2136019645973edffb401ac7e339f2"
+checksum = "ba8d574aacc363383cb0037018cfe80efb4e81aa140add887d25d6998c797fd4"
 dependencies = [
  "bitflags 2.13.2",
  "incular-config",
@@ -2748,9 +2748,9 @@ dependencies = [
 
 [[package]]
 name = "incular-core"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c3246f0a10f4fbb23f547837cb604ac11b209ea243a8d76ea9cf0a197c9dc2b"
+checksum = "ee10c7d83eafb17d877afe49b98d331ebd351835f51f3ce77884d57235c4d80a"
 dependencies = [
  "bitflags 2.13.2",
  "keyboard-types 0.8.3",
@@ -2764,9 +2764,9 @@ dependencies = [
 
 [[package]]
 name = "incular-desktop"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "977ffbca8c3ba05d719dd110708af434fc4867eba1c23c16e6a9389f6ce3780f"
+checksum = "77a8346648deff5757a9a38d56693ba2a5387ba8e593e1897071e82b07480ea2"
 dependencies = [
  "accesskit_winit",
  "arboard",
@@ -2797,9 +2797,9 @@ dependencies = [
 
 [[package]]
 name = "incular-gestures"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfe181b84cc7624b120c41d2e83f602e9c076116056fd978b4ec6d9fd2a193a9"
+checksum = "c8b211665d0259ac09e3b0032a7c5cb3249c18a90f0e0a2ba8d513135f4da22c"
 dependencies = [
  "incular-core",
  "thiserror 2.0.21",
@@ -2807,9 +2807,9 @@ dependencies = [
 
 [[package]]
 name = "incular-image"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a7269479fad221bebdfaddf4f69afaf5471972a2db2784c46734731fa3c344d"
+checksum = "0d750fdcec9c1383bf7d6a04321ce9cf86563b8920d5dcfa56b406e48fbd5a22"
 dependencies = [
  "image",
  "incular-config",
@@ -2821,9 +2821,9 @@ dependencies = [
 
 [[package]]
 name = "incular-layout"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d15f30c9e7c8af8e74154e594d18e3bd841a293e239b397b04576bd95c9e7836"
+checksum = "2b15ac6ef3de99223953ae06da0697dc09e876cf5be417bacfa4ede159616a0f"
 dependencies = [
  "incular-config",
  "incular-core",
@@ -2831,9 +2831,9 @@ dependencies = [
 
 [[package]]
 name = "incular-linux"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51c40ba8298e00969bfedf9ca860b71a1a2bf25469bc989ee3fa132970eff693"
+checksum = "261949f08aabcb10df2a53fe192b90c7345704d96c711665920ed1f63af783d9"
 dependencies = [
  "ashpd",
  "futures-util",
@@ -2852,9 +2852,9 @@ dependencies = [
 
 [[package]]
 name = "incular-macos"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7124cedf57f5c4890e5a5e0e30935391697b1b2147257e439a43fc961dc76910"
+checksum = "8e1efd2dc689a607e3c47015e17f01c6bb13f4c25e92c5fbc24b2558d399cb06"
 dependencies = [
  "block2 0.5.1",
  "incular-config",
@@ -2874,14 +2874,15 @@ dependencies = [
 
 [[package]]
 name = "incular-material"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76c6577e72a9a669644168b501770ea157aa50a4dea1979ba14a3429db22775b"
+checksum = "ab1af65444ef076514844e99137289601d758a4bfd010b52dff0d2528b80eb8f"
 dependencies = [
  "bitflags 2.13.2",
  "incular-config",
  "incular-controls",
  "incular-core",
+ "incular-navigation",
  "incular-rendering",
  "incular-scroll",
  "incular-semantics",
@@ -2893,9 +2894,9 @@ dependencies = [
 
 [[package]]
 name = "incular-navigation"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5e6dd12502dd85f8a0152cf3d3aee2b0be8754ad60e86eb1b81ff0d57691315"
+checksum = "a2ed8dedaf1501407c628c485a21442f228d66889bed84bc21aebfb604ebbda0"
 dependencies = [
  "incular-core",
  "incular-widgets",
@@ -2907,9 +2908,9 @@ dependencies = [
 
 [[package]]
 name = "incular-platform"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b354c35d04d0ed3d1f2ee28d9f99a09c6f924f77b3ae4b4a38424f7e1b6e2ee"
+checksum = "86ac8032a7b7e8c8ab06111a4fdfb511b441b3393364f29a04a3e5584d915685"
 dependencies = [
  "bitflags 2.13.2",
  "directories",
@@ -2921,9 +2922,9 @@ dependencies = [
 
 [[package]]
 name = "incular-rendering"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b65b2d28131c566b5228d7c2befd35a869e7fe0a6b3a6ae83ac2e6b43450c810"
+checksum = "77b86740edf83e421364b1b324aec16d8c78f4d589eb663680d16019d5a0366b"
 dependencies = [
  "incular-assets",
  "incular-core",
@@ -2934,12 +2935,13 @@ dependencies = [
 
 [[package]]
 name = "incular-runtime"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c94ce611110a6f6b06fa153e7766535fe8367b15d41878462d5ce90291bcdc17"
+checksum = "2dadb2233b620ee85ef956eade5510059774094f75dae534382bf5932a15b149"
 dependencies = [
  "bitflags 2.13.2",
  "incular-accessibility",
+ "incular-animation",
  "incular-config",
  "incular-core",
  "incular-navigation",
@@ -2962,10 +2964,11 @@ dependencies = [
 
 [[package]]
 name = "incular-scroll"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "273190ce332da7712d9dcbff0e55e70cec5842884b6bc5b992330c589c38678c"
+checksum = "362b6d75219bf33e2831e1d5a39c368b2b2b14379b162cdd8f9e908b366ca9a4"
 dependencies = [
+ "incular-animation",
  "incular-config",
  "incular-core",
  "serde_json",
@@ -2974,18 +2977,18 @@ dependencies = [
 
 [[package]]
 name = "incular-semantics"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8f12264b42336a46f8688727d838f4a685ffdba50761872d012e0a41212dd7a"
+checksum = "f3b320856837b04dbe72b01f6c2371824cdf0199b290d6a58b1276f92fe9db28"
 dependencies = [
  "incular-core",
 ]
 
 [[package]]
 name = "incular-text"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63b4011de0ce0d94a5f91a08e3ed493294d3c871f143c4e63fb1b52092189986"
+checksum = "59e00d0496db1a804323880c574f224b1f6cf6164dcae09c2bc75a9499391c6b"
 dependencies = [
  "bitflags 2.13.2",
  "icu_properties",
@@ -3001,11 +3004,12 @@ dependencies = [
 
 [[package]]
 name = "incular-wgpu"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "721843f642ee90b710e6e16268a2bd2adb7c0968cb4739f5cc1b2e20d06f34b8"
+checksum = "574254c1fcb575e45de9a6961a6d7a91af04325a8efebe46a3cde59f374d65cc"
 dependencies = [
  "ab_glyph",
+ "ab_glyph_rasterizer",
  "bytemuck",
  "incular-assets",
  "incular-config",
@@ -3019,15 +3023,16 @@ dependencies = [
  "pollster",
  "postcard",
  "self_cell",
+ "skrifa",
  "thiserror 2.0.21",
  "wgpu",
 ]
 
 [[package]]
 name = "incular-widgets"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb1782ff7cd66fda11c206dea6a51d6084fbd08af655515904e9b2349034ec1c"
+checksum = "2e076ce6a254ea9702e7aa4b661144e77683bb8796422f0f9620e61dd20a703e"
 dependencies = [
  "bitflags 2.13.2",
  "icu_segmenter",
@@ -3052,9 +3057,9 @@ dependencies = [
 
 [[package]]
 name = "incular-windows"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52807fb738d6404525ec38a29691174a66a07268ed494347f17e4262620611a2"
+checksum = "eeb42fe608783e93d006bea789e47b49e91df0c3c8ec6ca5b499d4b46ef973bd"
 dependencies = [
  "crash-handler",
  "incular-config",

@@ -21,49 +21,34 @@ const GLASS_ACCENT: Color = Color::rgba(255, 138, 76, 52);
 const GLASS_ACCENT_HOVER: Color = Color::rgba(255, 138, 76, 84);
 
 /// Acrylic: what lies behind `child` is blurred, then `child` (a translucent
-/// tint) is drawn over it. Incular 0.1.1 clips the blur to the bounding box,
-/// not the rounded corners, so keep tints dark enough to hide that.
+/// tint) is drawn over it, inside the rounded corners.
 fn acrylic(child: impl Into<Widget>, radius: f32, sigma: f32) -> Widget {
     ClipRRect::new(radius, incular::widgets::BackdropFilter::blur(sigma, child)).into()
 }
 
-/// A list tile that grows with its content (controls `Button` has a fixed
-/// height), with its own hover state.
+/// A list tile: a button that grows with its content.
 fn list_button(child: Widget, width: f32, selected: bool, on_click: impl Fn() + 'static) -> Widget {
-    let hovered = Signal::new(false);
-    let on_click = std::rc::Rc::new(on_click);
-    Builder::new(move |_| {
-        let background = match (selected, hovered.get()) {
-            (true, true) => GLASS_ACCENT_HOVER,
-            (true, false) => GLASS_ACCENT,
-            (false, true) => GLASS_HOVER,
-            (false, false) => GLASS,
-        };
-        let (enter, exit, click) = (hovered.clone(), hovered.clone(), on_click.clone());
-        MouseRegion::new(
-            GestureDetector::new(
-                Container::new()
-                    .width(width)
-                    .padding(EdgeInsets::all(12.0))
-                    .decoration(
-                        BoxDecoration::new()
-                            .color(background)
-                            .border_radius(BorderRadius::all(Radius::circular(12.0))),
-                    )
-                    .child(child.clone()),
-            )
-            .behavior(HitTestBehavior::Opaque)
-            .on_tap(move || click()),
+    let (background, hover) =
+        if selected { (GLASS_ACCENT, GLASS_ACCENT_HOVER) } else { (GLASS, GLASS_HOVER) };
+    SizedBox::new()
+        .width(width)
+        .child(
+            Button::with_child(child)
+                .style(ButtonStyle {
+                    background: Some(background),
+                    background_states: Some(StateColor::new(background).hovered(hover)),
+                    foreground: Some(TEXT),
+                    border: Some(Border::new(0.0, Color::TRANSPARENT)),
+                    border_radius: Some(12.0),
+                    padding: Some(EdgeInsets::all(12.0)),
+                    alignment: Some(Alignment::CENTER_LEFT),
+                    overlay_color: Some(Color::TRANSPARENT.into()),
+                    animation_duration: Some(std::time::Duration::ZERO),
+                    ..ButtonStyle::default()
+                })
+                .on_click(on_click),
         )
-        .on_enter(move |_| {
-            enter.set(true);
-        })
-        .on_exit(move |_| {
-            exit.set(false);
-        })
         .into()
-    })
-    .into()
 }
 
 fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Widget {
@@ -293,7 +278,6 @@ fn download_button(on_click: impl Fn() + 'static) -> Widget {
             border_radius: Some(12.0),
             padding: Some(EdgeInsets::ZERO),
             fixed_size: Some(Size::new(DOWNLOAD_BUTTON, DOWNLOAD_BUTTON)),
-            alignment: Some(Alignment::CENTER),
             overlay_color: Some(Color::TRANSPARENT.into()),
             animation_duration: Some(std::time::Duration::ZERO),
             ..ButtonStyle::default()
@@ -577,8 +561,7 @@ fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
     if !picker {
         return list;
     }
-    // The dropdown layer exists only while open: in Incular 0.1.1 even an
-    // `IgnorePointer` layer stacked over the list swallows its clicks.
+    // The dropdown layer exists only while open.
     let app = app.clone();
     Builder::new(move |_| {
         if app.season_open.get() {
