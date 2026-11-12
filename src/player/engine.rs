@@ -47,6 +47,15 @@ pub struct MediaInfo {
     pub width: u32,
     pub height: u32,
     pub fps: f64,
+    /// The video uses an HDR transfer (PQ / HDR10, or HLG), so it must be
+    /// tone-mapped to SDR before it is shown as plain RGBA.
+    pub hdr: bool,
+    /// Dolby Vision whose base layer is not HDR10/HLG/SDR (profile 5, or
+    /// compatibility id 0): its picture is only right after Dolby Vision
+    /// reshaping, without which it looks green and purple.
+    pub dolby_vision: bool,
+    /// The video's matrix is not tagged, so ffmpeg would guess BT.601.
+    pub untagged: bool,
     pub has_video: bool,
     /// Container index of the video stream chosen for playback.
     pub video_index: usize,
@@ -553,7 +562,10 @@ impl Inner {
             if live {
                 // Timestamps are reported on stderr (showinfo) for A/V sync.
                 command.args(["-loglevel", "info", "-copyts"]);
-            } else {
+            } else if position > 0.0 {
+                // No seek from the start: seeking an MKV first loads its
+                // index (Cues), usually from the end of the file, which for a
+                // torrent means waiting for pieces playback doesn't need yet.
                 command.args(["-ss", &seek]);
             }
             self.input_args(&mut command);
@@ -561,13 +573,7 @@ impl Inner {
                 .arg("-i")
                 .arg(&self.request.url)
                 .args(["-map", &format!("0:{}", info.video_index), "-an", "-sn", "-dn"])
-                .args([
-                    "-vf",
-                    &format!(
-                        "{}fps={fps:.3},scale={width}:{height}:flags=fast_bilinear",
-                        if live { "showinfo," } else { "" }
-                    ),
-                ])
+                .args(["-vf", &video_filter(&info, width, height, fps, live)])
                 .args(["-pix_fmt", "rgba", "-f", "rawvideo"]);
             if live {
                 // With copied timestamps a constant-rate muxer would pad the
@@ -612,8 +618,8 @@ impl Inner {
             let mut command = self.ffmpeg(&ffmpeg);
             if live {
                 command.args(["-loglevel", "info", "-copyts"]).stderr(Stdio::piped());
-            } else {
-                command.args(["-ss", &format!("{:.3}", audio_from.max(0.0))]);
+            } else if audio_from > 0.0 {
+                command.args(["-ss", &format!("{audio_from:.3}")]);
             }
             self.input_args(&mut command);
             let audio_map = info
@@ -663,7 +669,15 @@ impl Inner {
             // Start a little early so a cue already on screen is included.
             let from = (position - 15.0).max(0.0);
             let mut command = self.ffmpeg(&ffmpeg);
-            command.args(["-ss", &format!("{from:.3}")]);
+            if from > 0.0 {
+                command.args(["-ss", &format!("{from:.3}")]);
+            }
+            // Getting subtitle packets means reading the whole interleaved
+            // file. Unthrottled, this reader races to the end of a torrent and
+            // takes bandwidth from playback; at 1.1x it stays just ahead.
+            // The burst covers the lead-in before `position`.
+            let burst = (position - from + 10.0).max(10.0);
+            command.args(["-readrate", "1.1", "-readrate_initial_burst", &format!("{burst:.0}")]);
             self.input_args(&mut command);
             command
                 .arg("-i")
@@ -679,14 +693,33 @@ impl Inner {
                     "-dn",
                 ])
                 .args(["-f", "srt", "pipe:1"]);
-            if let Ok(mut child) = command.spawn() {
-                let stdout = child.stdout.take();
-                self.children.lock().unwrap().push(child);
-                if let Some(stdout) = stdout {
-                    let inner = self.clone();
-                    std::thread::spawn(move || inner.subtitle_loop(generation, stdout, from));
+            // Start once the picture is up, so the first frames get every
+            // peer.
+            let inner = self.clone();
+            std::thread::spawn(move || {
+                let waited = Instant::now();
+                while inner.current(generation)
+                    && !inner.started.load(Ordering::Acquire)
+                    && waited.elapsed() < Duration::from_secs(60)
+                {
+                    std::thread::sleep(Duration::from_millis(50));
                 }
-            }
+                if !inner.current(generation) {
+                    return;
+                }
+                if let Ok(mut child) = command.spawn() {
+                    let stdout = child.stdout.take();
+                    inner.children.lock().unwrap().push(child);
+                    if !inner.current(generation) {
+                        // A restart cleared the children while this spawned.
+                        inner.kill_children();
+                        return;
+                    }
+                    if let Some(stdout) = stdout {
+                        inner.subtitle_loop(generation, stdout, from);
+                    }
+                }
+            });
         }
     }
 
@@ -1014,6 +1047,71 @@ impl rodio::Source for QueueSource {
     }
 }
 
+/// Tone-maps HDR (PQ or HLG, BT.2020) to SDR BT.709, as Media's and mpv's
+/// players do. Without it the HDR signal is shown as if it were SDR and looks
+/// grey and washed out. Runs after downscaling, so it works on the output
+/// size rather than the source's (often 4K). `zscale` reads the source
+/// transfer and primaries from the frames. `mobius` keeps colours in the SDR
+/// range nearly as they are and compresses only highlights above it
+/// (`hable` dims everything by about 40%). It ends in 8-bit RGB, so the
+/// final `rgba` conversion is only a repack, with no YUV matrix to guess.
+/// This is the fallback for machines where libplacebo can't run. `npl=203`
+/// maps HDR reference white (BT.2408) to SDR white, as libplacebo does;
+/// 100 showed HDR about 15% too bright.
+const HDR_TO_SDR: &str = ",zscale=t=linear:npl=203,format=gbrpf32le,zscale=p=bt709,\
+    tonemap=tonemap=mobius:desat=0,zscale=t=bt709:r=full,format=gbrp";
+
+/// The decoder's filter chain: frame rate, size and the colour conversion the
+/// source needs to look right as SDR RGBA.
+fn video_filter(info: &MediaInfo, width: u32, height: u32, fps: f64, live: bool) -> String {
+    let probe = if live { "showinfo," } else { "" };
+    let rate = format!("fps={fps:.3}");
+    if info.dolby_vision && libplacebo_available() {
+        // libplacebo applies the Dolby Vision reshaping (from the metadata
+        // the HEVC decoder attaches to each frame), tone-maps to SDR and
+        // scales on the GPU, like mpv's gpu-next renderer. Only here: with
+        // CPU-decoded frames it copies each one to the GPU and back, which
+        // managed 22 fps from 4K, too slow for HDR10 films at 24 fps.
+        return format!(
+            "{probe}{rate},libplacebo=w={width}:h={height}:upscaler=bilinear:downscaler=bilinear:\
+             colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=pc:format=rgba"
+        );
+    }
+    let scale = format!("scale={width}:{height}:flags=fast_bilinear");
+    if info.hdr && !info.dolby_vision {
+        return format!("{probe}{rate},{scale}{HDR_TO_SDR}");
+    }
+    // Untagged video: guess the matrix from the size, as mpv does (HD and up
+    // is BT.709). ffmpeg's guess is always BT.601, which shifts HD colours.
+    let matrix = if !info.untagged {
+        ""
+    } else if info.width >= 1280 || info.height > 576 {
+        ":in_color_matrix=bt709"
+    } else {
+        ":in_color_matrix=bt601"
+    };
+    format!("{probe}{rate},{scale}{matrix}")
+}
+
+/// Whether the bundled ffmpeg can run `libplacebo` here (it needs a working
+/// Vulkan GPU driver). Checked once, on first use.
+fn libplacebo_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let Some((ffmpeg, _)) = tools() else { return false };
+        let mut command = Command::new(ffmpeg);
+        command
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
+            .args(["-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1"])
+            .args(["-vf", "libplacebo=w=32:h=32:format=rgba", "-frames:v", "1", "-f", "null", "-"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        hide_console(&mut command);
+        command.status().is_ok_and(|status| status.success())
+    })
+}
+
 fn output_geometry(info: &MediaInfo, max_height: u32) -> (u32, u32, f64) {
     let (mut width, mut height) = (info.width.max(2), info.height.max(2));
     if max_height > 0 && height > max_height {
@@ -1102,6 +1200,22 @@ fn parse_probe(json: &[u8], max_height: u32, remote: bool) -> Option<MediaInfo> 
                 info.video_index = stream_index;
                 info.width = width;
                 info.height = height;
+                info.hdr = matches!(text("color_transfer").as_str(), "smpte2084" | "arib-std-b67");
+                info.untagged = matches!(text("color_space").as_str(), "" | "unknown");
+                info.dolby_vision = stream
+                    .get("side_data_list")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find(|d| {
+                        d.get("side_data_type").and_then(Value::as_str)
+                            == Some("DOVI configuration record")
+                    })
+                    .is_some_and(|d| {
+                        let number = |key: &str| d.get(key).and_then(Value::as_i64);
+                        number("dv_profile") == Some(5)
+                            || number("dv_bl_signal_compatibility_id") == Some(0)
+                    });
                 info.fps = parse_rate(&text("avg_frame_rate"));
                 if info.fps <= 1.0 {
                     info.fps = parse_rate(&text("r_frame_rate"));
