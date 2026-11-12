@@ -12,7 +12,7 @@
 //! for the host to reconnect (their reconnect token restores the role).
 //! An empty room is kept for [`ROOM_GRACE`] so people can come back.
 //!
-//! Protocol: one JSON object per line over TCP.
+//! Protocol: one JSON object per WebSocket text message, on `GET /ws`.
 //!
 //! Client to server:
 //! - `hello {name, room, password, token}`: join `room` (create one when
@@ -33,18 +33,28 @@
 //! text, at}`, `kicked`, `replaced`, `error {code, message}`, and the
 //! `media` / `state` / `buffering` messages of others with `from` and `id`.
 //!
-//! Usage: `watch-server [address]`, default `0.0.0.0:7878` (or the
-//! `SPOUTPEAK_WATCH_ADDR` environment variable).
+//! The server speaks plain HTTP. Put it behind an HTTPS reverse proxy (or a
+//! platform that terminates TLS) so clients connect with `wss://`.
+//! `GET /health` answers `ok` for load balancers.
+//!
+//! Configuration: `PORT` (default 7878) or `SPOUTPEAK_WATCH_ADDR`
+//! (`0.0.0.0:7878`), or the address as the first argument.
 
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use axum::Router;
+use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::response::IntoResponse;
+use axum::routing::get;
+use futures_util::{SinkExt, StreamExt};
+use std::net::SocketAddr;
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
-/// Longest line a client may send; a series' episode list can be large.
+/// Longest message a client may send; a series' episode list can be large.
 const MAX_LINE: usize = 4 * 1024 * 1024;
 const MAX_ROOM_MEMBERS: usize = 32;
 const MAX_CHAT: usize = 500;
@@ -471,34 +481,54 @@ fn left(all: &mut Rooms, me: &Joined) {
     room.send_members();
 }
 
-async fn client(stream: TcpStream, rooms: Shared) {
-    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-    let _ = stream.set_nodelay(true);
-    let (read, mut write) = stream.into_split();
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(rooms): State<Shared>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    // Behind a proxy the socket peer is the proxy; prefer what it forwards.
+    let peer = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().to_owned())
+        .unwrap_or_else(|| peer.to_string());
+    ws.max_message_size(MAX_LINE)
+        .max_frame_size(MAX_LINE)
+        .on_upgrade(move |socket| client(socket, rooms, peer))
+}
+
+async fn client(socket: WebSocket, rooms: Shared, peer: String) {
+    let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let writer = tokio::spawn(async move {
-        while let Some(line) = rx.recv().await {
-            if write.write_all(line.as_bytes()).await.is_err()
-                || write.write_all(b"\n").await.is_err()
-            {
+        // Keeps idle proxies from closing the connection.
+        let mut keepalive = tokio::time::interval(Duration::from_secs(25));
+        keepalive.tick().await;
+        loop {
+            let message = tokio::select! {
+                line = rx.recv() => match line {
+                    Some(line) => Message::Text(line.into()),
+                    None => break,
+                },
+                _ = keepalive.tick() => Message::Ping(Vec::new().into()),
+            };
+            if sink.send(message).await.is_err() {
                 break;
             }
         }
+        let _ = sink.close().await;
     });
 
-    let mut reader = BufReader::new(read);
     let mut joined: Option<Joined> = None;
-    let mut buffer = String::new();
-    loop {
-        buffer.clear();
-        let read = match (&mut reader).take(MAX_LINE as u64).read_line(&mut buffer).await {
-            Ok(0) | Err(_) => break,
-            Ok(read) => read,
+    while let Some(Ok(frame)) = stream.next().await {
+        let text = match frame {
+            Message::Text(text) => text,
+            Message::Close(_) => break,
+            _ => continue,
         };
-        if read >= MAX_LINE && !buffer.ends_with('\n') {
-            break;
-        }
-        let Ok(message) = serde_json::from_str::<Value>(buffer.trim()) else {
+        let Ok(message) = serde_json::from_str::<Value>(text.as_str()) else {
             continue;
         };
         let kind = message["t"].as_str().unwrap_or_default();
@@ -524,17 +554,47 @@ async fn client(stream: TcpStream, rooms: Shared) {
         left(&mut rooms.lock().unwrap(), &me);
         println!("{peer} left {}", me.code);
     }
-    writer.abort();
+    // Let the last messages (kicked / replaced) go out, then close.
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
+}
+
+fn address() -> String {
+    if let Some(arg) = std::env::args().nth(1) {
+        if arg == "-h" || arg == "--help" {
+            println!("watch-server [address]   (or PORT / SPOUTPEAK_WATCH_ADDR)");
+            std::process::exit(0);
+        }
+        return arg;
+    }
+    if let Ok(address) = std::env::var("SPOUTPEAK_WATCH_ADDR") {
+        return address;
+    }
+    let port = std::env::var("PORT").ok().and_then(|p| p.parse::<u16>().ok()).unwrap_or(7878);
+    format!("0.0.0.0:{port}")
+}
+
+async fn shutdown() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        if let Ok(mut signal) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            signal.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term => {}
+    }
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let address = std::env::args()
-        .nth(1)
-        .or_else(|| std::env::var("SPOUTPEAK_WATCH_ADDR").ok())
-        .unwrap_or_else(|| "0.0.0.0:7878".to_owned());
-    let listener = TcpListener::bind(&address).await?;
-    println!("Spoutpeak watch-together server listening on {address}");
+    let address = address();
     let rooms: Shared = Arc::default();
 
     let sweeper = rooms.clone();
@@ -551,8 +611,15 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    loop {
-        let (stream, _) = listener.accept().await?;
-        tokio::spawn(client(stream, rooms.clone()));
-    }
+    let app = Router::new()
+        .route("/ws", get(ws_handler))
+        .route("/health", get(|| async { "ok" }))
+        .route("/", get(|| async { "Spoutpeak watch-together server. Connect with a WebSocket on /ws." }))
+        .with_state(rooms);
+
+    let listener = TcpListener::bind(&address).await?;
+    println!("Spoutpeak watch-together server listening on http://{address} (WebSocket on /ws)");
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(shutdown())
+        .await
 }

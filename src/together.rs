@@ -1,5 +1,5 @@
 //! Watch together: keeps several viewers' players in step through a small
-//! relay server (`src/bin/watch-server.rs`).
+//! relay server (`watch-server/`).
 //!
 //! Only control messages travel through the server: which stream to play,
 //! play/pause, seeks, speed, "I'm buffering", chat and room management.
@@ -10,6 +10,10 @@
 //! leads: they send a heartbeat of their position every few seconds and the
 //! others jump to it when they drift too far. A dropped connection is
 //! retried with the reconnect token, which keeps the role.
+//!
+//! The connection is a WebSocket to the server baked in at build time
+//! (`SPOUTPEAK_WATCH_URL` in `.env`); `wss://` gets normal HTTPS
+//! certificate checks.
 
 use crate::addons::types::{Meta, Stream, Video};
 use crate::player::{Menu, Status};
@@ -18,11 +22,15 @@ use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
 
-pub const DEFAULT_SERVER: &str = "127.0.0.1:7878";
+/// The watch-together server, from `.env` at build time.
+pub const SERVER_URL: &str = match option_env!("SPOUTPEAK_WATCH_URL") {
+    Some(url) => url,
+    None => "ws://127.0.0.1:7878/ws",
+};
 
 /// Heartbeat interval of the leader.
 const BEAT: Duration = Duration::from_secs(4);
@@ -111,6 +119,8 @@ pub struct TogetherState {
     pub unread: usize,
     /// Viewers whose player is waiting for data: (id, name).
     pub waiting: Vec<(u64, String)>,
+    /// What the room is watching: (title, episode), for the room page.
+    pub now_playing: Option<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +140,8 @@ struct Ticket {
 }
 
 struct Inner {
+    /// The room's current video, to open it again from the room page.
+    media: RefCell<Option<Value>>,
     tx: RefCell<Option<mpsc::UnboundedSender<String>>>,
     /// Bumped per connection, so messages of an old one are ignored.
     connection: Cell<u64>,
@@ -157,6 +169,7 @@ impl Together {
         Self {
             state: Shared::new(TogetherState::default()),
             inner: Rc::new(Inner {
+                media: RefCell::new(None),
                 tx: RefCell::new(None),
                 connection: Cell::new(0),
                 ticket: RefCell::new(Ticket::default()),
@@ -218,10 +231,7 @@ impl App {
     }
 
     fn together_connect(&self) {
-        let (server, name) = self.profile.peek(|p| {
-            (p.settings.watch_server.trim().to_owned(), p.settings.watch_name.trim().to_owned())
-        });
-        let server = if server.is_empty() { DEFAULT_SERVER.to_owned() } else { server };
+        let name = self.profile.peek(|p| p.settings.watch_name.trim().to_owned());
         let Some(handle) = crate::state::tokio() else { return };
         let together = &self.together;
         let connection = together.inner.connection.get() + 1;
@@ -241,35 +251,38 @@ impl App {
         *together.inner.tx.borrow_mut() = Some(tx);
 
         handle.spawn(async move {
-            let connect = tokio::time::timeout(Duration::from_secs(8), TcpStream::connect(server.as_str()));
-            let stream = match connect.await {
-                Ok(Ok(stream)) => stream,
+            let socket = match tokio::time::timeout(Duration::from_secs(10), connect(SERVER_URL)).await {
+                Ok(Ok(socket)) => socket,
                 Ok(Err(error)) => {
-                    let message = format!("Could not reach the watch-together server at {server}: {error}");
+                    let message = format!("Could not reach the watch-together server: {error}");
                     ui(move |app| app.together_dropped(connection, message));
                     return;
                 }
                 Err(_) => {
-                    let message = format!("The watch-together server at {server} did not answer");
+                    let message = "The watch-together server did not answer".to_owned();
                     ui(move |app| app.together_dropped(connection, message));
                     return;
                 }
             };
-            let _ = stream.set_nodelay(true);
-            let (read, mut write) = stream.into_split();
+            let (mut sink, mut stream) = socket.split();
             let writer = tokio::spawn(async move {
                 while let Some(line) = rx.recv().await {
-                    if write.write_all(line.as_bytes()).await.is_err()
-                        || write.write_all(b"\n").await.is_err()
-                    {
+                    if sink.send(Message::Text(line.into())).await.is_err() {
                         break;
                     }
                 }
+                let _ = sink.close().await;
             });
-            let mut lines = BufReader::new(read).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Ok(message) = serde_json::from_str::<Value>(&line) {
-                    ui(move |app| app.together_message(connection, message));
+            while let Some(Ok(frame)) = stream.next().await {
+                match frame {
+                    Message::Text(text) => {
+                        if let Ok(message) = serde_json::from_str::<Value>(text.as_str()) {
+                            ui(move |app| app.together_message(connection, message));
+                        }
+                    }
+                    Message::Close(_) => break,
+                    // Pings are answered by the library.
+                    _ => {}
                 }
             }
             writer.abort();
@@ -286,6 +299,7 @@ impl App {
         // Dropping the sender ends the writer, which closes the socket.
         together.inner.tx.borrow_mut().take();
         *together.inner.ticket.borrow_mut() = Ticket::default();
+        together.inner.media.borrow_mut().take();
         together.inner.pending.set(None);
         together.inner.leader.set(false);
         if together.inner.auto_paused.replace(false) {
@@ -463,6 +477,7 @@ impl App {
         });
 
         let media = &message["media"];
+        self.together_remember_media(media);
         if media.is_null() {
             // A new room, or nobody has picked anything yet: share what is
             // playing here.
@@ -538,12 +553,38 @@ impl App {
     }
 
     fn together_play_media(&self, media: &Value) {
+        self.together_remember_media(media);
         let Ok(media) = serde_json::from_value::<Media>(media.clone()) else {
             self.notify("Could not open the room's video");
             return;
         };
         self.together.inner.pending.set(None);
         self.together.quietly(|| self.play_with(&media.stream, media.meta, media.video));
+    }
+
+    fn together_remember_media(&self, media: &Value) {
+        *self.together.inner.media.borrow_mut() = (!media.is_null()).then(|| media.clone());
+        let now = serde_json::from_value::<Media>(media.clone()).ok().map(|media| {
+            let title = media
+                .meta
+                .as_ref()
+                .and_then(|m| m.name.clone())
+                .or_else(|| media.stream.title.clone())
+                .or_else(|| media.stream.name.clone())
+                .unwrap_or_else(|| "A video".to_owned());
+            let episode = media.video.as_ref().and_then(|v| v.title.clone()).unwrap_or_default();
+            (title, episode)
+        });
+        self.together.state.write(|s| s.now_playing = now);
+    }
+
+    /// Opens the room's current video again (after leaving the player).
+    pub fn together_watch(&self) {
+        let media = self.together.inner.media.borrow().clone();
+        match media {
+            Some(media) => self.together_play_media(&media),
+            None => self.notify("Nothing is playing in the room yet"),
+        }
     }
 
     /// Applies the room's playback state now, or once the stream is open.
@@ -638,10 +679,9 @@ impl App {
         }
         together.inner.leader.set(true);
         together.inner.pending.set(None);
-        together.send(json!({
-            "t": "media",
-            "media": Media { stream: stream.clone(), meta: meta.cloned(), video: video.cloned() },
-        }));
+        let media = json!(Media { stream: stream.clone(), meta: meta.cloned(), video: video.cloned() });
+        self.together_remember_media(&media);
+        together.send(json!({ "t": "media", "media": media }));
     }
 
     fn together_share_current(&self) {
@@ -756,4 +796,27 @@ fn parse_state(value: &Value) -> Option<Pending> {
         speed: value["speed"].as_f64().unwrap_or(1.0),
         received: Instant::now(),
     })
+}
+
+/// Opens the WebSocket; `wss://` checks the certificate against the usual
+/// public authorities.
+async fn connect(
+    url: &str,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    String,
+> {
+    use std::sync::Arc;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_tungstenite::Connector::Rustls(Arc::new(config));
+    let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(url, None, true, Some(connector))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(socket)
 }

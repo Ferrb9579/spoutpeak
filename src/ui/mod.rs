@@ -99,6 +99,7 @@ fn sidebar(app: &App, current: Route) -> Widget {
         ("Library", icons::bookmark(), Route::Library),
         ("Search", icons::search(), Route::Search),
         ("Downloads", icons::download(), Route::Downloads),
+        ("Watch together", icons::users(), Route::Together),
     ] {
         items.push(nav_button(app, label, glyph, route, route == current));
         items.push(gap(4.0));
@@ -230,6 +231,7 @@ pub(super) fn handle_key(app: &App, event: &KeyboardEvent) -> bool {
             Code::Digit5 if control => Route::Addons,
             Code::Digit6 if control => Route::Settings,
             Code::Digit7 if control => Route::Downloads,
+            Code::Digit8 if control => Route::Together,
             _ => return false,
         };
         app.go(target);
@@ -352,6 +354,7 @@ pub fn root(app: &App) -> Widget {
                 Route::Search => island(app, browse::search),
                 Route::Addons => island(app, addons::screen),
                 Route::Downloads => island(app, downloads::screen),
+                Route::Together => island(app, together::screen),
                 _ => island(app, settings::screen),
             };
             hrow(vec![sidebar(app, base), Expanded::new(page.wrap(screen)).into()])
