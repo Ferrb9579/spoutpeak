@@ -466,6 +466,109 @@ fn streaming_card(app: &App, settings: &Settings) -> Widget {
     card(col(rows).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
 }
 
+fn together_card(app: &App) -> Widget {
+    use crate::together::Link;
+    let state = app.together.state.read(|s| s.clone());
+    let save = |app: &App| {
+        let server = app.controllers.watch_server.text().trim().to_owned();
+        let name = app.controllers.watch_name.text().trim().to_owned();
+        app.update_settings(|s| {
+            s.watch_server = server;
+            s.watch_name = name;
+        });
+    };
+    let mut rows: Vec<Widget> = vec![
+        section("Watch together"),
+        gap(6.0),
+        muted(
+            "Watch in sync with friends. Everyone streams the video on their own; the room only \
+             keeps play, pause, seeking and the chosen stream in step.",
+        ),
+        gap(12.0),
+    ];
+    let (server_submit, name_submit) = (app.clone(), app.clone());
+    rows.push(setting_row(
+        "Server",
+        "host:port of a running watch-server",
+        input(&app.controllers.watch_server, crate::together::DEFAULT_SERVER, 300.0, move |_| {
+            save(&server_submit)
+        })
+        .into(),
+    ));
+    rows.push(setting_row(
+        "Your name",
+        "What others in the room see",
+        input(&app.controllers.watch_name, "Guest", 300.0, move |_| save(&name_submit)).into(),
+    ));
+    rows.push(gap(8.0));
+    match state.link {
+        Link::Off => {
+            let (create, join, join_submit) = (app.clone(), app.clone(), app.clone());
+            let join_room = move |app: &App| {
+                let code = app.controllers.watch_code.text().trim().to_owned();
+                if code.is_empty() {
+                    app.notify("Enter a room code first");
+                    return;
+                }
+                save(app);
+                app.together_join(&code);
+            };
+            let join_click = join_room.clone();
+            rows.push(
+                row(vec![
+                    button("Create a room", Tone::Primary, move || {
+                        save(&create);
+                        create.together_join("");
+                    }),
+                    hgap(20.0),
+                    input(&app.controllers.watch_code, "Room code", 160.0, move |_| {
+                        join_room(&join_submit)
+                    })
+                    .into(),
+                    hgap(10.0),
+                    button("Join", Tone::Neutral, move || join_click(&join)),
+                ])
+                .into(),
+            );
+        }
+        Link::Connecting => {
+            let leave = app.clone();
+            rows.push(
+                row(vec![
+                    muted("Connecting…"),
+                    hgap(16.0),
+                    button("Cancel", Tone::Neutral, move || leave.together_leave()),
+                ])
+                .into(),
+            );
+        }
+        Link::Connected => {
+            let leave = app.clone();
+            rows.push(
+                row(vec![
+                    text("Room", 13.0, FontWeight::W500, MUTED).into(),
+                    hgap(10.0),
+                    text(state.room.clone(), 20.0, FontWeight::W700, ACCENT).into(),
+                    hgap(20.0),
+                    button("Leave", Tone::Neutral, move || leave.together_leave()),
+                ])
+                .into(),
+            );
+            rows.push(gap(8.0));
+            rows.push(muted(format!(
+                "{} in the room: {}",
+                state.members.len(),
+                state.members.join(", ")
+            )));
+            rows.push(gap(4.0));
+            rows.push(muted(
+                "Play anything and everyone in the room starts it too. Friends join with the code above.",
+            ));
+        }
+    }
+    card(col(rows).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
+}
+
 fn open_card(app: &App) -> Widget {
     let (submit, click) = (app.clone(), app.clone());
     let play = move |app: &App| {
@@ -534,6 +637,8 @@ pub fn screen(app: &App) -> Widget {
                 downloads_card(app, settings.download_format),
                 gap(16.0),
                 shortcuts_card(),
+                gap(16.0),
+                together_card(app),
                 gap(16.0),
                 open_card(app),
                 gap(16.0),

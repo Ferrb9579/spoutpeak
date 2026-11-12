@@ -189,6 +189,12 @@ impl PlayerUi {
         cues
     }
 
+    /// The stream playing now, with its title and episode.
+    pub fn current_media(&self) -> Option<(Stream, Option<Meta>, Option<Video>)> {
+        let session = self.session.borrow();
+        Some((session.stream.clone()?, session.meta.clone(), session.video.clone()))
+    }
+
     /// How many subtitle lines are loaded.
     pub fn cue_count(&self) -> usize {
         self.cues.borrow().len()
@@ -304,6 +310,15 @@ impl App {
     /// Plays `stream` for the item currently open in the detail view.
     pub fn play_stream(&self, stream: &Stream) {
         let (meta, video) = self.detail.peek(|d| (d.best_meta(), d.video.clone()));
+        self.play_with(stream, meta, video);
+    }
+
+    /// Plays `stream` as part of `meta` / `video` (also used for a stream
+    /// picked by a watch-together room).
+    pub fn play_with(&self, stream: &Stream, meta: Option<Meta>, video: Option<Video>) {
+        if matches!(stream.source(), StreamSource::Url(_) | StreamSource::Torrent { .. }) {
+            self.together_local_media(stream, meta.as_ref(), video.as_ref());
+        }
         match stream.source() {
             StreamSource::External(url) => {
                 if let Err(error) = open_externally(&url) {
@@ -711,6 +726,7 @@ impl App {
             s.embedded_subs = info.subtitles;
         });
         self.auto_select_subtitle();
+        self.together_player_ready();
     }
 
     /// Clicking a control moves or clears keyboard focus; take it back so
@@ -792,6 +808,7 @@ impl App {
                 self.player.state.write(|s| s.torrent = Some(stats));
             }
         }
+        self.together_tick(stalled);
     }
 
     fn record_player_progress(&self, seconds: f64, ended: bool, push: bool) {
@@ -919,6 +936,7 @@ impl App {
             let position = self.player.position.get_untracked();
             self.record_player_progress(position, false, true);
         }
+        self.together_local_change();
     }
 
     pub fn seek_to(&self, seconds: f64) {
@@ -938,6 +956,7 @@ impl App {
             self.player.state.write(|s| s.status = Status::Playing);
         }
         self.player_activity();
+        self.together_local_change();
     }
 
     pub fn seek_by(&self, delta: f64) {
@@ -975,6 +994,7 @@ impl App {
             s.speed = speed;
             s.menu = Menu::None;
         });
+        self.together_local_change();
     }
 
     pub fn select_audio(&self, index: usize) {

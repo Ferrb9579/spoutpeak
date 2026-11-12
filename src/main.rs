@@ -14,6 +14,7 @@ mod state;
 mod store;
 mod streaming;
 mod theme;
+mod together;
 mod ui;
 mod util;
 

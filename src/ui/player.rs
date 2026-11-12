@@ -1187,6 +1187,23 @@ fn bottom_bar(app: &App) -> Widget {
     controls.push(hgap(14.0));
     controls.push(clock(app));
     controls.push(Spacer::new().into());
+    let (room, people) = app.together.state.peek(|s| {
+        (
+            (s.link == crate::together::Link::Connected).then(|| s.room.clone()),
+            s.members.len(),
+        )
+    });
+    if let Some(room) = room {
+        controls.push(
+            row(vec![
+                icon(icons::users(), 15.0, ACCENT),
+                hgap(6.0),
+                text(format!("{room} · {people}"), 12.0, FontWeight::W600, ACCENT).into(),
+            ])
+            .into(),
+        );
+        controls.push(hgap(14.0));
+    }
     if let Some(stats) = torrent {
         controls.push(
             text(
@@ -1584,6 +1601,17 @@ pub fn screen(app: &App) -> Widget {
         }
         Status::Playing if stalled => {
             layers.push(buffering_card(app, torrent.as_ref()));
+        }
+        Status::Playing if !stalled && !app.together_waiting_for().is_empty() => {
+            let names = app.together_waiting_for().join(", ");
+            layers.push(status_card(vec![
+                spinner(30.0),
+                gap(12.0),
+                text("Waiting for the room", 15.0, FontWeight::W700, TEXT).into(),
+                gap(4.0),
+                text(format!("{names} is buffering. Playback resumes together."), 12.5, FontWeight::W400, MUTED)
+                    .into(),
+            ]));
         }
         Status::Playing if !has_video => {
             layers.push(status_card(vec![

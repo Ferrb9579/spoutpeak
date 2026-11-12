@@ -120,6 +120,10 @@ pub struct Settings {
     pub hardware_decoding: bool,
     /// Most recent first.
     pub recent_searches: Vec<String>,
+    /// `host:port` of the watch-together relay.
+    pub watch_server: String,
+    /// The name others in a watch-together room see.
+    pub watch_name: String,
 }
 
 impl Default for Settings {
@@ -147,6 +151,8 @@ impl Default for Settings {
             volume: 1.0,
             hardware_decoding: true,
             recent_searches: Vec::new(),
+            watch_server: crate::together::DEFAULT_SERVER.to_owned(),
+            watch_name: String::new(),
         }
     }
 }

@@ -310,6 +310,9 @@ pub struct Controllers {
     pub player_focus: FocusNode,
     pub player_path: TextEditingController,
     pub download_dir: TextEditingController,
+    pub watch_server: TextEditingController,
+    pub watch_name: TextEditingController,
+    pub watch_code: TextEditingController,
     pub board: ScrollController,
     pub discover: ScrollController,
     pub library: ScrollController,
@@ -338,6 +341,9 @@ impl Controllers {
             player_focus: FocusNode::new(),
             player_path: TextEditingController::with_text(&profile.settings.custom_player_path),
             download_dir: TextEditingController::with_text(&profile.settings.download_dir),
+            watch_server: TextEditingController::with_text(&profile.settings.watch_server),
+            watch_name: TextEditingController::with_text(&profile.settings.watch_name),
+            watch_code: TextEditingController::new(),
             board: ScrollController::new(),
             discover: ScrollController::new(),
             library: ScrollController::new(),
@@ -376,6 +382,7 @@ pub struct App {
     pub discover: Shared<DiscoverState>,
     pub search: Shared<SearchState>,
     pub detail: Shared<DetailState>,
+    pub together: crate::together::Together,
     /// Season combobox on the detail page. Separate signals so typing in
     /// its search field rebuilds only the result list, not the field.
     pub season_open: Signal<bool>,
@@ -411,6 +418,7 @@ impl App {
             discover: Shared::new(DiscoverState::default()),
             search: Shared::new(SearchState::default()),
             detail: Shared::new(DetailState::default()),
+            together: crate::together::Together::new(),
             season_open: Signal::new(false),
             season_filter: Signal::new(String::new()),
             addons: Shared::new(AddonsState {
