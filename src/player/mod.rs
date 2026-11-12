@@ -319,6 +319,25 @@ impl App {
     // ------------------------------------------------------------ starting
 
     /// Plays `stream` for the item currently open in the detail view.
+    fn remember_stream(&self, meta_id: &str, video_id: Option<&str>, stream: &Stream) {
+        if meta_id.is_empty() {
+            return;
+        }
+        let key = crate::store::last_stream_key(meta_id, video_id);
+        self.profile.write(|p| {
+            p.last_streams.retain(|entry| entry.key != key);
+            p.last_streams.insert(0, crate::store::LastStream { key, stream: stream.clone() });
+            p.last_streams.truncate(crate::store::LAST_STREAMS_KEPT);
+        });
+        self.save_profile();
+    }
+
+    /// The stream last played for this title / episode.
+    pub fn last_stream(&self, meta_id: &str, video_id: Option<&str>) -> Option<Stream> {
+        let key = crate::store::last_stream_key(meta_id, video_id);
+        self.profile.peek(|p| p.last_streams.iter().find(|e| e.key == key).map(|e| e.stream.clone()))
+    }
+
     pub fn play_stream(&self, stream: &Stream) {
         let (meta, video) = self.detail.peek(|d| (d.best_meta(), d.video.clone()));
         self.play_with(stream, meta, video);
@@ -332,6 +351,9 @@ impl App {
                 return;
             }
             self.together_local_media(stream, meta.as_ref(), video.as_ref());
+        }
+        if let Some(meta) = &meta {
+            self.remember_stream(meta.id(), video.as_ref().map(|v| v.id()), stream);
         }
         match stream.source() {
             StreamSource::External(url) => {

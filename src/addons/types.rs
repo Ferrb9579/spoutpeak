@@ -799,3 +799,19 @@ impl LibraryItem {
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
+
+impl Stream {
+    /// The same video source, whatever the addon's title says today
+    /// (titles carry seeder counts that change between lookups).
+    pub fn same_source(&self, other: &Stream) -> bool {
+        match (&self.info_hash, &other.info_hash) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b) && self.file_idx == other.file_idx,
+            (None, None) => {
+                (self.url.is_some() && self.url == other.url)
+                    || (self.yt_id.is_some() && self.yt_id == other.yt_id)
+                    || (self.external_url.is_some() && self.external_url == other.external_url)
+            }
+            _ => false,
+        }
+    }
+}

@@ -309,6 +309,45 @@ fn streams_pane(app: &App, groups: &[StreamGroup], video: &Video, is_series: boo
     children.push(section("Streams"));
     children.push(gap(10.0));
 
+    // The stream played last time for this title / episode, pinned on top.
+    // The addon's fresh copy is preferred (its seeders etc. are current).
+    let last = app.detail.peek(|d| {
+        let meta = d.best_meta()?;
+        app.last_stream(meta.id(), d.video.as_ref().map(|v| v.id()))
+    });
+    let last = last.map(|saved| {
+        groups
+            .iter()
+            .filter_map(|g| match &g.items {
+                Load::Ready(streams) => Some((g, streams)),
+                _ => None,
+            })
+            .find_map(|(g, streams)| {
+                streams
+                    .iter()
+                    .find(|s| s.same_source(&saved))
+                    .map(|s| (Some(g.addon_name.clone()), s.clone()))
+            })
+            .unwrap_or((None, saved))
+    });
+    if let Some((addon, stream)) = &last {
+        let label = match addon {
+            Some(addon) => format!("LAST USED · {addon}"),
+            None => "LAST USED".to_owned(),
+        };
+        children.push(
+            row(vec![
+                icon(icons::rotate_ccw(), 13.0, ACCENT),
+                hgap(6.0),
+                text(label, 11.0, FontWeight::W700, ACCENT).into(),
+            ])
+            .into(),
+        );
+        children.push(gap(6.0));
+        children.push(stream_tile(app, stream));
+        children.push(gap(16.0));
+    }
+
     let loading = groups.iter().filter(|g| g.items == Load::Loading).count();
     let quality = app.detail.peek(|d| d.quality);
     let everything: usize = groups
@@ -357,6 +396,8 @@ fn streams_pane(app: &App, groups: &[StreamGroup], video: &Video, is_series: boo
             let streams: Vec<&Stream> = streams
                 .iter()
                 .filter(|s| quality == Quality::All || Quality::of(s) == quality)
+                // Already shown on top.
+                .filter(|s| !last.as_ref().is_some_and(|(_, l)| l.same_source(s)))
                 .collect();
             if streams.is_empty() {
                 continue;

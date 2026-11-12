@@ -214,6 +214,26 @@ impl Default for TorrentSettings {
 pub struct Profile {
     pub addons: Vec<Descriptor>,
     pub settings: Settings,
+    /// The stream last played per title / episode, most recent first.
+    pub last_streams: Vec<LastStream>,
+}
+
+/// The stream picked for one title or episode.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LastStream {
+    /// `meta id` or `meta id/video id`.
+    pub key: String,
+    pub stream: crate::addons::types::Stream,
+}
+
+/// How many titles / episodes remember their stream.
+pub const LAST_STREAMS_KEPT: usize = 500;
+
+pub fn last_stream_key(meta_id: &str, video_id: Option<&str>) -> String {
+    match video_id {
+        Some(video) if !video.is_empty() => format!("{meta_id}/{video}"),
+        _ => meta_id.to_owned(),
+    }
 }
 
 fn profile_path() -> PathBuf {
