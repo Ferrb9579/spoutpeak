@@ -403,9 +403,9 @@ async fn launch() -> Result<Arc<Engine>, String> {
     let root = cache_folder();
     std::fs::create_dir_all(&root).map_err(|e| format!("cannot create the torrent cache: {e}"))?;
     let settings = config().lock().unwrap().clone();
-    let options = SessionOptions {
+    let options = |persist: bool| SessionOptions {
         dht: Some(DhtSessionConfig {
-            persistence: Some(DhtPersistenceConfig {
+            persistence: persist.then(|| DhtPersistenceConfig {
                 config_filename: Some(crate::util::cache_dir().join("dht.json")),
                 ..Default::default()
             }),
@@ -415,19 +415,21 @@ async fn launch() -> Result<Arc<Engine>, String> {
             download_bps: speed_cap(&settings),
             ..Default::default()
         },
+        // librqbit's blocking-I/O permits (default 8) are also held by every
+        // open file stream for its whole life. A player opens up to five at
+        // once (probe, video, audio, subtitles, read-ahead) and more briefly
+        // during a seek, which left too few for writing received pieces.
+        runtime_worker_threads: Some(32),
         ..Default::default()
     };
-    // librqbit's blocking-I/O permits (default 8) are also held by every
-    // open file stream for its whole life. A player opens up to five at once
-    // (probe, video, audio, subtitles, read-ahead) and more briefly during a
-    // seek, which left too few for writing received pieces to disk.
-    let options = SessionOptions {
-        runtime_worker_threads: Some(32),
-        ..options
+    // The saved DHT state pins its UDP port; a second running instance
+    // cannot bind it, so that one starts a fresh, unsaved DHT instead.
+    let session = match Session::new_with_opts(root.clone(), options(true)).await {
+        Ok(session) => session,
+        Err(_) => Session::new_with_opts(root.clone(), options(false))
+            .await
+            .map_err(|e| format!("could not start the torrent engine: {e:#}"))?,
     };
-    let session = Session::new_with_opts(root.clone(), options)
-        .await
-        .map_err(|e| format!("could not start the torrent engine: {e:#}"))?;
 
     let engine = Arc::new(Engine {
         session,
