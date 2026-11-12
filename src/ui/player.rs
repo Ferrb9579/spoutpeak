@@ -803,6 +803,8 @@ fn menu_panel(app: &App, menu: Menu) -> Option<Widget> {
         Menu::Subtitles => subtitles_panel(app),
         Menu::SubtitleStyle => subtitle_style_panel(app),
         Menu::Picture => picture_panel(app),
+        // Drawn outside the focus-excluded controls (it has a text field).
+        Menu::Together => return None,
     };
     let height = panel.height.min(460.0);
     Some(
@@ -1216,6 +1218,14 @@ fn bottom_bar(app: &App) -> Widget {
         );
         controls.push(hgap(14.0));
     }
+    let (in_room, unread) = app.together.state.peek(|s| (s.link != crate::together::Link::Off, s.unread));
+    if in_room {
+        let app = app.clone();
+        controls.push(menu_button(icons::users(), menu == Menu::Together, unread > 0, move || {
+            app.set_player_menu(Menu::Together)
+        }));
+        controls.push(hgap(4.0));
+    }
     let style_open = menu == Menu::SubtitleStyle || menu == Menu::Sync;
     for (glyph, target, changed) in [
         (icons::sun(), Menu::Picture, (brightness - 1.0).abs() > 0.01),
@@ -1621,6 +1631,12 @@ pub fn screen(app: &App) -> Widget {
         _ => {}
     }
 
+    if menu != Menu::Together {
+        if let Some(bubbles) = super::together::bubbles(app) {
+            layers.push(bubbles);
+        }
+    }
+
     if let (Some(left), Some(next_video)) = (app.player.state.read(|s| s.up_next), next.clone()) {
         layers.push(up_next_card(app, &next_video, left, visible));
     }
@@ -1667,8 +1683,24 @@ pub fn screen(app: &App) -> Widget {
     // are kept out of the focus system: Incular has no way to hand focus
     // back programmatically, and a focused button would swallow Space.
     let (hover, keys) = (app.clone(), app.clone());
+    let mut surface_layers: Vec<Widget> =
+        vec![ExcludeFocus::new(Stack::new(layers).fit(StackFit::Expand)).into()];
+    // The room panel takes focus for its chat field, so it sits outside the
+    // focus exclusion.
+    if menu == Menu::Together && (visible || fade.opacity() > 0.0) {
+        surface_layers.push(
+            Align::new(
+                Alignment::BOTTOM_RIGHT,
+                Padding::new(
+                    EdgeInsets::only(0.0, 0.0, 20.0, 104.0),
+                    motion::pop_in(super::together::player_panel(app), 8.0),
+                ),
+            )
+            .into(),
+        );
+    }
     KeyboardListener::new(
-        MouseRegion::new(ExcludeFocus::new(Stack::new(layers).fit(StackFit::Expand)))
+        MouseRegion::new(Stack::new(surface_layers).fit(StackFit::Expand))
             .on_hover(move |_| hover.player_activity()),
     )
     .focus_node(app.controllers.player_focus.clone())

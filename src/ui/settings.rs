@@ -468,7 +468,7 @@ fn streaming_card(app: &App, settings: &Settings) -> Widget {
 
 fn together_card(app: &App) -> Widget {
     use crate::together::Link;
-    let state = app.together.state.read(|s| s.clone());
+    let link = app.together.state.read(|s| s.link.clone());
     let save = |app: &App| {
         let server = app.controllers.watch_server.text().trim().to_owned();
         let name = app.controllers.watch_name.text().trim().to_owned();
@@ -482,10 +482,16 @@ fn together_card(app: &App) -> Widget {
         gap(6.0),
         muted(
             "Watch in sync with friends. Everyone streams the video on their own; the room only \
-             keeps play, pause, seeking and the chosen stream in step.",
+             keeps play, pause, seeking and the chosen stream in step, and carries the chat.",
         ),
         gap(12.0),
     ];
+    if link == Link::Connected || link == Link::Reconnecting {
+        rows.push(super::together::room_view(app, 640.0, 200.0));
+        rows.push(gap(8.0));
+        rows.push(muted("In the player, the people icon opens this room and its chat."));
+        return card(col(rows).cross_axis_alignment(CrossAxisAlignment::Start)).into();
+    }
     let (server_submit, name_submit) = (app.clone(), app.clone());
     rows.push(setting_row(
         "Server",
@@ -500,71 +506,54 @@ fn together_card(app: &App) -> Widget {
         "What others in the room see",
         input(&app.controllers.watch_name, "Guest", 300.0, move |_| save(&name_submit)).into(),
     ));
+    rows.push(setting_row(
+        "Room password",
+        "Optional. Set it when creating a room; enter it to join a protected one",
+        input(&app.controllers.watch_password, "No password", 300.0, |_| {}).into(),
+    ));
     rows.push(gap(8.0));
-    match state.link {
-        Link::Off => {
-            let (create, join, join_submit) = (app.clone(), app.clone(), app.clone());
-            let join_room = move |app: &App| {
-                let code = app.controllers.watch_code.text().trim().to_owned();
-                if code.is_empty() {
-                    app.notify("Enter a room code first");
-                    return;
-                }
-                save(app);
-                app.together_join(&code);
-            };
-            let join_click = join_room.clone();
-            rows.push(
-                row(vec![
-                    button("Create a room", Tone::Primary, move || {
-                        save(&create);
-                        create.together_join("");
-                    }),
-                    hgap(20.0),
-                    input(&app.controllers.watch_code, "Room code", 160.0, move |_| {
-                        join_room(&join_submit)
-                    })
+    if link == Link::Connecting {
+        let leave = app.clone();
+        rows.push(
+            row(vec![
+                muted("Connecting…"),
+                hgap(16.0),
+                button("Cancel", Tone::Neutral, move || leave.together_leave()),
+            ])
+            .into(),
+        );
+    } else {
+        let (create, join, join_submit) = (app.clone(), app.clone(), app.clone());
+        let join_room = move |app: &App| {
+            let code = app.controllers.watch_code.text().trim().to_owned();
+            if code.is_empty() {
+                app.notify("Enter a room code first");
+                return;
+            }
+            save(app);
+            let password = app.controllers.watch_password.text();
+            app.together_join(&code, &password);
+        };
+        let join_click = join_room.clone();
+        rows.push(
+            row(vec![
+                button("Create a room", Tone::Primary, move || {
+                    save(&create);
+                    let password = create.controllers.watch_password.text();
+                    create.together_join("", &password);
+                }),
+                hgap(20.0),
+                input(&app.controllers.watch_code, "Room code", 160.0, move |_| join_room(&join_submit))
                     .into(),
-                    hgap(10.0),
-                    button("Join", Tone::Neutral, move || join_click(&join)),
-                ])
-                .into(),
-            );
-        }
-        Link::Connecting => {
-            let leave = app.clone();
-            rows.push(
-                row(vec![
-                    muted("Connecting…"),
-                    hgap(16.0),
-                    button("Cancel", Tone::Neutral, move || leave.together_leave()),
-                ])
-                .into(),
-            );
-        }
-        Link::Connected => {
-            let leave = app.clone();
-            rows.push(
-                row(vec![
-                    text("Room", 13.0, FontWeight::W500, MUTED).into(),
-                    hgap(10.0),
-                    text(state.room.clone(), 20.0, FontWeight::W700, ACCENT).into(),
-                    hgap(20.0),
-                    button("Leave", Tone::Neutral, move || leave.together_leave()),
-                ])
-                .into(),
-            );
-            rows.push(gap(8.0));
-            rows.push(muted(format!(
-                "{} in the room: {}",
-                state.members.len(),
-                state.members.join(", ")
-            )));
-            rows.push(gap(4.0));
-            rows.push(muted(
-                "Play anything and everyone in the room starts it too. Friends join with the code above.",
-            ));
-        }
+                hgap(10.0),
+                button("Join", Tone::Neutral, move || join_click(&join)),
+            ])
+            .into(),
+        );
+        rows.push(gap(8.0));
+        rows.push(muted(
+            "Whoever creates the room is its host and controls playback. The host can make others co-hosts.",
+        ));
     }
     card(col(rows).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
 }

@@ -39,6 +39,8 @@ pub enum Menu {
     SubtitleStyle,
     /// Picture adjustments (brightness).
     Picture,
+    /// Watch-together room: people and chat.
+    Together,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -317,6 +319,9 @@ impl App {
     /// picked by a watch-together room).
     pub fn play_with(&self, stream: &Stream, meta: Option<Meta>, video: Option<Video>) {
         if matches!(stream.source(), StreamSource::Url(_) | StreamSource::Torrent { .. }) {
+            if self.together_blocks_control() {
+                return;
+            }
             self.together_local_media(stream, meta.as_ref(), video.as_ref());
         }
         match stream.source() {
@@ -732,6 +737,10 @@ impl App {
     /// Clicking a control moves or clears keyboard focus; take it back so
     /// the player's shortcuts keep working.
     fn keep_player_focus(&self) {
+        // The room panel's chat field has focus while it is open.
+        if self.player.state.peek(|s| s.menu == Menu::Together) {
+            return;
+        }
         let focus = &self.controllers.player_focus;
         if !focus.has_focus() {
             focus.request_focus();
@@ -924,6 +933,9 @@ impl App {
     }
 
     pub fn toggle_pause(&self) {
+        if self.together_blocks_control() {
+            return;
+        }
         if self.player.state.peek(|s| s.status == Status::Ended) {
             self.seek_to(0.0);
             return;
@@ -940,6 +952,9 @@ impl App {
     }
 
     pub fn seek_to(&self, seconds: f64) {
+        if self.together_blocks_control() {
+            return;
+        }
         if self.player.state.peek(|s| s.live) {
             return;
         }
@@ -985,6 +1000,9 @@ impl App {
     }
 
     pub fn set_speed(&self, speed: f64) {
+        if self.together_blocks_control() {
+            return;
+        }
         if self.player.state.peek(|s| s.live) {
             self.player.state.write(|s| s.menu = Menu::None);
             return;
@@ -1188,7 +1206,10 @@ impl App {
             s.menu = if s.menu == menu { Menu::None } else { menu };
             s.menu
         });
-        if opened != Menu::None && opened != Menu::Sync {
+        if opened == Menu::Together {
+            self.together_mark_read();
+        }
+        if opened != Menu::None && opened != Menu::Sync && opened != Menu::Together {
             // A freshly opened panel starts at its top; rebuilds while it
             // stays open keep the scroll position (shared controller).
             ui(|app| {

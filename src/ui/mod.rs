@@ -6,6 +6,7 @@ mod detail;
 mod downloads;
 mod motion;
 mod player;
+mod together;
 mod settings;
 mod splash;
 mod widgets;
@@ -239,6 +240,14 @@ pub(super) fn handle_key(app: &App, event: &KeyboardEvent) -> bool {
         (f64::from(s.seek_step), f64::from(s.seek_step_shift), s.volume_step as f32 / 100.0)
     });
     let step = if shift { seek_shift } else { seek };
+    // Typing in the room chat: keys belong to the text field.
+    if app.player.state.peek(|s| s.menu == crate::player::Menu::Together) {
+        if event.code == Code::Escape {
+            app.set_player_menu(crate::player::Menu::None);
+            return true;
+        }
+        return false;
+    }
     match event.code {
         Code::Space | Code::KeyK => app.toggle_pause(),
         Code::ArrowLeft | Code::KeyJ => app.seek_by(-step),
