@@ -72,6 +72,9 @@ pub enum Event {
     Position { seconds: f64, stalled: bool },
     /// Cues from the embedded subtitle track; `reset` clears earlier ones.
     Cues { cues: Vec<Cue>, reset: bool },
+    /// The whole-file subtitle pass has read up to `until` seconds;
+    /// `done` once it reached the end.
+    SubtitleProgress { until: f64, done: bool },
     Ended,
     Error(String),
 }
@@ -130,6 +133,11 @@ struct Inner {
     /// difference lines the two independent connections up.
     live_video_start: Mutex<Option<f64>>,
     live_audio_start: Mutex<Option<f64>>,
+    /// Bumped to cancel the whole-file subtitle pass.
+    sub_pass: AtomicU64,
+    /// The whole-file subtitle reader, kept apart from `children` so seeks
+    /// do not restart it.
+    sub_child: Mutex<Option<Child>>,
 }
 
 pub struct Engine {
@@ -207,6 +215,8 @@ impl Engine {
             last_restart: Mutex::new(Instant::now()),
             live_video_start: Mutex::new(None),
             live_audio_start: Mutex::new(None),
+            sub_pass: AtomicU64::new(0),
+            sub_child: Mutex::new(None),
         });
         let worker = inner.clone();
         std::thread::Builder::new()
@@ -268,12 +278,24 @@ impl Engine {
     pub fn set_subtitle_track(&self, index: Option<usize>) {
         self.inner.config.lock().unwrap().subtitle_track = index;
         self.seek(self.position());
+        let inner = self.inner.clone();
+        std::thread::spawn(move || inner.full_subtitles(false));
+    }
+
+    /// Reads the whole subtitle track again, as fast as the source allows.
+    pub fn load_all_subtitles(&self) {
+        let inner = self.inner.clone();
+        std::thread::spawn(move || inner.full_subtitles(true));
     }
 
     pub fn stop(&self) {
         self.inner.alive.store(false, Ordering::Release);
         self.inner.generation.fetch_add(1, Ordering::AcqRel);
+        self.inner.sub_pass.fetch_add(1, Ordering::AcqRel);
         self.inner.kill_children();
+        if let Some(mut child) = self.inner.sub_child.lock().unwrap().take() {
+            let _ = child.kill();
+        }
     }
 }
 
@@ -662,10 +684,6 @@ impl Inner {
         }
 
         if let Some(track) = config.subtitle_track.filter(|_| !live) {
-            self.emit(Event::Cues {
-                cues: Vec::new(),
-                reset: true,
-            });
             // Start a little early so a cue already on screen is included.
             let from = (position - 15.0).max(0.0);
             let mut command = self.ffmpeg(&ffmpeg);
@@ -716,7 +734,8 @@ impl Inner {
                         return;
                     }
                     if let Some(stdout) = stdout {
-                        inner.subtitle_loop(generation, stdout, from);
+                        let keep = |inner: &Inner| inner.current(generation);
+                        inner.subtitle_loop(&keep, stdout, from, false);
                     }
                 }
             });
@@ -899,12 +918,31 @@ impl Inner {
         }
     }
 
-    fn subtitle_loop(self: Arc<Self>, generation: u64, stdout: ChildStdout, offset: f64) {
+    /// Reads SRT from `stdout` into `Cues` events while `keep` holds;
+    /// `report` also sends `SubtitleProgress` (the whole-file pass).
+    fn subtitle_loop(
+        &self,
+        keep: &dyn Fn(&Inner) -> bool,
+        stdout: ChildStdout,
+        offset: f64,
+        report: bool,
+    ) {
         let mut block = String::new();
-        let mut batch = Vec::new();
+        let mut batch: Vec<Cue> = Vec::new();
         let mut last_flush = Instant::now();
+        let mut until = 0.0f64;
+        let flush = |batch: &mut Vec<Cue>, until: &mut f64| {
+            if batch.is_empty() {
+                return;
+            }
+            *until = batch.iter().fold(*until, |m, c| m.max(c.end));
+            self.emit(Event::Cues { cues: std::mem::take(batch), reset: false });
+            if report {
+                self.emit(Event::SubtitleProgress { until: *until, done: false });
+            }
+        };
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if !self.current(generation) {
+            if !keep(self) {
                 return;
             }
             if line.trim().is_empty() {
@@ -913,12 +951,7 @@ impl Inner {
                 }
                 block.clear();
                 if batch.len() >= 40 || last_flush.elapsed() > Duration::from_millis(400) {
-                    if !batch.is_empty() {
-                        self.emit(Event::Cues {
-                            cues: std::mem::take(&mut batch),
-                            reset: false,
-                        });
-                    }
+                    flush(&mut batch, &mut until);
                     last_flush = Instant::now();
                 }
             } else {
@@ -929,11 +962,74 @@ impl Inner {
         if let Some(cue) = parse_block(&block, offset) {
             batch.push(cue);
         }
-        if !batch.is_empty() && self.current(generation) {
-            self.emit(Event::Cues {
-                cues: batch,
-                reset: false,
-            });
+        if !keep(self) {
+            return;
+        }
+        flush(&mut batch, &mut until);
+        if report {
+            self.emit(Event::SubtitleProgress { until, done: true });
+        }
+    }
+
+    /// Reads the selected embedded subtitle track from the start of the
+    /// file to the end, independent of seeks, so every line is available
+    /// (the sync list needs them all). `fast` lifts the read-rate cap.
+    fn full_subtitles(self: Arc<Self>, fast: bool) {
+        let pass = self.sub_pass.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Some(mut child) = self.sub_child.lock().unwrap().take() {
+            let _ = child.kill();
+        }
+        let Some((ffmpeg, _)) = tools() else { return };
+        let keep = move |inner: &Inner| {
+            inner.alive.load(Ordering::Acquire) && inner.sub_pass.load(Ordering::Acquire) == pass
+        };
+        // Wait for the media info and the first picture, so opening gets
+        // every peer first.
+        let waited = Instant::now();
+        while keep(&self)
+            && !(self.info.lock().unwrap().is_some() && self.started.load(Ordering::Acquire))
+            && waited.elapsed() < Duration::from_secs(60)
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let Some(track) = self.config.lock().unwrap().subtitle_track else { return };
+        let Some(info) = self.info.lock().unwrap().clone() else { return };
+        if !keep(&self) || info.live {
+            return;
+        }
+        self.emit(Event::SubtitleProgress { until: 0.0, done: false });
+        let mut command = self.ffmpeg(&ffmpeg);
+        // Throttled, a torrent keeps bandwidth for playback; at 4x a
+        // two-hour film is read in half an hour.
+        if !fast {
+            command.args(["-readrate", "4", "-readrate_initial_burst", "60"]);
+        }
+        self.input_args(&mut command);
+        command
+            .arg("-i")
+            .arg(&self.request.url)
+            .args([
+                "-map",
+                &info
+                    .subtitles
+                    .get(track)
+                    .map_or_else(|| format!("0:s:{track}"), |t| format!("0:{}", t.stream_index)),
+                "-vn",
+                "-an",
+                "-dn",
+            ])
+            .args(["-f", "srt", "pipe:1"]);
+        let Ok(mut child) = command.spawn() else { return };
+        let stdout = child.stdout.take();
+        *self.sub_child.lock().unwrap() = Some(child);
+        if !keep(&self) {
+            if let Some(mut child) = self.sub_child.lock().unwrap().take() {
+                let _ = child.kill();
+            }
+            return;
+        }
+        if let Some(stdout) = stdout {
+            self.subtitle_loop(&keep, stdout, 0.0, true);
         }
     }
 

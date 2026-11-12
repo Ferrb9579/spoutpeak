@@ -203,16 +203,11 @@ fn stream_tile(app: &App, stream: &Stream) -> Widget {
         StreamSource::Unsupported => "Unsupported",
     };
     let headline = stream.headline();
+    let headline = if headline.is_empty() { "Stream".to_owned() } else { headline.replace('\n', " ") };
     let details = stream.details();
     let mut lines: Vec<Widget> = vec![
-        row(vec![
-            text(
-                if headline.is_empty() { "Stream".to_owned() } else { headline.replace('\n', " ") },
-                13.5,
-                FontWeight::W600,
-                TEXT,
-            )
-            .into(),
+        hrow(vec![
+            Flexible::new(line(headline.clone(), 13.5, FontWeight::W600, TEXT)).into(),
             hgap(8.0),
             text(badge, 11.0, FontWeight::W600, ACCENT).into(),
         ])
@@ -221,13 +216,15 @@ fn stream_tile(app: &App, stream: &Stream) -> Widget {
     if !details.is_empty() {
         lines.push(gap(4.0));
         lines.push(
-            Text::new(details)
+            Text::new(breakable(&details))
                 .style(style(12.0, FontWeight::W400, MUTED))
                 .max_lines(Some(4))
                 .overflow(TextOverflow::Ellipsis)
                 .into(),
         );
     }
+    // The full, untruncated text on hover.
+    let full = if details.is_empty() { headline } else { format!("{headline}\n{details}") };
     let downloadable = matches!(
         stream.source(),
         StreamSource::Url(_) | StreamSource::Torrent { .. }
@@ -245,6 +242,7 @@ fn stream_tile(app: &App, stream: &Stream) -> Widget {
         false,
         move || play.play_stream(&play_stream),
     );
+    let tile: Widget = incular::material::Tooltip::new(full, tile).into();
     if !downloadable {
         return tile;
     }
@@ -256,6 +254,20 @@ fn stream_tile(app: &App, stream: &Stream) -> Widget {
     ])
     .cross_axis_alignment(CrossAxisAlignment::Center)
     .into()
+}
+
+/// Release names like `Movie.2025.1080p.WEBRip-GROUP` have no spaces, so
+/// they cannot wrap and spill out of the tile. A zero-width space after each
+/// separator gives the line breaker somewhere to break.
+fn breakable(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + value.len() / 4);
+    for ch in value.chars() {
+        out.push(ch);
+        if matches!(ch, '.' | '_' | '-' | '/' | '[' | ']' | '(' | ')' | ',') {
+            out.push('\u{200B}');
+        }
+    }
+    out
 }
 
 const DOWNLOAD_BUTTON: f32 = 40.0;

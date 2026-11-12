@@ -19,23 +19,50 @@ const OVERLAY: Color = Color::rgba(8, 9, 14, 205);
 /// A horizontal track; `change(fraction, committed)` fires on click and
 /// while dragging, with `committed` true on click and on release.
 fn slider(width: f32, fraction: f32, change: Rc<dyn Fn(f32, bool)>) -> Widget {
+    track(width, fraction, &[], change)
+}
+
+/// [`slider`] that also shades `buffered` (start, end) fractions, the parts
+/// already downloaded.
+fn track(width: f32, fraction: f32, buffered: &[(f32, f32)], change: Rc<dyn Fn(f32, bool)>) -> Widget {
     let fraction = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 0.0 };
     let filled = (width * fraction).max(0.0);
+    let mut parts: Vec<Widget> = vec![
+        Positioned::new(
+            Container::new()
+                .width(width)
+                .height(4.0)
+                .radius(2.0)
+                .color(Color::rgba(255, 255, 255, 45)),
+        )
+        .left(0.0)
+        .top(9.0)
+        .into(),
+    ];
+    for &(start, end) in buffered {
+        let (start, end) = (start.clamp(0.0, 1.0), end.clamp(0.0, 1.0));
+        let span = (end - start) * width;
+        if span < 1.0 {
+            continue;
+        }
+        parts.push(
+            Positioned::new(
+                Container::new()
+                    .width(span)
+                    .height(4.0)
+                    .radius(2.0)
+                    .color(Color::rgba(255, 255, 255, 105)),
+            )
+            .left(start * width)
+            .top(9.0)
+            .into(),
+        );
+    }
     let visual = Container::new()
         .width(width)
         .height(22.0)
         .color(Color::TRANSPARENT)
-        .child(layers(vec![
-            Positioned::new(
-                Container::new()
-                    .width(width)
-                    .height(4.0)
-                    .radius(2.0)
-                    .color(Color::rgba(255, 255, 255, 60)),
-            )
-            .left(0.0)
-            .top(9.0)
-            .into(),
+        .child(layers(parts.into_iter().chain([
             Positioned::new(
                 Container::new()
                     .width(filled)
@@ -56,7 +83,7 @@ fn slider(width: f32, fraction: f32, change: Rc<dyn Fn(f32, bool)>) -> Widget {
             .left((filled - 7.0).clamp(0.0, (width - 14.0).max(0.0)))
             .top(4.0)
             .into(),
-        ]));
+        ]).collect()));
     let at = move |x: f32| (x / width.max(1.0)).clamp(0.0, 1.0);
     let last = Rc::new(std::cell::Cell::new(fraction));
     let (tap, drag, release) = (change.clone(), change.clone(), change);
@@ -78,12 +105,16 @@ fn seek_bar(app: &App) -> Widget {
     LayoutBuilder::new(move |_, constraints| {
         let width = constraints.max_width();
         let position = app.player.position.get();
-        let duration = app.player.state.peek(|s| s.duration);
+        let (duration, buffered) = app
+            .player
+            .state
+            .peek(|s| (s.duration, s.torrent.as_ref().map(|t| t.ranges.clone()).unwrap_or_default()));
         let fraction = if duration > 0.0 { (position / duration) as f32 } else { 0.0 };
         let app = app.clone();
-        slider(
+        track(
             width,
             fraction,
+            &buffered,
             Rc::new(move |value, committed| {
                 if duration <= 0.0 {
                     return;
@@ -393,6 +424,38 @@ fn audio_panel(app: &App) -> Panel {
     panel
 }
 
+/// How far the selected subtitle has loaded, for the menus. `None` when
+/// subtitles are off.
+fn subtitle_progress(app: &App) -> Option<(String, bool)> {
+    let (choice, until, loaded, duration) = app
+        .player
+        .state
+        .peek(|s| (s.sub_choice.clone(), s.sub_loaded_until, s.sub_loaded, s.duration));
+    if choice == SubChoice::Off {
+        return None;
+    }
+    let count = app.player.cue_count();
+    if loaded {
+        return Some((format!("All {count} lines loaded"), true));
+    }
+    if matches!(choice, SubChoice::Addon(_)) {
+        return Some(("Downloading subtitle…".to_owned(), false));
+    }
+    let label = if duration > 0.0 && until > 0.0 {
+        let percent = (until / duration * 100.0).clamp(0.0, 99.0);
+        format!(
+            "Loading lines: {count} so far, up to {} of {} ({percent:.0}%)",
+            format_time(until),
+            format_time(duration)
+        )
+    } else if count > 0 {
+        format!("Loading lines: {count} so far")
+    } else {
+        "Loading lines…".to_owned()
+    };
+    Some((label, false))
+}
+
 fn subtitles_panel(app: &App) -> Panel {
     let (choice, delay) = app.player.state.peek(|s| (s.sub_choice.clone(), s.sub_delay));
     let entries = subtitle_entries(app);
@@ -430,7 +493,19 @@ fn subtitles_panel(app: &App) -> Panel {
         ),
         18.0,
     );
-    panel.gap(12.0);
+    panel.gap(6.0);
+    if let Some((label, done)) = subtitle_progress(app) {
+        panel.push(
+            Padding::new(
+                EdgeInsets::only(4.0, 0.0, 0.0, 0.0),
+                SizedBox::new()
+                    .width(PANEL_INNER - 8.0)
+                    .child(line(label, 11.5, FontWeight::W500, if done { FAINT } else { ACCENT })),
+            ),
+            16.0,
+        );
+    }
+    panel.gap(10.0);
 
     if choice != SubChoice::Off {
         let (earlier, later, sync) = (app.clone(), app.clone(), app.clone());
@@ -685,7 +760,7 @@ fn picture_panel(app: &App) -> Panel {
     panel.gap(14.0);
     let (darker, brighter, drag) = (app.clone(), app.clone(), app.clone());
     panel.row(vec![
-        icon_pill(icons::minus(), move || darker.adjust_brightness(-0.05)),
+        icon_pill(icons::minus(), move || darker.adjust_brightness(-0.01)),
         hgap(10.0),
         slider(
             PANEL_INNER - 98.0,
@@ -693,8 +768,28 @@ fn picture_panel(app: &App) -> Panel {
             Rc::new(move |value, _| drag.set_brightness(0.3 + value * 1.4)),
         ),
         hgap(10.0),
-        icon_pill(icons::plus(), move || brighter.adjust_brightness(0.05)),
+        icon_pill(icons::plus(), move || brighter.adjust_brightness(0.01)),
     ]);
+    panel.gap(12.0);
+    let mut presets = Vec::new();
+    for value in [0.5f32, 0.75, 1.0, 1.25, 1.5] {
+        let app = app.clone();
+        presets.push(pill(
+            format!("{:.0}%", value * 100.0),
+            (brightness - value).abs() < 0.005,
+            move || app.set_brightness(value),
+        ));
+        presets.push(hgap(5.0));
+    }
+    panel.row(presets);
+    panel.gap(8.0);
+    panel.push(
+        Padding::new(
+            EdgeInsets::only(4.0, 0.0, 0.0, 0.0),
+            text("Steps of 1%. Keys: B brighter, Shift+B darker.", 11.5, FontWeight::W400, FAINT),
+        ),
+        16.0,
+    );
     panel.gap(6.0);
     panel
 }
@@ -840,10 +935,34 @@ fn sync_panel(app: &App) -> Widget {
     ])
     .cross_axis_alignment(CrossAxisAlignment::Center);
 
+    let progress = subtitle_progress(app);
+    let embedded = app.player.state.peek(|s| matches!(s.sub_choice, SubChoice::Embedded(_)));
+    let status: Widget = match &progress {
+        Some((label, done)) => {
+            let mut parts: Vec<Widget> = vec![
+                if *done {
+                    icon(icons::check(), 13.0, FAINT)
+                } else {
+                    spinner(13.0)
+                },
+                hgap(7.0),
+                Expanded::new(line(label.clone(), 12.0, FontWeight::W500, if *done { FAINT } else { ACCENT }))
+                    .into(),
+            ];
+            if !done && embedded {
+                let all = app.clone();
+                parts.push(hgap(6.0));
+                parts.push(pill("Load all now", false, move || all.load_all_subtitles()));
+            }
+            hrow(parts).cross_axis_alignment(CrossAxisAlignment::Center).into()
+        }
+        None => SizedBox::shrink().into(),
+    };
+
     let list: Widget = if cues.is_empty() {
         Padding::new(
             EdgeInsets::only(4.0, 20.0, 4.0, 0.0),
-            muted("The subtitle lines are still loading. Try again in a moment."),
+            muted("No lines yet. They appear here as the subtitle track is read."),
         )
         .into()
     } else {
@@ -913,7 +1032,9 @@ fn sync_panel(app: &App) -> Widget {
                     MUTED,
                 )
                 .into(),
-                gap(10.0),
+                gap(8.0),
+                SizedBox::new().height(30.0).child(status).into(),
+                gap(6.0),
                 Expanded::new(list).into(),
             ])
             .cross_axis_alignment(CrossAxisAlignment::Stretch),
@@ -1190,6 +1311,108 @@ fn status_card(children: Vec<Widget>) -> Widget {
     .into()
 }
 
+/// A spinning ring.
+fn spinner(size: f32) -> Widget {
+    SizedBox::new()
+        .width(size)
+        .height(size)
+        .child(
+            incular::material::CircularProgressIndicator::new()
+                .indeterminate(true)
+                .size(size)
+                .stroke_width((size / 8.0).max(2.0))
+                .color(ACCENT),
+        )
+        .into()
+}
+
+/// Seconds of video downloaded without a gap from the playhead on.
+fn buffered_ahead(ranges: &[(f32, f32)], position: f64, duration: f64) -> Option<f64> {
+    if duration <= 0.0 {
+        return None;
+    }
+    let at = (position / duration) as f32;
+    let range = ranges.iter().find(|(start, end)| *start <= at + 0.0005 && at < *end);
+    Some(range.map_or(0.0, |(_, end)| ((*end - at) as f64 * duration).max(0.0)))
+}
+
+/// Shown while playback waits for data: what it is waiting on and how
+/// the download is going.
+fn buffering_card(app: &App, torrent: Option<&crate::streaming::TorrentStats>) -> Widget {
+    let position = app.player.position.get_untracked();
+    let duration = app.player.state.peek(|s| s.duration);
+    let mut lines: Vec<Widget> = vec![
+        spinner(34.0),
+        gap(14.0),
+        text("Buffering", 16.0, FontWeight::W700, TEXT).into(),
+        gap(4.0),
+    ];
+    match torrent {
+        Some(stats) => {
+            let hint = if stats.peers == 0 {
+                "Looking for peers…"
+            } else if stats.download_speed < 50_000.0 {
+                "Peers are slow to send this part"
+            } else {
+                "Fetching the next part of the video"
+            };
+            lines.push(text(hint, 12.5, FontWeight::W400, MUTED).into());
+            lines.push(gap(16.0));
+            let ahead = buffered_ahead(&stats.ranges, position, duration)
+                .map_or_else(|| "–".to_owned(), |s| format!("{s:.0}s"));
+            lines.push(
+                row(vec![
+                    stat("Peers", stats.peers.to_string()),
+                    hgap(26.0),
+                    stat("Download", format_speed(stats.download_speed)),
+                    hgap(26.0),
+                    stat("Ready ahead", ahead),
+                    hgap(26.0),
+                    stat("Downloaded", format!("{:.1}%", stats.progress * 100.0)),
+                ])
+                .into(),
+            );
+            if duration > 0.0 {
+                lines.push(gap(16.0));
+                lines.push(
+                    IgnorePointer::new(track(
+                        300.0,
+                        (position / duration) as f32,
+                        &stats.ranges,
+                        Rc::new(|_, _| {}),
+                    ))
+                    .into(),
+                );
+                lines.push(
+                    text(
+                        format!("At {} of {}", format_time(position), format_time(duration)),
+                        11.0,
+                        FontWeight::W500,
+                        FAINT,
+                    )
+                    .into(),
+                );
+            }
+        }
+        None => {
+            lines.push(text("Waiting for the stream to send more data", 12.5, FontWeight::W400, MUTED).into());
+            if duration > 0.0 {
+                lines.push(gap(10.0));
+                lines.push(
+                    text(
+                        format!("At {} of {}", format_time(position), format_time(duration)),
+                        11.0,
+                        FontWeight::W500,
+                        FAINT,
+                    )
+                    .into(),
+                );
+            }
+        }
+    }
+    status_card(lines)
+}
+
 const CHROME_FADE: Duration = Duration::from_millis(180);
 
 thread_local! {
@@ -1360,9 +1583,7 @@ pub fn screen(app: &App) -> Widget {
             ]));
         }
         Status::Playing if stalled => {
-            layers.push(status_card(vec![
-                text("Buffering…", 15.0, FontWeight::W600, TEXT).into(),
-            ]));
+            layers.push(buffering_card(app, torrent.as_ref()));
         }
         Status::Playing if !has_video => {
             layers.push(status_card(vec![

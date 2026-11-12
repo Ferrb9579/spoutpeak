@@ -70,6 +70,11 @@ pub struct PlayerState {
     pub addon_subs: Vec<Subtitle>,
     pub sub_choice: SubChoice,
     pub sub_delay: f64,
+    /// How far into the video the selected subtitle's lines are known
+    /// (seconds), while they are still loading.
+    pub sub_loaded_until: f64,
+    /// Every line of the selected subtitle is loaded.
+    pub sub_loaded: bool,
     pub sub_size: f32,
     pub sub_style: SubtitleStyle,
     pub brightness: f32,
@@ -142,6 +147,8 @@ impl PlayerUi {
                 addon_subs: Vec::new(),
                 sub_choice: SubChoice::Off,
                 sub_delay: 0.0,
+                sub_loaded_until: 0.0,
+                sub_loaded: false,
                 sub_size: settings.subtitle_size,
                 sub_style: settings.subtitle_style.clone(),
                 brightness: settings.brightness,
@@ -180,6 +187,11 @@ impl PlayerUi {
         let mut cues = self.cues.borrow().clone();
         cues.sort_by(|a, b| a.start.total_cmp(&b.start));
         cues
+    }
+
+    /// How many subtitle lines are loaded.
+    pub fn cue_count(&self) -> usize {
+        self.cues.borrow().len()
     }
 
     fn with_engine<R>(&self, call: impl FnOnce(&Engine) -> R) -> Option<R> {
@@ -649,7 +661,27 @@ impl App {
                 if reset {
                     all.clear();
                 }
-                all.extend(cues);
+                // The near-playhead reader and the whole-file reader overlap.
+                for cue in cues {
+                    let known = all.iter().rev().any(|c| {
+                        (c.start - cue.start).abs() < 0.25 && c.text == cue.text
+                    });
+                    if !known {
+                        all.push(cue);
+                    }
+                }
+            }
+            Event::SubtitleProgress { until, done } => {
+                if !matches!(
+                    self.player.state.peek(|s| s.sub_choice.clone()),
+                    SubChoice::Embedded(_)
+                ) {
+                    return;
+                }
+                self.player.state.write(|s| {
+                    s.sub_loaded_until = until;
+                    s.sub_loaded = done;
+                });
             }
             Event::Ended => self.player_ended(),
             Event::Error(message) => {
@@ -965,6 +997,8 @@ impl App {
         self.player.state.write(|s| {
             s.sub_choice = choice.clone();
             s.menu = Menu::None;
+            s.sub_loaded_until = 0.0;
+            s.sub_loaded = choice == SubChoice::Off;
         });
         match &choice {
             SubChoice::Embedded(index) => {
@@ -998,12 +1032,26 @@ impl App {
                         return;
                     }
                     match cues {
-                        Some(cues) if !cues.is_empty() => *app.player.cues.borrow_mut() = cues,
+                        Some(cues) if !cues.is_empty() => {
+                            let until = cues.iter().fold(0.0f64, |m, c| m.max(c.end));
+                            *app.player.cues.borrow_mut() = cues;
+                            app.player.state.write(|s| {
+                                s.sub_loaded_until = until;
+                                s.sub_loaded = true;
+                            });
+                        }
                         _ => app.notify("Could not load that subtitle"),
                     }
                 },
             );
         }
+    }
+
+    /// Reads the rest of the embedded subtitle track without the read-rate
+    /// cap (uses more bandwidth on torrents).
+    pub fn load_all_subtitles(&self) {
+        self.player.with_engine(Engine::load_all_subtitles);
+        self.player.state.write(|s| s.sub_loaded = false);
     }
 
     /// Height of one row in the subtitle sync list.
@@ -1132,7 +1180,7 @@ impl App {
 
     /// Brightness multiplier applied to the picture (0.3 – 1.7).
     pub fn set_brightness(&self, brightness: f32) {
-        let brightness = (brightness.clamp(0.3, 1.7) * 20.0).round() / 20.0;
+        let brightness = (brightness.clamp(0.3, 1.7) * 100.0).round() / 100.0;
         self.player.state.write(|s| s.brightness = brightness);
         self.update_settings(|s| s.brightness = brightness);
         self.player_activity();

@@ -264,7 +264,7 @@ pub(super) fn handle_key(app: &App, event: &KeyboardEvent) -> bool {
         Code::BracketLeft => app.adjust_audio_delay(-0.05),
         Code::BracketRight => app.adjust_audio_delay(0.05),
         Code::KeyC => app.cycle_subtitles(),
-        Code::KeyB => app.adjust_brightness(if shift { -0.05 } else { 0.05 }),
+        Code::KeyB => app.adjust_brightness(if shift { -0.01 } else { 0.01 }),
         Code::KeyM => app.toggle_mute(),
         Code::KeyF | Code::F11 => app.toggle_fullscreen(),
         Code::KeyG => app.adjust_subtitle_delay(-0.25),

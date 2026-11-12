@@ -63,6 +63,8 @@ pub struct TorrentStats {
     pub download_speed: f64,
     /// Share of the streamed file downloaded so far, 0 to 1.
     pub progress: f64,
+    /// Downloaded stretches of the file as (start, end) fractions, in order.
+    pub ranges: Vec<(f32, f32)>,
 }
 
 /// Presets for how hard the engine pulls from the swarm.
@@ -168,7 +170,38 @@ pub fn stats(url: &str) -> Option<TorrentStats> {
         peers: live.map_or(0, |l| u64::from(l.snapshot.peer_stats.live)),
         download_speed: live.map_or(0.0, |l| l.download_speed.as_bytes() as f64),
         progress: if file_len > 0 { (done as f64 / file_len as f64).clamp(0.0, 1.0) } else { 0.0 },
+        ranges: have_ranges(engine, &handle, file),
     })
+}
+
+/// Which parts of one file of a torrent are on disk, as merged
+/// (start, end) fractions of the file.
+fn have_ranges(engine: &Engine, handle: &Handle, file: usize) -> Vec<(f32, f32)> {
+    let Some(metadata) = handle.metadata.load_full() else { return Vec::new() };
+    let Some(info) = metadata.file_infos.get(file) else { return Vec::new() };
+    if info.len == 0 {
+        return Vec::new();
+    }
+    let api = librqbit::Api::new(engine.session.clone(), None);
+    let Ok((haves, total)) = api.api_dump_haves(TorrentIdOrHash::Id(handle.id())) else {
+        return Vec::new();
+    };
+    let piece_len = u64::from(metadata.lengths().default_piece_length());
+    let (file_start, file_len) = (info.offset_in_torrent, info.len);
+    let mut ranges: Vec<(f32, f32)> = Vec::new();
+    for piece in info.piece_range.clone() {
+        if piece >= total || !haves.get(piece as usize).is_some_and(|bit| *bit) {
+            continue;
+        }
+        let start = (u64::from(piece) * piece_len).max(file_start) - file_start;
+        let end = ((u64::from(piece) + 1) * piece_len).min(file_start + file_len) - file_start;
+        let (a, b) = (start as f32 / file_len as f32, end as f32 / file_len as f32);
+        match ranges.last_mut() {
+            Some(last) if a - last.1 < 0.0005 => last.1 = b,
+            _ => ranges.push((a, b)),
+        }
+    }
+    ranges
 }
 
 /// Where torrent data is cached.
