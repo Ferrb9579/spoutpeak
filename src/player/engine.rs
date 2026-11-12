@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -118,6 +118,9 @@ struct Inner {
     /// picture begin together.
     started: AtomicBool,
     consumed_frames: AtomicU64,
+    /// Audio frames still to skip (positive) or repeat (negative) to slew
+    /// the clock without a seek (watch-together drift correction).
+    trim_frames: AtomicI64,
     clock: Mutex<ClockState>,
     audio_queue: Mutex<VecDeque<i16>>,
     audio_device: AtomicBool,
@@ -192,6 +195,7 @@ impl Engine {
             paused: AtomicBool::new(false),
             started: AtomicBool::new(false),
             consumed_frames: AtomicU64::new(0),
+            trim_frames: AtomicI64::new(0),
             clock: Mutex::new(ClockState {
                 base: 0.0,
                 speed: 1.0,
@@ -233,6 +237,19 @@ impl Engine {
 
     pub fn position(&self) -> f64 {
         self.inner.now()
+    }
+
+    /// Moves playback `seconds` forward (or back, when negative) gradually:
+    /// with sound, by running a few percent fast or slow until caught up;
+    /// without, at once. Replaces any correction still under way.
+    pub fn nudge(&self, seconds: f64) {
+        let mut clock = self.inner.clock.lock().unwrap();
+        if clock.audio {
+            let frames = seconds / clock.speed.max(0.1) * SAMPLE_RATE as f64;
+            self.inner.trim_frames.store(frames.round() as i64, Ordering::Release);
+        } else {
+            clock.anchor_position += seconds;
+        }
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -501,6 +518,7 @@ impl Inner {
                     local: Vec::new(),
                     cursor: 0,
                     generation: 0,
+                    frame_count: 0,
                 });
                 let _ = ready_tx.send(true);
                 while inner.alive.load(Ordering::Acquire) {
@@ -564,6 +582,7 @@ impl Inner {
         {
             let mut clock = self.clock.lock().unwrap();
             self.consumed_frames.store(0, Ordering::Release);
+            self.trim_frames.store(0, Ordering::Release);
             self.started.store(!info.has_video, Ordering::Release);
             *clock = ClockState {
                 base: position,
@@ -1070,7 +1089,12 @@ struct QueueSource {
     local: Vec<i16>,
     cursor: usize,
     generation: u64,
+    frame_count: u64,
 }
+
+/// One frame in this many is skipped or repeated while slewing: about 4 %
+/// faster or slower, quiet enough not to notice.
+const SLEW_EVERY: u64 = 25;
 
 impl Iterator for QueueSource {
     type Item = i16;
@@ -1098,6 +1122,23 @@ impl Iterator for QueueSource {
             self.local.extend(queue.drain(..take));
             if self.local.is_empty() {
                 return Some(0);
+            }
+        }
+        // Drift correction: at the start of every SLEW_EVERY-th frame, skip
+        // one frame (catch up) or play this one twice (wait).
+        if self.cursor % 2 == 0 {
+            self.frame_count = self.frame_count.wrapping_add(1);
+            let trim = inner.trim_frames.load(Ordering::Relaxed);
+            if trim != 0 && self.frame_count % SLEW_EVERY == 0 {
+                if trim > 0 && self.cursor + 4 <= self.local.len() {
+                    self.cursor += 2;
+                    inner.consumed_frames.fetch_add(1, Ordering::Relaxed);
+                    inner.trim_frames.fetch_sub(1, Ordering::Relaxed);
+                } else if trim < 0 && self.cursor >= 2 {
+                    self.cursor -= 2;
+                    inner.consumed_frames.fetch_sub(1, Ordering::Relaxed);
+                    inner.trim_frames.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         let sample = self.local[self.cursor];

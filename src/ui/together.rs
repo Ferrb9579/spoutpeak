@@ -191,11 +191,6 @@ pub fn room_view(app: &App, width: f32, chat_height: f32) -> Widget {
     header.push(hgap(10.0));
     header.push(badge(role));
     header.push(Spacer::new().into());
-    if role.controls() && link == Link::Connected {
-        let sync = app.clone();
-        header.push(chip("Sync everyone", false, move || sync.together_sync_everyone()));
-        header.push(hgap(6.0));
-    }
     header.push(chip("Leave", false, move || leave.together_leave()));
 
     let mut children: Vec<Widget> = vec![
@@ -464,11 +459,6 @@ fn room_header(app: &App, width: f32) -> Widget {
         .state
         .read(|s| (s.room.clone(), s.role, s.protected, s.link.clone(), s.members.len()));
     let mut actions: Vec<Widget> = Vec::new();
-    if role.controls() && link == Link::Connected {
-        let sync = app.clone();
-        actions.push(button("Sync everyone", Tone::Neutral, move || sync.together_sync_everyone()));
-        actions.push(hgap(10.0));
-    }
     let leave = app.clone();
     actions.push(button("Leave room", Tone::Ghost, move || leave.together_leave()));
 

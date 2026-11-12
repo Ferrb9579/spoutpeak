@@ -32,12 +32,15 @@ pub const SERVER_URL: &str = match option_env!("SPOUTPEAK_WATCH_URL") {
     None => "ws://127.0.0.1:7878/ws",
 };
 
-/// Heartbeat interval of the leader.
-const BEAT: Duration = Duration::from_secs(4);
-/// Drift tolerated before a heartbeat moves a follower.
-const BEAT_DRIFT: f64 = 2.0;
-/// Drift tolerated when someone explicitly seeks / plays / pauses.
-const ACTION_DRIFT: f64 = 0.75;
+/// Heartbeat interval of the leader (and of the latency probe).
+const BEAT: Duration = Duration::from_secs(1);
+/// Drift left alone: well under what anyone notices.
+const SYNC_DRIFT: f64 = 0.04;
+/// Up to this much drift is slewed away (playing a few percent fast or
+/// slow); more than this is a seek.
+const SLEW_LIMIT: f64 = 1.5;
+/// A paused player is moved when it is further off than this.
+const PAUSED_DRIFT: f64 = 0.1;
 /// Reconnect attempts after a dropped connection, and the waits between.
 const RETRY_WAITS: [u64; 8] = [1, 2, 3, 5, 8, 13, 20, 30];
 /// How long a chat line floats over the video.
@@ -156,6 +159,11 @@ struct Inner {
     auto_paused: Cell<bool>,
     /// Room state to apply once the player has opened the stream.
     pending: Cell<Option<Pending>>,
+    /// When the latency probe in flight was sent.
+    ping_sent: Cell<Option<Instant>>,
+    last_probe: Cell<Instant>,
+    /// Smoothed one-way delay to the server, in seconds.
+    half_rtt: Cell<f64>,
 }
 
 #[derive(Clone)]
@@ -180,6 +188,9 @@ impl Together {
                 was_stalled: Cell::new(false),
                 auto_paused: Cell::new(false),
                 pending: Cell::new(None),
+                ping_sent: Cell::new(None),
+                last_probe: Cell::new(Instant::now()),
+                half_rtt: Cell::new(0.05),
             }),
         }
     }
@@ -251,7 +262,7 @@ impl App {
         *together.inner.tx.borrow_mut() = Some(tx);
 
         handle.spawn(async move {
-            let socket = match tokio::time::timeout(Duration::from_secs(10), connect(SERVER_URL)).await {
+            let socket = match tokio::time::timeout(Duration::from_secs(45), connect(SERVER_URL)).await {
                 Ok(Ok(socket)) => socket,
                 Ok(Err(error)) => {
                     let message = format!("Could not reach the watch-together server: {error}");
@@ -373,6 +384,14 @@ impl App {
             }
             // This app rejoined on a newer connection; that one carries on.
             "replaced" => {}
+            "pong" => {
+                if let Some(sent) = together.inner.ping_sent.take() {
+                    let half = sent.elapsed().as_secs_f64() / 2.0;
+                    let old = together.inner.half_rtt.get();
+                    // Spikes come and go: follow drops at once, rises slowly.
+                    together.inner.half_rtt.set(if half < old { half } else { old * 0.8 + half * 0.2 });
+                }
+            }
             "members" => self.together_members(&message),
             "chat" | "notice" => {
                 let line = chat_line(&message, together.state.peek(|s| s.me));
@@ -402,7 +421,13 @@ impl App {
                 if !heartbeat {
                     together.inner.leader.set(false);
                 }
-                if let Some(state) = parse_state(&message) {
+                if let Some(mut state) = parse_state(&message) {
+                    // It was sent this long ago: the sender's trip to the
+                    // server, plus ours from it.
+                    let delay = message["lat"].as_f64().unwrap_or(0.0).clamp(0.0, 2.0)
+                        + together.inner.half_rtt.get();
+                    state.received =
+                        Instant::now().checked_sub(Duration::from_secs_f64(delay)).unwrap_or(state.received);
                     let was_paused = self.player.state.peek(|s| s.paused);
                     self.together_apply_state(state, heartbeat);
                     let by_person = message["id"].as_u64().unwrap_or(0) != 0;
@@ -600,14 +625,24 @@ impl App {
         } else {
             state.position + state.received.elapsed().as_secs_f64() * state.speed
         };
-        let local = self.player.position.get_untracked();
-        let tolerance = if heartbeat { BEAT_DRIFT } else { ACTION_DRIFT };
+        let local = self.player.precise_position().unwrap_or_else(|| self.player.position.get_untracked());
+        let drift = target - local;
+        let _ = heartbeat;
         self.together.quietly(|| {
             if (state.speed - speed).abs() > 0.01 {
                 self.set_speed(state.speed);
             }
-            if (target - local).abs() > tolerance {
+            if state.paused {
+                if drift.abs() > PAUSED_DRIFT {
+                    self.seek_to(target);
+                }
+            } else if drift.abs() > SLEW_LIMIT {
                 self.seek_to(target);
+            } else if drift.abs() > SYNC_DRIFT {
+                self.player.nudge(drift);
+            } else {
+                // Close enough: stop any correction still running.
+                self.player.nudge(0.0);
             }
             // Someone buffering keeps this player paused; it resumes with them.
             let held = self.together.inner.auto_paused.get();
@@ -638,15 +673,6 @@ impl App {
 
     pub fn together_kick(&self, id: u64) {
         self.together.send(json!({ "t": "kick", "id": id }));
-    }
-
-    /// Host / co-host: puts everyone at this player's position again.
-    pub fn together_sync_everyone(&self) {
-        if self.together.state.peek(|s| s.role.controls()) {
-            self.together.inner.leader.set(true);
-            self.together_send_state(false);
-            self.notify("Everyone was moved to your position");
-        }
     }
 
     pub fn together_mark_read(&self) {
@@ -708,7 +734,7 @@ impl App {
 
     fn together_send_state(&self, heartbeat: bool) {
         let (paused, speed) = self.player.state.peek(|s| (s.paused, s.speed));
-        let position = self.player.position.get_untracked();
+        let position = self.player.precise_position().unwrap_or_else(|| self.player.position.get_untracked());
         self.together.inner.last_beat.set(Instant::now());
         self.together.send(json!({
             "t": "state",
@@ -716,6 +742,7 @@ impl App {
             "paused": paused,
             "speed": speed,
             "hb": heartbeat,
+            "lat": self.together.inner.half_rtt.get(),
         }));
     }
 
@@ -741,14 +768,20 @@ impl App {
         if together.inner.was_stalled.replace(stalled) != stalled {
             together.send(json!({ "t": "buffering", "on": stalled }));
         }
-        let (paused, playing) = self
-            .player
-            .state
-            .peek(|s| (s.paused, s.status == Status::Playing));
+        // Latency probe, one in flight at a time (a lost one expires).
+        let probe_due = match together.inner.ping_sent.get() {
+            Some(sent) => sent.elapsed() > BEAT * 5,
+            None => together.inner.last_probe.get().elapsed() >= BEAT,
+        };
+        if probe_due {
+            together.inner.last_probe.set(Instant::now());
+            together.inner.ping_sent.set(Some(Instant::now()));
+            together.send(json!({ "t": "ping" }));
+        }
+        let playing = self.player.state.peek(|s| s.status == Status::Playing);
         if together.inner.leader.get()
             && together.state.peek(|s| s.role.controls())
             && playing
-            && !paused
             && !stalled
             && together.inner.last_beat.get().elapsed() >= BEAT
         {
@@ -814,9 +847,24 @@ async fn connect(
         .map_err(|e| e.to_string())?
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let connector = tokio_tungstenite::Connector::Rustls(Arc::new(config));
-    let (socket, _) = tokio_tungstenite::connect_async_tls_with_config(url, None, true, Some(connector))
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(socket)
+    let config = Arc::new(config);
+    // A host that scales to zero answers 502/503 while the server wakes up:
+    // keep knocking for a while.
+    let mut attempt = 0;
+    loop {
+        let connector = tokio_tungstenite::Connector::Rustls(config.clone());
+        match tokio_tungstenite::connect_async_tls_with_config(url, None, true, Some(connector)).await {
+            Ok((socket, _)) => return Ok(socket),
+            Err(tokio_tungstenite::tungstenite::Error::Http(response))
+                if matches!(response.status().as_u16(), 502..=504) && attempt < WAKE_RETRIES =>
+            {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
+
+/// Retries (2 s apart) while the server is starting up.
+const WAKE_RETRIES: u32 = 15;

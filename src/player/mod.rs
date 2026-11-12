@@ -205,6 +205,15 @@ impl PlayerUi {
     fn with_engine<R>(&self, call: impl FnOnce(&Engine) -> R) -> Option<R> {
         self.engine.borrow().as_ref().map(call)
     }
+
+    /// The engine's own clock, fresher than the position signal.
+    pub(crate) fn precise_position(&self) -> Option<f64> {
+        self.with_engine(|e| e.position())
+    }
+
+    pub(crate) fn nudge(&self, seconds: f64) {
+        self.with_engine(|e| e.nudge(seconds));
+    }
 }
 
 /// Title and (for series) episode line shown by the player.

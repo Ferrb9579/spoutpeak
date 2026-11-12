@@ -1067,6 +1067,41 @@ fn top_bar(app: &App, title: &str, subtitle: &str) -> Widget {
 
 /// A control-bar icon that opens a panel. Tinted while its panel is open;
 /// a dot underneath marks a non-default setting (subtitles on, 1.5x, ...).
+/// Gap under the popup panels: they sit just above the bottom bar.
+const PANEL_BOTTOM: f32 = 104.0;
+
+thread_local! {
+    /// The pointer went down on the open popup (not outside it).
+    static PRESS_IN_POPUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// An open popup, bottom right, in a full-screen layer where a click
+/// anywhere outside it closes it (and does nothing else).
+///
+/// One layer, not a barrier with the popup stacked above: in Incular an
+/// upper `Stack` layer takes every click in its bounds, even where it is
+/// transparent, so the barrier would never see one (INCULAR-GAPS.md). An
+/// ancestor GestureDetector also fires for taps inside its children, so the
+/// popup marks presses that start on it.
+fn popup_layer(app: &App, panel: impl Into<Widget>) -> Widget {
+    PRESS_IN_POPUP.with(|p| p.set(false));
+    let close = app.clone();
+    let panel = Listener::new(panel).on_pointer_down(|_| PRESS_IN_POPUP.with(|p| p.set(true)));
+    GestureDetector::new(
+        Container::new().color(Color::TRANSPARENT).child(Align::new(
+            Alignment::BOTTOM_RIGHT,
+            Padding::new(EdgeInsets::only(0.0, 0.0, 20.0, PANEL_BOTTOM), panel),
+        )),
+    )
+    .behavior(HitTestBehavior::Opaque)
+    .on_tap(move || {
+        if !PRESS_IN_POPUP.with(|p| p.replace(false)) {
+            close.set_player_menu(Menu::None);
+        }
+    })
+    .into()
+}
+
 fn menu_button(glyph: Arc<Path>, open: bool, changed: bool, on_click: impl Fn() + 'static) -> Widget {
     let color = if open || changed { ACCENT } else { TEXT };
     let mark: Widget = Container::new()
@@ -1243,7 +1278,11 @@ fn bottom_bar(app: &App) -> Widget {
     }
     controls.push(hgap(4.0));
     controls.push(icon_button(
-        icon(icons::maximize(), 20.0, TEXT),
+        icon(
+            if app.player.state.read(|s| s.fullscreen) { icons::minimize() } else { icons::maximize() },
+            20.0,
+            TEXT,
+        ),
         40.0,
         action(|app| app.toggle_fullscreen()),
     ));
@@ -1658,18 +1697,6 @@ pub fn screen(app: &App) -> Widget {
             top_bar(app, &title, &subtitle),
             Spacer::new().into(),
         ];
-        if let Some(panel) = menu_panel(app, menu) {
-            chrome.push(
-                Align::new(
-                    Alignment::BOTTOM_RIGHT,
-                    Padding::new(
-                        EdgeInsets::only(0.0, 0.0, 20.0, 10.0),
-                        motion::pop_in(panel, 8.0),
-                    ),
-                )
-                .into(),
-            );
-        }
         chrome.push(bottom_bar(app));
         layers.push(fade.wrap(
             IgnorePointer::new(
@@ -1677,6 +1704,11 @@ pub fn screen(app: &App) -> Widget {
             )
             .ignoring(!visible),
         ));
+        if let Some(panel) = menu_panel(app, menu) {
+            layers.push(fade.wrap(
+                IgnorePointer::new(popup_layer(app, motion::pop_in(panel, 8.0))).ignoring(!visible),
+            ));
+        }
     }
 
     // The player owns keyboard focus while it is on screen, and its buttons
@@ -1688,16 +1720,7 @@ pub fn screen(app: &App) -> Widget {
     // The room panel takes focus for its chat field, so it sits outside the
     // focus exclusion.
     if menu == Menu::Together && (visible || fade.opacity() > 0.0) {
-        surface_layers.push(
-            Align::new(
-                Alignment::BOTTOM_RIGHT,
-                Padding::new(
-                    EdgeInsets::only(0.0, 0.0, 20.0, 104.0),
-                    motion::pop_in(super::together::player_panel(app), 8.0),
-                ),
-            )
-            .into(),
-        );
+        surface_layers.push(popup_layer(app, motion::pop_in(super::together::player_panel(app), 8.0)));
     }
     KeyboardListener::new(
         MouseRegion::new(Stack::new(surface_layers).fit(StackFit::Expand))

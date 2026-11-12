@@ -218,13 +218,9 @@ fn stream_tile(app: &App, stream: &Stream) -> Widget {
         lines.push(
             Text::new(breakable(&details))
                 .style(style(12.0, FontWeight::W400, MUTED))
-                .max_lines(Some(4))
-                .overflow(TextOverflow::Ellipsis)
                 .into(),
         );
     }
-    // The full, untruncated text on hover.
-    let full = if details.is_empty() { headline } else { format!("{headline}\n{details}") };
     let downloadable = matches!(
         stream.source(),
         StreamSource::Url(_) | StreamSource::Torrent { .. }
@@ -242,7 +238,6 @@ fn stream_tile(app: &App, stream: &Stream) -> Widget {
         false,
         move || play.play_stream(&play_stream),
     );
-    let tile: Widget = incular::material::Tooltip::new(full, tile).into();
     if !downloadable {
         return tile;
     }
