@@ -1,10 +1,15 @@
-#[cfg(windows)]
 #[path = "src/branding.rs"]
 mod branding;
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/logo.svg");
     println!("cargo:rerun-if-changed=src/branding.rs");
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
+    let profile = out.ancestors().nth(3).expect("Cargo profile directory");
+    branding::render_pixmap(1024, true)
+        .expect("valid logo.svg")
+        .save_png(profile.join("spoutpeak.png"))
+        .expect("write packaging icon");
     watch_url();
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
@@ -88,7 +93,10 @@ fn watch_url() {
                 .then(|| value.trim().trim_matches('"').trim_matches('\'').to_owned())
         })
     });
-    let url = std::env::var("SPOUTPEAK_WATCH_URL").ok().or(from_file).unwrap_or_default();
+    let url = std::env::var("SPOUTPEAK_WATCH_URL")
+        .ok()
+        .or(from_file)
+        .unwrap_or_default();
     if !url.is_empty() {
         println!("cargo:rustc-env=SPOUTPEAK_WATCH_URL={url}");
     }

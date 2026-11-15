@@ -5,7 +5,12 @@
 ;   & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\spoutpeak.iss
 
 #define AppName "Spoutpeak"
-#define AppVersion "0.1.0"
+#ifndef AppVersion
+  #define AppVersion "0.1.0"
+#endif
+#ifndef AppBinaryDir
+  #define AppBinaryDir "..\target\release"
+#endif
 #define AppExe "spoutpeak.exe"
 
 [Setup]
@@ -20,7 +25,7 @@ DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#AppExe}
 OutputDir=..\dist
 OutputBaseFilename=Spoutpeak-Setup-{#AppVersion}
-SetupIconFile=..\target\release\spoutpeak.ico
+SetupIconFile={#AppBinaryDir}\spoutpeak.ico
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -34,9 +39,10 @@ PrivilegesRequiredOverridesAllowed=dialog
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#AppBinaryDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 ; LGPL ffmpeg build (see installer\fetch-ffmpeg.ps1), with its license.
 Source: "..\vendor\ffmpeg\*"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion recursesubdirs
+Source: "..\assets\icons\*"; DestDir: "{app}\licenses\icons"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
