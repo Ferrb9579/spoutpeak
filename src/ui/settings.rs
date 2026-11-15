@@ -88,8 +88,8 @@ fn toggle(app: &App, on: bool, apply: fn(&mut Settings, bool)) -> Widget {
     )
 }
 
-/// Card title with a leading Lucide icon.
-fn titled(glyph: std::sync::Arc<Path>, title: &str) -> Widget {
+/// Card title with a leading library icon.
+fn titled(glyph: Glyph, title: &str) -> Widget {
     row(vec![
         icon(glyph, 18.0, ACCENT),
         hgap(10.0),
@@ -130,7 +130,7 @@ fn controls_card(app: &App, settings: &Settings) -> Widget {
         ),
         setting_row(
             "Hide controls after",
-            "Idle time before the player controls fade",
+            "Idle time before controls fade, including while paused",
             choices(app, seconds(&[2, 3, 5, 8]), settings.controls_hide_seconds, |s, v| {
                 s.controls_hide_seconds = v
             }),
@@ -566,6 +566,8 @@ pub fn screen(app: &App) -> Widget {
             )),
             gap(4.0),
             muted(format!("Data folder: {}", crate::util::data_dir().display())),
+            gap(8.0),
+            muted("Icons: Solar by 480 Design (CC BY 4.0) and MingCute (Apache 2.0)."),
         ])
         .cross_axis_alignment(CrossAxisAlignment::Stretch),
     );

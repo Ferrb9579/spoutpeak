@@ -782,11 +782,10 @@ impl App {
             self.player.cue.set(text);
         }
 
-        let (was_stalled, visible, paused, menu, status) = self.player.state.peek(|s| {
+        let (was_stalled, visible, menu, status) = self.player.state.peek(|s| {
             (
                 s.stalled,
                 s.controls_visible,
-                s.paused,
                 s.menu,
                 s.status.clone(),
             )
@@ -798,7 +797,9 @@ impl App {
         let hide_after = self.profile.peek(|p| p.settings.controls_hide_seconds).max(1);
         let idle = self.player.session.borrow().last_activity.elapsed().as_secs_f64()
             > f64::from(hide_after);
-        let hide = visible && idle && !paused && menu == Menu::None;
+        // The engine's wall-clock ticker continues while paused, so the same
+        // idle timeout applies in either state. Menus and active scrubs stay up.
+        let hide = visible && idle && menu == Menu::None && self.player.scrub.get().is_none();
         if was_stalled != stalled || hide {
             self.player.state.write(|s| {
                 s.stalled = stalled;

@@ -450,7 +450,7 @@ fn continue_card(app: &App, meta: &Meta, resume: Option<&str>) -> Option<Widget>
             .radius(19.0)
             .color(ACCENT)
             .alignment(Alignment::CENTER)
-            .child(icon_with(icons::play(), 16.0, ON_ACCENT, ICON_STROKE, true))
+            .child(icon(icons::play(), 16.0, ON_ACCENT))
             .into(),
         hgap(14.0),
         SizedBox::new()

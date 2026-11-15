@@ -19,7 +19,6 @@ use incular::controls::{Button, ButtonStyle, ControlTheme, ControlThemeScope, St
 use incular::prelude::*;
 use incular::widgets::StackFit;
 use std::cell::Cell;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// Wraps a screen so it rebuilds on its own when the state it reads changes.
@@ -30,14 +29,14 @@ fn island(app: &App, build: fn(&App) -> Widget) -> Widget {
 
 const NAV_WIDTH: f32 = 196.0;
 
-fn nav_button(app: &App, label: &str, glyph: Arc<Path>, route: Route, active: bool) -> Widget {
+fn nav_button(app: &App, label: &str, glyph: Glyph, route: Route, active: bool) -> Widget {
     // The open screen is a lit glass pill, as in a segmented control.
     let background = if active { GLASS_HOVER } else { Color::TRANSPARENT };
     let foreground = if active { TEXT } else { MUTED };
     let app = app.clone();
     let content = row(vec![
         hgap(14.0),
-        solid_icon(glyph, 19.0, if active { TEXT } else { MUTED }),
+        icon(glyph, 19.0, if active { TEXT } else { MUTED }),
         hgap(13.0),
         text(
             label,

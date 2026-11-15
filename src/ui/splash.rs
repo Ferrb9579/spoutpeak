@@ -13,9 +13,9 @@ enum Step {
 
 fn step_row(state: Step, label: &str, detail: String) -> Widget {
     let (color, mark): (Color, Widget) = match state {
-        Step::Done => (GOOD, icon_with(icons::check(), 13.0, BG, 3.0, false)),
+        Step::Done => (GOOD, icon(icons::check(), 13.0, BG)),
         Step::Working => (ACCENT, SizedBox::shrink().into()),
-        Step::Problem => (DANGER, icon_with(icons::x(), 13.0, BG, 3.0, false)),
+        Step::Problem => (DANGER, icon(icons::x(), 13.0, BG)),
     };
     let bullet = Container::new()
         .width(18.0)

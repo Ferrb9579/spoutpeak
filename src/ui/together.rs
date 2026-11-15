@@ -330,7 +330,7 @@ fn join_room(app: &App) {
     app.together_join(&code, &password);
 }
 
-fn panel_title(glyph: std::sync::Arc<Path>, title: &str, subtitle: &str) -> Widget {
+fn panel_title(glyph: Glyph, title: &str, subtitle: &str) -> Widget {
     hrow(vec![
         Container::new()
             .width(40.0)
@@ -543,7 +543,7 @@ fn now_playing(app: &App, width: f32) -> Widget {
     card(hrow(body).cross_axis_alignment(CrossAxisAlignment::Center)).width(width).into()
 }
 
-fn titled(glyph: std::sync::Arc<Path>, title: &str) -> Widget {
+fn titled(glyph: Glyph, title: &str) -> Widget {
     hrow(vec![icon(glyph, 15.0, MUTED), hgap(8.0), text(title, 14.0, FontWeight::W700, TEXT).into()])
         .cross_axis_alignment(CrossAxisAlignment::Center)
         .into()

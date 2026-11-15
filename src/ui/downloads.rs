@@ -63,7 +63,7 @@ fn status_line(item: &Download) -> (String, Color) {
 
 fn row_actions(app: &App, item: &Download) -> Vec<Widget> {
     let id = item.id;
-    let action = |glyph: std::sync::Arc<Path>, tone: Tone, call: fn(&App, u64)| {
+    let action = |glyph: Glyph, tone: Tone, call: fn(&App, u64)| {
         let app = app.clone();
         small_icon_button(glyph, None, tone, move || call(&app, id))
     };
