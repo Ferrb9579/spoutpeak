@@ -43,6 +43,7 @@ pub enum Menu {
     /// Watch-together room: people and chat.
     Together,
     More,
+    Peers,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

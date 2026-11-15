@@ -234,12 +234,14 @@ pub(super) fn handle_key(app: &App, event: &KeyboardEvent) -> bool {
         (f64::from(s.seek_step), f64::from(s.seek_step_shift), s.volume_step as f32 / 100.0)
     });
     let step = if shift { seek_shift } else { seek };
+    if matches!(event.code, Code::Escape | Code::BrowserBack)
+        && app.player.state.peek(|s| s.menu != crate::player::Menu::None)
+    {
+        app.set_player_menu(crate::player::Menu::None);
+        return true;
+    }
     // Typing in the room chat: keys belong to the text field.
     if app.player.state.peek(|s| s.menu == crate::player::Menu::Together) {
-        if event.code == Code::Escape {
-            app.set_player_menu(crate::player::Menu::None);
-            return true;
-        }
         return false;
     }
     match event.code {

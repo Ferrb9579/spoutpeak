@@ -6,10 +6,10 @@ use crate::player::engine::MAX_VOLUME;
 use crate::state::App;
 use crate::store::{SubtitleEdge, SubtitleStyle};
 use crate::theme::*;
-use crate::util::{format_speed, format_time, language_name};
+use crate::util::{format_bytes, format_speed, format_time, language_name};
 use incular::controls::{Button, ButtonStyle, StateColor};
 use incular::prelude::*;
-use incular::widgets::{HitTestBehavior, StackFit};
+use incular::widgets::{HitTestBehavior, StackFit, CompositedTransformTarget, CompositedTransformFollower, LayerLink, OverlayPortal};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,7 +40,7 @@ fn floating_button(child: Widget, size: f32, on_click: impl Fn() + 'static) -> W
 /// A horizontal track; `change(fraction, committed)` fires on click and
 /// while dragging, with `committed` true on click and on release.
 fn slider(width: f32, fraction: f32, change: Rc<dyn Fn(f32, bool)>) -> Widget {
-    track(width, fraction, &[], change, Rail::THIN, None)
+    track(width, fraction, &[], change, Rail::THIN, None, SEEK_HOVER.with(Clone::clone))
 }
 
 /// The track's proportions.
@@ -77,6 +77,9 @@ thread_local! {
     static SEEK_HOVER: Signal<Option<f32>> = Signal::new(None);
     static VOLUME_HOVER: Signal<bool> = Signal::new(false);
     static VOLUME_DRAGGING: Signal<bool> = Signal::new(false);
+    static VOLUME_POSITION: Signal<Option<f32>> = Signal::new(None);
+    static VOLUME_LINK: LayerLink = LayerLink::default();
+    static BUTTON_TIPS: std::cell::RefCell<std::collections::HashMap<String, Signal<bool>>> = Default::default();
 }
 
 /// A borderless, boxy rail with grey `buffered` (start, end) stretches,
@@ -90,6 +93,7 @@ fn track(
     change: Rc<dyn Fn(f32, bool)>,
     rail: Rail,
     label: Option<Rc<dyn Fn(f32) -> String>>,
+    hover: Signal<Option<f32>>,
 ) -> Widget {
     let fraction = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 0.0 };
     let width = width.max(0.0);
@@ -151,7 +155,7 @@ fn track(
         .into(),
     );
     if let Some(label) = label.clone() {
-        parts.push(bubble(width, rail_top, label));
+        parts.push(bubble(width, rail_top, label, hover.clone()));
     }
 
     let visual = SizedBox::new()
@@ -162,19 +166,20 @@ fn track(
     let hovering = label.is_some();
     let set_hover = move |value: Option<f32>| {
         if hovering {
-            SEEK_HOVER.with(|hover| hover.set(value));
+            hover.set(value);
         }
     };
     let last = Rc::new(std::cell::Cell::new(fraction));
     let (tap, drag, release, cancel) = (change.clone(), change.clone(), change.clone(), change);
     let (drag_last, release_last, cancel_last) = (last.clone(), last.clone(), last);
+    let drag_hover = set_hover.clone();
     let gestures = GestureDetector::new(visual)
         .behavior(HitTestBehavior::Opaque)
         .on_tap_down(move |details| tap(at(details.local_position.x), true))
         .on_horizontal_drag_update(move |details| {
             let value = at(details.local_position.x);
             drag_last.set(value);
-            set_hover(Some(value));
+            drag_hover(Some(value));
             drag(value, false);
         })
         .on_horizontal_drag_end(move |_| release(release_last.get(), true))
@@ -182,9 +187,10 @@ fn track(
     if !hovering {
         return gestures.into();
     }
+    let exit_hover = set_hover.clone();
     MouseRegion::new(gestures)
         .on_hover(move |event| set_hover(Some(at(event.local_position.x))))
-        .on_exit(move |_| set_hover(None))
+        .on_exit(move |_| exit_hover(None))
         .into()
 }
 
@@ -198,9 +204,29 @@ fn bubble_geometry(width: f32, fraction: f32) -> (f32, f32) {
     (left, centre - POINTER_WIDTH / 2.0)
 }
 
-fn bubble(width: f32, rail_top: f32, label: Rc<dyn Fn(f32) -> String>) -> Widget {
+#[cfg(test)]
+mod bubble_tests {
+    use super::*;
+
+    #[test]
+    fn arrow_tracks_the_pointer_even_when_the_label_is_clamped() {
+        for fraction in [0.0, 0.01, 0.5, 0.99, 1.0] {
+            let (label, arrow) = bubble_geometry(800.0, fraction);
+            assert_eq!(arrow + POINTER_WIDTH / 2.0, fraction * 800.0);
+            assert!(label >= 0.0 && label + BUBBLE_WIDTH <= 800.0);
+        }
+    }
+
+    #[test]
+    fn volume_popup_keeps_its_label_inside_the_short_track() {
+        assert_eq!(bubble_geometry(84.0, 0.0).0, 0.0);
+        assert_eq!(bubble_geometry(84.0, 1.0).0, 84.0 - BUBBLE_WIDTH);
+    }
+}
+
+fn bubble(width: f32, rail_top: f32, label: Rc<dyn Fn(f32) -> String>, hover: Signal<Option<f32>>) -> Widget {
     Positioned::new(IgnorePointer::new(Builder::new(move |_| {
-        let Some(at) = SEEK_HOVER.with(|hover| hover.get()) else {
+        let Some(at) = hover.get() else {
             return SizedBox::shrink().into();
         };
         let (left, pointer) = bubble_geometry(width, at);
@@ -214,7 +240,7 @@ fn bubble(width: f32, rail_top: f32, label: Rc<dyn Fn(f32) -> String>) -> Widget
                     .color(Color::WHITE)
                     .child(text(label(at), 12.5, FontWeight::W600, ON_SELECTED)))
                     .left(left).top(0.0).into(),
-                Positioned::new(CustomPaint::from_painter(Size::new(POINTER_WIDTH, POINTER_HEIGHT), Pointer))
+                Positioned::new(CustomPaint::from_painter(Size::new(POINTER_WIDTH, POINTER_HEIGHT), Pointer(false)))
                     .left(pointer).top(BUBBLE_HEIGHT).into(),
             ]).clip_behavior(incular::config::Clip::None))
         .into()
@@ -225,14 +251,15 @@ fn bubble(width: f32, rail_top: f32, label: Rc<dyn Fn(f32) -> String>) -> Widget
 }
 
 /// The bubble's downward pointer: a small white triangle.
-struct Pointer;
+struct Pointer(bool);
 
 impl CustomPainter for Pointer {
     fn paint(&self, size: Size) -> DisplayList {
         let mut builder = Path::builder();
-        builder.move_to(Offset::new(0.0, 0.0));
-        builder.line_to(Offset::new(size.width, 0.0));
-        builder.line_to(Offset::new(size.width / 2.0, size.height));
+        let (base, tip) = if self.0 { (size.height, 0.0) } else { (0.0, size.height) };
+        builder.move_to(Offset::new(0.0, base));
+        builder.line_to(Offset::new(size.width, base));
+        builder.line_to(Offset::new(size.width / 2.0, tip));
         builder.close();
         let mut canvas = Canvas::default();
         canvas.fill_path(Arc::new(builder.build()), Color::WHITE, FillRule::NonZero);
@@ -241,6 +268,48 @@ impl CustomPainter for Pointer {
     fn should_repaint(&self, _: &Self) -> bool {
         false
     }
+}
+
+/// The same white label and arrow used by the timeline, anchored to a control.
+fn player_tip(label: impl Into<String>, child: Widget) -> Widget {
+    player_tip_at(label, child, false)
+}
+
+fn player_tip_at(label: impl Into<String>, child: Widget, below: bool) -> Widget {
+    let label = label.into();
+    let child = child.accessibility_label(label.clone());
+    let hover = BUTTON_TIPS.with(|tips| tips.borrow_mut()
+        .entry(label.clone()).or_insert_with(|| Signal::new(false)).clone());
+    Builder::new(move |_| {
+        let visible = hover.get();
+        let (enter, exit) = (hover.clone(), hover.clone());
+        let anchor = MouseRegion::new(child.clone())
+            .on_enter(move |_| { enter.set(true); })
+            .on_exit(move |_| { exit.set(false); });
+        let caption = label.clone();
+        OverlayPortal::new(anchor).presentation(incular::config::TransientPresentation::Overlay)
+            .role(incular::config::TransientRole::Tooltip).root_overlay(true)
+            .overlay_child_layout_builder(move |_, info| {
+                if info.overlay_size.width <= 16.0 { return SizedBox::shrink().into(); }
+                let centre = info.anchor_rect.origin.x + info.anchor_rect.size.width / 2.0;
+                let width = (caption.chars().count() as f32 * 7.0 + 18.0).min(250.0).min(info.overlay_size.width - 16.0);
+                let left = (centre - width / 2.0).clamp(8.0, info.overlay_size.width - width - 8.0);
+                let top = if below {
+                    info.anchor_rect.origin.y + info.anchor_rect.size.height + BUBBLE_GAP
+                } else {
+                    info.anchor_rect.origin.y - BUBBLE_GAP - BUBBLE_HEIGHT - POINTER_HEIGHT
+                };
+                IgnorePointer::new(Stack::new(vec![
+                    Positioned::new(Container::new().width(width).height(BUBBLE_HEIGHT)
+                        .alignment(Alignment::CENTER).radius(4.0).color(Color::WHITE)
+                        .child(text(caption.clone(), 12.5, FontWeight::W600, ON_SELECTED)))
+                        .left(left).top(top + if below { POINTER_HEIGHT } else { 0.0 }).into(),
+                    Positioned::new(CustomPaint::from_painter(Size::new(POINTER_WIDTH, POINTER_HEIGHT), Pointer(below)))
+                        .left(centre - POINTER_WIDTH / 2.0).top(top + if below { 0.0 } else { BUBBLE_HEIGHT }).into(),
+                ] as Vec<Widget>).fit(StackFit::Expand)).into()
+            })
+            .show(visible).into()
+    }).into()
 }
 
 fn seek_bar(app: &App) -> Widget {
@@ -276,6 +345,7 @@ fn seek_bar(app: &App) -> Widget {
             }),
             Rail::THICK,
             label,
+            SEEK_HOVER.with(Clone::clone),
         )
     })
     .into()
@@ -347,8 +417,8 @@ fn pill(label: impl Into<String>, active: bool, on_click: impl Fn() + 'static) -
 }
 
 /// A round 30px pill holding a library icon.
-fn icon_pill(glyph: Glyph, on_click: impl Fn() + 'static) -> Widget {
-    pill_content(icon(glyph, 15.0, TEXT), false, Some(Size::new(30.0, 30.0)), on_click)
+fn icon_pill(label: &str, glyph: Glyph, on_click: impl Fn() + 'static) -> Widget {
+    player_tip(label, pill_content(icon(glyph, 15.0, TEXT), false, Some(Size::new(30.0, 30.0)), on_click))
 }
 
 /// A pill with a leading icon and a label.
@@ -499,9 +569,9 @@ fn panel_header(app: &App, title: &str, back: Option<Menu>, trailing: Vec<Widget
     let mut children: Vec<Widget> = Vec::new();
     if let Some(parent) = back {
         let app = app.clone();
-        children.push(icon_button(icon(icons::chevron_left(), 18.0, TEXT), 28.0, move || {
+        children.push(player_tip("Back to subtitles", icon_button(icon(icons::chevron_left(), 18.0, TEXT), 28.0, move || {
             app.set_player_menu(parent)
-        }));
+        })));
         children.push(hgap(4.0));
     } else {
         children.push(hgap(4.0));
@@ -660,9 +730,9 @@ fn subtitles_panel(app: &App) -> Panel {
                 .width(110.0)
                 .child(text(format!("Delay {delay:+.2}s"), 12.5, FontWeight::W500, MUTED))
                 .into(),
-            icon_pill(icons::minus(), move || earlier.adjust_subtitle_delay(-0.25)),
+            icon_pill("Subtitles earlier", icons::minus(), move || earlier.adjust_subtitle_delay(-0.25)),
             hgap(6.0),
-            icon_pill(icons::plus(), move || later.adjust_subtitle_delay(0.25)),
+            icon_pill("Subtitles later", icons::plus(), move || later.adjust_subtitle_delay(0.25)),
             hgap(6.0),
             pill("Sync…", false, move || sync.open_subtitle_sync()),
         ]);
@@ -801,7 +871,7 @@ fn subtitle_style_panel(app: &App) -> Panel {
     let (smaller, bigger) = (app.clone(), app.clone());
     panel.label("Font size");
     panel.row(vec![
-        icon_pill(icons::minus(), move || smaller.adjust_subtitle_size(-2.0)),
+        icon_pill("Smaller subtitles", icons::minus(), move || smaller.adjust_subtitle_size(-2.0)),
         SizedBox::new()
             .width(56.0)
             .child(
@@ -810,7 +880,7 @@ fn subtitle_style_panel(app: &App) -> Panel {
                 .cross_axis_alignment(CrossAxisAlignment::Center),
             )
             .into(),
-        icon_pill(icons::plus(), move || bigger.adjust_subtitle_size(2.0)),
+        icon_pill("Larger subtitles", icons::plus(), move || bigger.adjust_subtitle_size(2.0)),
         hgap(12.0),
         {
             let app = app.clone();
@@ -905,7 +975,7 @@ fn picture_panel(app: &App) -> Panel {
     panel.gap(14.0);
     let (darker, brighter, drag) = (app.clone(), app.clone(), app.clone());
     panel.row(vec![
-        icon_pill(icons::minus(), move || darker.adjust_brightness(-0.01)),
+        icon_pill("Darker", icons::minus(), move || darker.adjust_brightness(-0.01)),
         hgap(10.0),
         slider(
             PANEL_INNER - 98.0,
@@ -913,7 +983,7 @@ fn picture_panel(app: &App) -> Panel {
             Rc::new(move |value, _| drag.set_brightness(0.3 + value * 1.4)),
         ),
         hgap(10.0),
-        icon_pill(icons::plus(), move || brighter.adjust_brightness(0.01)),
+        icon_pill("Brighter", icons::plus(), move || brighter.adjust_brightness(0.01)),
     ]);
     panel.gap(12.0);
     let mut presets = Vec::new();
@@ -943,6 +1013,11 @@ fn more_panel(app: &App) -> Panel {
     let mut panel = Panel::new();
     panel.push(panel_header(app, "Video actions", None, Vec::new()), 30.0);
     panel.gap(8.0);
+    let download = app.clone();
+    panel.push(menu_item("Download Video".into(), false, move || {
+        download.set_player_menu(Menu::None);
+        download.download_current_video();
+    }), MENU_ROW);
     let title = app.player.state.peek(|s| s.title.clone());
     let mut copies: Vec<(&str, String)> = Vec::new();
     if let Some((stream, _, _)) = app.player.current_media() {
@@ -979,7 +1054,7 @@ fn menu_panel(app: &App, menu: Menu) -> Option<Widget> {
         Menu::Picture => picture_panel(app),
         Menu::More => more_panel(app),
         // Drawn outside the focus-excluded controls (it has a text field).
-        Menu::Together => return None,
+        Menu::Together | Menu::Peers => return None,
     };
     let height = panel.height.min(460.0);
     Some(
@@ -1229,7 +1304,7 @@ fn top_bar(app: &App, title: &str, subtitle: &str) -> Widget {
         .padding(EdgeInsets::symmetric(18.0, 12.0))
         .child(
             hrow(vec![
-                floating_button(icon(icons::arrow_left(), CONTROL_ICON, TEXT), PRIMARY_BUTTON, move || back.back()),
+                player_tip_at("Back", floating_button(icon(icons::arrow_left(), CONTROL_ICON, TEXT), PRIMARY_BUTTON, move || back.back()), true),
                 hgap(CONTROL_GAP),
                 Flexible::new(control_surface(col(titles), EdgeInsets::symmetric(16.0, 10.0))).into(),
             ])
@@ -1260,6 +1335,71 @@ fn popup_layer(app: &App, panel: Widget) -> Widget {
     ])
     .fit(StackFit::Expand)
     .into()
+}
+
+fn peers_dialog(app: &App) -> Widget {
+    let app = app.clone();
+    LayoutBuilder::new(move |_, constraints| {
+        let stats = app.player.state.read(|s| s.torrent.clone()).unwrap_or_default();
+        let peers = app.player.current_media().and_then(|(stream, _, _)| {
+            match stream.source() {
+                crate::addons::types::StreamSource::Torrent { info_hash, .. } => Some(crate::streaming::peers(&info_hash)),
+                _ => None,
+            }
+        }).unwrap_or_default();
+        let close = app.clone();
+        let header = row(vec![
+            text("Peers", 20.0, FontWeight::W700, TEXT).into(),
+            Spacer::new().into(),
+            player_tip("Close", icon_button(icon(icons::x(), 18.0, TEXT), 30.0,
+                move || close.set_player_menu(Menu::None))),
+        ]);
+        let summary = Row::new(vec![
+            stat("Connected", stats.peers.to_string()),
+            stat("Seeders", stats.seeders.to_string()),
+            stat("Connecting", stats.connecting.to_string()),
+            stat("Discovered", stats.discovered.to_string()),
+        ]).main_axis_alignment(MainAxisAlignment::SpaceBetween);
+        let mut items: Vec<Widget> = Vec::new();
+        for peer in peers {
+            items.push(Container::new().padding(EdgeInsets::all(12.0)).radius(8.0)
+                .color(Color::rgba(255, 255, 255, 9)).child(col(vec![
+                    row(vec![
+                        Expanded::new(line(peer.address, 13.0, FontWeight::W600, TEXT)).into(),
+                        hgap(8.0), text(peer.transport, 11.5, FontWeight::W600, MUTED).into(),
+                    ]).into(),
+                    gap(4.0),
+                    line(peer.client, 12.0, FontWeight::W400, MUTED),
+                    gap(6.0),
+                    text(format!("Downloaded {}  ·  Uploaded {}", format_bytes(peer.downloaded), format_bytes(peer.uploaded)),
+                        11.5, FontWeight::W400, FAINT).into(),
+                ])).into());
+            items.push(gap(8.0));
+        }
+        if items.is_empty() {
+            items.push(Padding::new(EdgeInsets::symmetric(0.0, 22.0),
+                text("No connected peers yet. Discovered peers will appear here when they connect.",
+                    13.0, FontWeight::W400, MUTED)).into());
+        }
+        let list_height = (constraints.max_height() - 278.0).clamp(80.0, 340.0);
+        let dialog = Container::new().width((constraints.max_width() - 40.0).clamp(0.0, 560.0))
+            .padding(EdgeInsets::all(22.0)).radius(16.0).color(Color::rgba(24, 24, 24, 250))
+            .child(col(vec![
+                header.into(), gap(18.0), summary.into(), gap(16.0),
+                connection_details(&stats), gap(14.0),
+                text(format!("{} download  ·  {:.1}% of video buffered", format_speed(stats.download_speed), stats.progress * 100.0),
+                    12.0, FontWeight::W500, MUTED).into(), gap(16.0),
+                SizedBox::new().height(list_height).child(motion::wheel(&app.controllers.player_menu,
+                    WheelAxis::Vertical, SingleChildScrollView::new(col(items))
+                        .physics(motion::APP_SCROLLED).controller(app.controllers.player_menu.clone()))).into(),
+            ]));
+        let dismiss = app.clone();
+        Stack::new(vec![
+            GestureDetector::new(Container::new().color(Color::rgba(0, 0, 0, 100)).child(SizedBox::expand()))
+                .behavior(HitTestBehavior::Opaque).on_tap(move || dismiss.set_player_menu(Menu::None)).into(),
+            Center::new(dialog).into(),
+        ] as Vec<Widget>).fit(StackFit::Expand).into()
+    }).into()
 }
 
 fn menu_button(glyph: Glyph, open: bool, changed: bool, on_click: impl Fn() + 'static) -> Widget {
@@ -1296,30 +1436,57 @@ fn menu_button(glyph: Glyph, open: bool, changed: bool, on_click: impl Fn() + 's
 fn volume_control(app: &App) -> Widget {
     let app = app.clone();
     Builder::new(move |_| {
-        let open = VOLUME_HOVER.with(|value| value.get()) | VOLUME_DRAGGING.with(|value| value.get());
+        let dragging = VOLUME_DRAGGING.with(|value| value.get());
+        let open = VOLUME_HOVER.with(|value| value.get()) || dragging;
         let (volume, muted) = app.player.state.read(|s| (s.volume, s.muted));
         let shown = if muted { 0.0 } else { volume };
         let mute = app.clone();
         let label = if muted || volume <= 0.0 { "Unmute" } else { "Mute" };
-        let button = icon_button(icon(if muted || volume <= 0.0 { icons::volume_x() } else { icons::volume_2() },
+        let button = player_tip(label, icon_button(icon(if muted || volume <= 0.0 { icons::volume_x() } else { icons::volume_2() },
             CONTROL_ICON, TEXT).accessibility_label(label), CONTROL_BUTTON,
-            move || { mute.toggle_mute(); mute.player_activity(); });
+            move || { mute.toggle_mute(); mute.player_activity(); }));
         let change = app.clone();
-        let extra: Widget = row(vec![hgap(6.0), slider(84.0, shown / MAX_VOLUME, Rc::new(move |value, committed| {
+        let link = VOLUME_LINK.with(Clone::clone);
+        let rail = track(84.0, shown / MAX_VOLUME, &[], Rc::new(move |value, committed| {
             VOLUME_DRAGGING.with(|dragging| dragging.set(!committed));
             change.set_volume(value * MAX_VOLUME);
-        })), hgap(10.0)]).into();
+        }), Rail::THIN, None, VOLUME_POSITION.with(Clone::clone));
+        let rail = MouseRegion::new(CompositedTransformTarget::new(link.clone(), rail))
+            .on_hover(|event| { VOLUME_POSITION.with(|value| value.set(Some((event.local_position.x / 84.0).clamp(0.0, 1.0)))); })
+            .on_exit(|_| { VOLUME_POSITION.with(|value| value.set(None)); });
+        let extra: Widget = row(vec![hgap(6.0), rail.into(), hgap(10.0)]).into();
         let hover = app.clone();
-        MouseRegion::new(TweenAnimationBuilder::new(if open { 1.0f32 } else { 0.0 },
+        let surface = MouseRegion::new(TweenAnimationBuilder::new(if open { 1.0f32 } else { 0.0 },
             std::time::Duration::from_millis(if incular::animation::disable_animations() { 0 } else { 180 }),
             move |_, amount, child| control_surface(row(vec![button.clone(),
-                ClipRect::new(Align::new(Alignment::CENTER_LEFT, child.expect("volume slider"))
-                    .width_factor(amount)).into(),
+                if amount >= 1.0 { child.expect("volume slider") } else {
+                    ClipRect::new(Align::new(Alignment::CENTER_LEFT, child.expect("volume slider"))
+                        .width_factor(amount)).into()
+                },
             ]), EdgeInsets::all(2.0)))
             .curve(Curve::EaseOutCubic).child(extra))
             .on_enter(move |_| { VOLUME_HOVER.with(|value| value.set(true)); hover.player_activity(); })
-            .on_exit(move |_| { VOLUME_HOVER.with(|value| value.set(false)); })
-            .into()
+            .on_exit(move |_| {
+                VOLUME_HOVER.with(|value| value.set(false));
+                VOLUME_POSITION.with(|value| value.set(None));
+            });
+        let at = VOLUME_POSITION.with(|value| value.get());
+        let (left, pointer) = bubble_geometry(84.0, at.unwrap_or(shown / MAX_VOLUME));
+        let popup = SizedBox::new().width(84.0).height(BUBBLE_HEIGHT + POINTER_HEIGHT)
+            .child(layers(vec![
+                Positioned::new(Container::new().width(BUBBLE_WIDTH).height(BUBBLE_HEIGHT)
+                    .alignment(Alignment::CENTER).radius(4.0).color(Color::WHITE)
+                    .child(text(format!("{:.0}%", shown * 100.0), 12.5, FontWeight::W600, ON_SELECTED)))
+                    .left(left).top(0.0).into(),
+                Positioned::new(CustomPaint::from_painter(Size::new(POINTER_WIDTH, POINTER_HEIGHT), Pointer(false)))
+                    .left(pointer).top(BUBBLE_HEIGHT).into(),
+            ]).clip_behavior(incular::config::Clip::None));
+        OverlayPortal::new(surface).presentation(incular::config::TransientPresentation::Overlay)
+            .role(incular::config::TransientRole::Tooltip).root_overlay(true)
+            .overlay_child(IgnorePointer::new(CompositedTransformFollower::new(link, popup)
+                .target_anchor(Alignment::TOP_LEFT).follower_anchor(Alignment::BOTTOM_LEFT)
+                .offset(Offset::new(0.0, 10.0 - BUBBLE_GAP)).show_when_unlinked(false)))
+            .show(open && (at.is_some() || dragging)).into()
     }).into()
 }
 
@@ -1343,7 +1510,7 @@ fn bottom_bar(app: &App) -> Widget {
         move || call(&app)
     };
     let mut controls: Vec<Widget> = vec![
-        floating_button(
+        player_tip(if paused || ended { "Play" } else { "Pause" }, floating_button(
             icon(
                 if paused || ended { icons::play() } else { icons::pause() },
                 PRIMARY_ICON,
@@ -1351,25 +1518,25 @@ fn bottom_bar(app: &App) -> Widget {
             ),
             PRIMARY_BUTTON,
             action(|app| app.toggle_pause()),
-        ),
+        )),
     ];
     if !live {
         controls.push(hgap(CONTROL_GAP));
-        controls.push(floating_button(
+        controls.push(player_tip("Rewind 10 seconds", floating_button(
             icon(icons::rewind(), CONTROL_ICON, TEXT),
             CONTROL_BUTTON,
             action(|app| app.seek_by(-10.0)),
-        ));
+        )));
         controls.push(hgap(CONTROL_GAP));
-        controls.push(floating_button(
+        controls.push(player_tip("Forward 10 seconds", floating_button(
             icon(icons::fast_forward(), CONTROL_ICON, TEXT),
             CONTROL_BUTTON,
             action(|app| app.seek_by(10.0)),
-        ));
+        )));
     }
     if has_next {
         controls.push(hgap(CONTROL_GAP));
-        controls.push(floating_button(
+        controls.push(player_tip("Next episode", floating_button(
             icon(icons::skip_forward(), CONTROL_ICON, TEXT),
             CONTROL_BUTTON,
             action(|app| {
@@ -1377,7 +1544,7 @@ fn bottom_bar(app: &App) -> Widget {
                     app.play_next(next);
                 }
             }),
-        ));
+        )));
     }
     controls.push(hgap(CONTROL_GAP));
     controls.push(volume_control(app));
@@ -1404,13 +1571,16 @@ fn bottom_bar(app: &App) -> Widget {
         controls.push(hgap(14.0));
     }
     if let Some(stats) = torrent {
+        let peers = app.clone();
         controls.push(
-            control_surface(SizedBox::new().height(PRIMARY_BUTTON).child(Center::new(text(
+            player_tip("Peers and torrent details", GestureDetector::new(control_surface(SizedBox::new().height(PRIMARY_BUTTON).child(Center::new(text(
                 format!("{} peers · {}", stats.peers, format_speed(stats.download_speed)),
                 12.0,
                 FontWeight::W500,
                 MUTED,
-            ))), EdgeInsets::symmetric(12.0, 0.0)),
+            ))), EdgeInsets::symmetric(12.0, 0.0)))
+                .behavior(HitTestBehavior::Opaque)
+                .on_tap(move || peers.set_player_menu(Menu::Peers)).into()),
         );
         controls.push(hgap(14.0));
     }
@@ -1418,34 +1588,34 @@ fn bottom_bar(app: &App) -> Widget {
     let (in_room, unread) = app.together.state.peek(|s| (s.link != crate::together::Link::Off, s.unread));
     if in_room {
         let app = app.clone();
-        menu_controls.push(menu_button(icons::users(), menu == Menu::Together, unread > 0, move || {
+        menu_controls.push(player_tip("Watch together", menu_button(icons::users(), menu == Menu::Together, unread > 0, move || {
             app.set_player_menu(Menu::Together)
-        }));
+        })));
         menu_controls.push(hgap(CONTROL_GAP));
     }
     let style_open = menu == Menu::SubtitleStyle || menu == Menu::Sync;
-    for (glyph, target, changed) in [
-        (icons::sun(), Menu::Picture, (brightness - 1.0).abs() > 0.01),
-        (icons::gauge(), Menu::Speed, (speed - 1.0).abs() > 0.01),
-        (icons::audio_lines(), Menu::Audio, false),
-        (icons::captions(), Menu::Subtitles, has_subs),
+    for (label, glyph, target, changed) in [
+        ("Picture", icons::sun(), Menu::Picture, (brightness - 1.0).abs() > 0.01),
+        ("Playback speed", icons::gauge(), Menu::Speed, (speed - 1.0).abs() > 0.01),
+        ("Audio", icons::audio_lines(), Menu::Audio, false),
+        ("Subtitles", icons::captions(), Menu::Subtitles, has_subs),
     ] {
         if live && target == Menu::Speed {
             continue;
         }
         let open = menu == target || (target == Menu::Subtitles && style_open);
         let app = app.clone();
-        menu_controls.push(menu_button(glyph, open, changed, move || app.set_player_menu(target)));
+        menu_controls.push(player_tip(label, menu_button(glyph, open, changed, move || app.set_player_menu(target))));
         menu_controls.push(hgap(CONTROL_GAP));
     }
     let fullscreen = app.player.fullscreen.get();
     let more = app.clone();
-    menu_controls.push(icon_button(icon(icons::more_horizontal(), CONTROL_ICON,
+    menu_controls.push(player_tip("More video actions", icon_button(icon(icons::more_horizontal(), CONTROL_ICON,
         if menu == Menu::More { ACCENT } else { TEXT }).accessibility_label("More video actions"),
-        CONTROL_BUTTON, move || more.set_player_menu(Menu::More)));
+        CONTROL_BUTTON, move || more.set_player_menu(Menu::More))));
     menu_controls.push(hgap(CONTROL_GAP));
     let fullscreen_label = if fullscreen { "Exit fullscreen" } else { "Enter fullscreen" };
-    menu_controls.push(icon_button(
+    menu_controls.push(player_tip(fullscreen_label, icon_button(
         icon(
             if fullscreen { icons::minimize() } else { icons::maximize() },
             CONTROL_ICON,
@@ -1453,7 +1623,7 @@ fn bottom_bar(app: &App) -> Widget {
         ).accessibility_label(fullscreen_label),
         CONTROL_BUTTON,
         action(|app| app.toggle_fullscreen()),
-    ).accessibility_label(fullscreen_label));
+    ).accessibility_label(fullscreen_label)));
     controls.push(control_surface(row(menu_controls), EdgeInsets::symmetric(4.0, 2.0)));
 
     Container::new()
@@ -1618,6 +1788,7 @@ fn buffering_card(app: &App, torrent: Option<&crate::streaming::TorrentStats>) -
                         Rc::new(|_, _| {}),
                         Rail::THIN,
                         None,
+                        SEEK_HOVER.with(Clone::clone),
                     ))
                     .into(),
                 );
@@ -1889,6 +2060,9 @@ pub fn screen(app: &App) -> Widget {
             layers.push(fade.wrap(
                 IgnorePointer::new(popup_layer(app, motion::pop_in(panel, 8.0).into())).ignoring(!visible),
             ));
+        }
+        if menu == Menu::Peers {
+            layers.push(peers_dialog(app));
         }
     }
 

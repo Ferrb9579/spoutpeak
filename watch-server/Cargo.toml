@@ -13,10 +13,10 @@ name = "watch-server"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
-serde_json = "1"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "ws"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+serde_json = "1.0.154"
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 
 [profile.release]
 opt-level = 3

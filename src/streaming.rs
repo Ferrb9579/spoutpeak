@@ -82,6 +82,34 @@ pub struct TorrentStats {
     pub ranges: Vec<(f32, f32)>,
 }
 
+#[derive(Clone, Debug)]
+pub struct PeerInfo {
+    pub address: String,
+    pub client: String,
+    pub transport: String,
+    pub downloaded: u64,
+    pub uploaded: u64,
+}
+
+/// Only connected peers, read on demand while the player dialog is open.
+pub fn peers(info_hash: &str) -> Vec<PeerInfo> {
+    let Some(engine) = ENGINE.get() else { return Vec::new() };
+    let Ok((_, hash)) = parse_hash(info_hash) else { return Vec::new() };
+    let api = librqbit::Api::new(engine.session.clone(), None);
+    let Ok(snapshot) = api.api_peer_stats(TorrentIdOrHash::Hash(hash), Default::default()) else {
+        return Vec::new();
+    };
+    let mut peers: Vec<_> = snapshot.peers.into_iter().map(|(address, stats)| PeerInfo {
+        address,
+        client: stats.client_name.unwrap_or_else(|| "Unknown client".into()),
+        transport: stats.conn_kind.map(|kind| kind.to_string()).unwrap_or_else(|| "—".into()),
+        downloaded: stats.counters.fetched_bytes,
+        uploaded: stats.counters.uploaded_bytes,
+    }).collect();
+    peers.sort_by(|a, b| a.address.cmp(&b.address));
+    peers
+}
+
 /// Presets for how hard the engine pulls from the swarm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TorrentProfile {

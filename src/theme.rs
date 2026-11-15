@@ -454,13 +454,6 @@ pub fn layers(children: Vec<Widget>) -> Stack {
     Stack::new(children)
 }
 
-fn logo_pixels() -> Option<&'static (u32, u32, Vec<u8>)> {
-    static PIXELS: std::sync::OnceLock<Option<(u32, u32, Vec<u8>)>> = std::sync::OnceLock::new();
-    PIXELS
-        .get_or_init(|| crate::branding::render_logo(256, false))
-        .as_ref()
-}
-
 /// Logo pixels for the window/taskbar icon.
 pub fn logo_rgba() -> Option<(u32, u32, Vec<u8>)> {
     crate::branding::render_logo(256, true)
@@ -468,21 +461,65 @@ pub fn logo_rgba() -> Option<(u32, u32, Vec<u8>)> {
 
 /// The logo at `height` logical pixels, keeping its aspect ratio.
 pub fn logo(height: f32) -> Widget {
-    thread_local! {
-        static HANDLE: Option<ImageHandle> = logo_pixels().and_then(|(w, h, px)| {
-            ImageHandle::from_rgba8(*w, *h, px.clone()).ok()
-        });
+    // Rasterizing once at 256 px and shrinking it loses edge coverage at
+    // title-bar sizes. Keep the supplied SVG as paths at every display scale.
+    struct VectorLogo {
+        size: Size,
+        layers: Vec<(Arc<Path>, Color, FillRule)>,
     }
-    let Some((w, h, _)) = logo_pixels() else {
-        return SizedBox::new().width(height).height(height).into();
-    };
-    let width = height * *w as f32 / *h as f32;
-    match HANDLE.with(Clone::clone) {
-        Some(handle) => Image::new(handle)
-            .width(width)
-            .height(height)
-            .fit(BoxFit::Contain)
-            .into(),
-        None => SizedBox::new().width(width).height(height).into(),
+    impl CustomPainter for &'static VectorLogo {
+        fn paint(&self, size: Size) -> DisplayList {
+            let mut canvas = Canvas::default();
+            canvas.save_transform(AffineTransform::scale(size.height / self.size.height));
+            for (path, color, rule) in &self.layers {
+                canvas.fill_path(path.clone(), *color, *rule);
+            }
+            canvas.restore();
+            canvas.finish()
+        }
+        fn should_repaint(&self, _: &Self) -> bool { false }
+    }
+    fn paths(group: &resvg::usvg::Group, layers: &mut Vec<(Arc<Path>, Color, FillRule)>) {
+        use resvg::tiny_skia::PathSegment;
+        use resvg::usvg::{Node, Paint as SvgPaint};
+        for node in group.children() {
+            match node {
+                Node::Group(group) => paths(group, layers),
+                Node::Path(path) => {
+                    let Some(fill) = path.fill() else { continue };
+                    let SvgPaint::Color(color) = fill.paint() else { continue };
+                    let Some(data) = path.data().clone().transform(path.abs_transform()) else { continue };
+                    let mut builder = Path::builder();
+                    let point = |p: resvg::tiny_skia::Point| Offset::new(p.x, p.y);
+                    for segment in data.segments() {
+                        match segment {
+                            PathSegment::MoveTo(p) => { builder.move_to(point(p)); }
+                            PathSegment::LineTo(p) => { builder.line_to(point(p)); }
+                            PathSegment::QuadTo(c, p) => { builder.quadratic_to(point(c), point(p)); }
+                            PathSegment::CubicTo(a, b, p) => { builder.cubic_to(point(a), point(b), point(p)); }
+                            PathSegment::Close => { builder.close(); }
+                        }
+                    }
+                    let rule = match fill.rule() {
+                        resvg::usvg::FillRule::NonZero => FillRule::NonZero,
+                        resvg::usvg::FillRule::EvenOdd => FillRule::EvenOdd,
+                    };
+                    layers.push((Arc::new(builder.build()),
+                        Color::rgba(color.red, color.green, color.blue, (fill.opacity().get() * 255.0) as u8), rule));
+                }
+                _ => {}
+            }
+        }
+    }
+    static LOGO: std::sync::OnceLock<Option<VectorLogo>> = std::sync::OnceLock::new();
+    let logo = LOGO.get_or_init(|| {
+        let tree = resvg::usvg::Tree::from_data(include_bytes!("../assets/logo.svg"), &resvg::usvg::Options::default()).ok()?;
+        let mut layers = Vec::new();
+        paths(tree.root(), &mut layers);
+        Some(VectorLogo { size: Size::new(tree.size().width(), tree.size().height()), layers })
+    });
+    match logo {
+        Some(logo) => CustomPaint::from_painter(Size::new(height * logo.size.width / logo.size.height, height), logo).into(),
+        None => SizedBox::new().width(height).height(height).into(),
     }
 }

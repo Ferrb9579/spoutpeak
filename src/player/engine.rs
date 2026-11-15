@@ -502,14 +502,12 @@ impl Inner {
         let _ = std::thread::Builder::new()
             .name("player-audio-out".into())
             .spawn(move || {
-                let Ok((_stream, handle)) = rodio::OutputStream::try_default() else {
+                let Ok(mut output) = rodio::DeviceSinkBuilder::open_default_sink() else {
                     let _ = ready_tx.send(false);
                     return;
                 };
-                let Ok(sink) = rodio::Sink::try_new(&handle) else {
-                    let _ = ready_tx.send(false);
-                    return;
-                };
+                output.log_on_drop(false);
+                let sink = rodio::Player::connect_new(output.mixer());
                 sink.append(QueueSource {
                     inner: inner.clone(),
                     local: Vec::new(),
@@ -1094,15 +1092,15 @@ struct QueueSource {
 const SLEW_EVERY: u64 = 25;
 
 impl Iterator for QueueSource {
-    type Item = i16;
+    type Item = f32;
 
-    fn next(&mut self) -> Option<i16> {
+    fn next(&mut self) -> Option<f32> {
         let inner = &self.inner;
         if !inner.alive.load(Ordering::Relaxed) {
             return None;
         }
         if inner.paused.load(Ordering::Relaxed) || !inner.started.load(Ordering::Relaxed) {
-            return Some(0);
+            return Some(0.0);
         }
         let generation = inner.generation.load(Ordering::Relaxed);
         if generation != self.generation {
@@ -1118,7 +1116,7 @@ impl Iterator for QueueSource {
             let take = queue.len().min(2048) & !1;
             self.local.extend(queue.drain(..take));
             if self.local.is_empty() {
-                return Some(0);
+                return Some(0.0);
             }
         }
         // Drift correction: at the start of every SLEW_EVERY-th frame, skip
@@ -1144,14 +1142,41 @@ impl Iterator for QueueSource {
             inner.consumed_frames.fetch_add(1, Ordering::Relaxed);
         }
         let volume = f32::from_bits(inner.volume.load(Ordering::Relaxed));
-        let scaled = sample as f32 / 32768.0 * volume;
-        let out = if volume > 1.0 { soft_clip(scaled) } else { scaled };
-        Some((out * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16)
+        Some(audio_sample(sample, volume))
     }
 }
 
 /// Highest playback gain (200 %).
 pub const MAX_VOLUME: f32 = 2.0;
+
+/// FFmpeg emits signed 16-bit PCM; Rodio expects normalized float samples.
+fn audio_sample(sample: i16, volume: f32) -> f32 {
+    let scaled = sample as f32 / 32768.0 * volume;
+    let out = if volume > 1.0 { soft_clip(scaled) } else { scaled };
+    out.clamp(-1.0, 1.0)
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::*;
+
+    #[test]
+    fn pcm_conversion_preserves_silence_polarity_and_full_scale() {
+        assert_eq!(audio_sample(i16::MIN, 1.0), -1.0);
+        assert_eq!(audio_sample(0, 1.0), 0.0);
+        assert_eq!(audio_sample(i16::MAX, 1.0), 32767.0 / 32768.0);
+        assert_eq!(audio_sample(i16::MAX, 0.0), 0.0);
+        assert_eq!(audio_sample(16384, 0.5), 0.25);
+    }
+
+    #[test]
+    fn boosted_audio_stays_bounded_without_flattening_quiet_samples() {
+        assert_eq!(audio_sample(4096, MAX_VOLUME), 0.25);
+        let positive = audio_sample(30000, MAX_VOLUME);
+        assert!(positive > 0.8 && positive <= 1.0);
+        assert_eq!(audio_sample(-30000, MAX_VOLUME), -positive);
+    }
+}
 
 /// Leaves quiet samples alone and bends loud ones smoothly towards full
 /// scale, so boosted volume compresses peaks instead of clipping them.
@@ -1167,14 +1192,14 @@ fn soft_clip(x: f32) -> f32 {
 }
 
 impl rodio::Source for QueueSource {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        2
+    fn channels(&self) -> rodio::ChannelCount {
+        rodio::ChannelCount::new(2).unwrap()
     }
-    fn sample_rate(&self) -> u32 {
-        SAMPLE_RATE
+    fn sample_rate(&self) -> rodio::SampleRate {
+        rodio::SampleRate::new(SAMPLE_RATE).unwrap()
     }
     fn total_duration(&self) -> Option<Duration> {
         None

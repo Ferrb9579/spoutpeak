@@ -332,11 +332,26 @@ async fn fetch(
 impl App {
     /// Starts saving `stream` for the title open in the detail view.
     pub fn download_stream(&self, stream: &Stream) {
+        let (meta, video) = self.detail.peek(|d| (d.best_meta(), d.video.clone()));
+        self.download_with(stream, meta, video);
+    }
+
+    /// Use the playing video's metadata; the detail page may show another title.
+    pub fn download_current_video(&self) {
+        if let Some((stream, meta, video)) = self.player.current_media() {
+            self.download_with(&stream, meta, video);
+        }
+    }
+
+    fn download_with(&self, stream: &Stream, meta: Option<Meta>, video: Option<Video>) {
         if !matches!(stream.source(), StreamSource::Url(_) | StreamSource::Torrent { .. }) {
             self.notify("This stream can't be downloaded");
             return;
         }
-        let (meta, video) = self.detail.peek(|d| (d.best_meta(), d.video.clone()));
+        if matches!(stream.source(), StreamSource::Url(url) if Path::new(&url).is_absolute() || url.starts_with("file:")) {
+            self.notify("This video is already saved on your device");
+            return;
+        }
         let title = download_title(meta.as_ref(), video.as_ref(), stream);
         let duplicate = self.downloads.peek(|list| {
             list.iter()
