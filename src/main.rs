@@ -18,6 +18,7 @@ mod branding;
 mod together;
 mod ui;
 mod util;
+mod window;
 
 use incular::prelude::*;
 
@@ -42,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(window) = cx.window_handle() {
                 *app_state.player.window.borrow_mut() = Some(window);
             }
+            window::configure_corners();
             ui::root(&app_state)
         },
     )?;

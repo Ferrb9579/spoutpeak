@@ -5,6 +5,7 @@ mod ambient;
 mod browse;
 mod chrome;
 mod detail;
+mod stream_details;
 mod downloads;
 mod motion;
 mod player;

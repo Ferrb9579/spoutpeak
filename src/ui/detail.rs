@@ -203,6 +203,7 @@ fn stream_tile(app: &App, stream: &Stream) -> Widget {
     let headline = stream.headline();
     let headline = if headline.is_empty() { "Stream".to_owned() } else { headline.replace('\n', " ") };
     let details = stream.details();
+    let parts = super::stream_details::split(&details);
     let mut lines: Vec<Widget> = vec![
         hrow(vec![
             Flexible::new(line(headline.clone(), 13.5, FontWeight::W600, TEXT)).into(),
@@ -211,15 +212,26 @@ fn stream_tile(app: &App, stream: &Stream) -> Widget {
         ])
         .into(),
     ];
-    if !details.is_empty() {
+    if !parts.description.is_empty() {
         lines.push(gap(4.0));
         lines.push(
-            Text::new(breakable(&details))
+            Text::new(breakable(parts.description))
                 .style(style(12.0, FontWeight::W400, MUTED))
-                .max_lines(Some(3))
+                // Limit only the release name. Unknown provider formats keep
+                // all lines rather than silently losing their technical data.
+                .max_lines(if parts.metadata.is_empty() { None } else { Some(2) })
                 .overflow(TextOverflow::Ellipsis)
                 .into(),
         );
+    }
+    if !parts.metadata.is_empty() {
+        lines.push(gap(6.0));
+        lines.push(Text::new(breakable(parts.metadata))
+            .style(style(12.0, FontWeight::W500, TEXT))
+            .into());
+    } else if let Some(size) = stream.behavior_hints.video_size.filter(|size| *size > 0) {
+        lines.push(gap(6.0));
+        lines.push(text(format!("Size {}", crate::util::format_bytes(size)), 12.0, FontWeight::W500, TEXT).into());
     }
     let downloadable = matches!(
         stream.source(),

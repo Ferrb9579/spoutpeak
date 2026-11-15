@@ -7,6 +7,11 @@ use incular::prelude::*;
 use incular::runtime::WindowHandle;
 use incular::widgets::StackFit;
 
+const TITLEBAR_HEIGHT: f32 = 44.0;
+const CAPTION_BUTTON: f32 = 34.0;
+const CAPTION_PADDING: f32 = 3.0;
+const LOGO_HEIGHT: f32 = 22.0;
+
 fn toggle_maximized(window: &WindowHandle) {
     let maximized = window.observed_state().maximized.unwrap_or(false);
     let _ = window.set_maximized(!maximized);
@@ -21,7 +26,7 @@ fn caption_button(glyph: Glyph, label: &str, close: bool, action: impl Fn() + 's
             border: Some(Border::new(0.0, Color::TRANSPARENT)),
             border_radius: Some(8.0),
             padding: Some(EdgeInsets::ZERO),
-            fixed_size: Some(Size::new(34.0, 30.0)),
+            fixed_size: Some(Size::new(CAPTION_BUTTON, CAPTION_BUTTON)),
             alignment: Some(Alignment::CENTER),
             overlay_color: Some(Color::TRANSPARENT.into()),
             animation_duration: Some(std::time::Duration::ZERO),
@@ -72,9 +77,9 @@ fn titlebar(app: &App, window: &WindowHandle) -> Widget {
     // Start the OS move only once a drag is recognized. A stationary double
     // click remains available for maximize/restore, including on the logo.
     let drag_area = GestureDetector::new(
-        Container::new().height(44.0).color(Color::TRANSPARENT)
-            .padding(EdgeInsets::only(22.0, 0.0, 0.0, 0.0))
-            .child(row(vec![logo(22.0), hgap(10.0),
+        Container::new().height(TITLEBAR_HEIGHT).color(Color::TRANSPARENT)
+            .padding(EdgeInsets::only((TITLEBAR_HEIGHT - LOGO_HEIGHT) / 2.0, 0.0, 0.0, 0.0))
+            .child(row(vec![logo(LOGO_HEIGHT), hgap(10.0),
                 text("Spoutpeak", 13.0, FontWeight::W600, TEXT).into()])),
     )
     .on_pan_start(move |_| { let _ = drag.begin_move_drag(); })
@@ -83,7 +88,7 @@ fn titlebar(app: &App, window: &WindowHandle) -> Widget {
     let maximized = window.observed_state().maximized.unwrap_or(false);
     let (minimize, maximize, close) = (window.clone(), window.clone(), window.clone());
     let controls = Container::new().radius(12.0).color(Color::rgba(0, 0, 0, 55))
-        .padding(EdgeInsets::all(3.0))
+        .padding(EdgeInsets::all(CAPTION_PADDING))
         .child(row(vec![
             caption_button(icons::minus(), "Minimize window", false, move || {
                 let _ = minimize.set_minimized(true);
@@ -99,8 +104,9 @@ fn titlebar(app: &App, window: &WindowHandle) -> Widget {
         children.extend([home_tools(app), hgap(16.0)]);
     }
     // Native caption actions should not steal the player's shortcut focus.
-    children.extend([ExcludeFocus::new(controls).into(), hgap(10.0)]);
-    SizedBox::new().height(44.0).child(Container::new()
+    let control_inset = (TITLEBAR_HEIGHT - CAPTION_BUTTON - CAPTION_PADDING * 2.0) / 2.0;
+    children.extend([ExcludeFocus::new(controls).into(), hgap(control_inset)]);
+    SizedBox::new().height(TITLEBAR_HEIGHT).child(Container::new()
         .color(if app.current_route() == Route::Player { Color::BLACK } else { Color::TRANSPARENT })
         .child(row(children))).into()
 }
