@@ -312,6 +312,7 @@ impl Engine {
         self.inner.kill_children();
         if let Some(mut child) = self.inner.sub_child.lock().unwrap().take() {
             let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
@@ -377,16 +378,12 @@ impl Inner {
     }
 
     fn kill_children(&self) {
-        let children: Vec<Child> = self.children.lock().unwrap().drain(..).collect();
-        if children.is_empty() {
-            return;
-        }
-        std::thread::spawn(move || {
-            for mut child in children {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        });
+        let mut children: Vec<Child> = self.children.lock().unwrap().drain(..).collect();
+        // Shutdown can run during thread-local destruction on Windows, when
+        // spawning a reaper thread is forbidden. Kill all pipes first, then
+        // reap their processes here; Drop must never start another thread.
+        for child in &mut children { let _ = child.kill(); }
+        for mut child in children { let _ = child.wait(); }
     }
 
     fn input_args(&self, command: &mut Command) {

@@ -3,6 +3,7 @@
 
 pub mod engine;
 pub mod subtitles;
+pub mod source;
 
 use crate::state::{App, Route, Shared, spawn, ui};
 use crate::store::{PlayerKind, Settings, SubtitleStyle};
@@ -41,6 +42,7 @@ pub enum Menu {
     Picture,
     /// Watch-together room: people and chat.
     Together,
+    More,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -395,6 +397,14 @@ impl App {
                         s.controls_visible = true;
                         s.menu = Menu::None;
                     });
+                    // Source actions are available while the swarm prepares,
+                    // including when the source cannot start playing yet.
+                    {
+                        let mut session = self.player.session.borrow_mut();
+                        session.stream = Some(stream.clone());
+                        session.meta = meta.clone();
+                        session.video = video.clone();
+                    }
                     self.push(Route::Player);
                     Some(self.player.session_id.get())
                 } else {

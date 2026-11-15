@@ -49,6 +49,21 @@ pub fn with_app(call: impl FnOnce(&App)) {
     }
 }
 
+/// Copy through the active native runtime and report errors rather than
+/// claiming success if the desktop clipboard is temporarily unavailable.
+pub fn copy_text(text: String, success: String) {
+    let Some(bridge) = BRIDGE.get() else { return };
+    let dispatcher = bridge.ui.lock().expect("ui dispatcher").clone();
+    dispatcher.dispatch(move |runtime| {
+        let result = runtime.write_clipboard(DataTransfer::plain_text(text));
+        with_app(|app| match result {
+            Ok(report) if !report.written.is_empty() => app.notify(success),
+            Ok(_) => app.notify("Clipboard is unavailable"),
+            Err(error) => app.notify(format!("Could not copy: {error}")),
+        });
+    });
+}
+
 /// Runs `callback` on the UI thread. Callable from any thread.
 pub fn ui(callback: impl FnOnce(&App) + Send + 'static) {
     let Some(bridge) = BRIDGE.get() else { return };

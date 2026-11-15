@@ -65,5 +65,5 @@ glyphs! {
     play, pause, rewind, fast_forward, skip_forward, volume_2, volume_x,
     maximize, minimize, audio_lines, captions, gauge, sun, type_,
     download, trash_2, folder_open, rotate_ccw, check, x, plus, minus,
-    log_in, message_square, window_maximize, window_restore,
+    log_in, message_square, window_maximize, window_restore, more_horizontal,
 }

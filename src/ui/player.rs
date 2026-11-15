@@ -65,13 +65,18 @@ const PLAYED: Color = Color::rgba(244, 244, 244, 255);
 const LOADED: Color = Color::rgba(184, 184, 184, 255);
 const RAIL: Color = CONTROL_TINT;
 /// How far above the rail the time bubble floats (outside the bar's box).
-const BUBBLE_RISE: f32 = 36.0;
 const BUBBLE_WIDTH: f32 = 78.0;
+const BUBBLE_HEIGHT: f32 = 24.0;
+const POINTER_WIDTH: f32 = 14.0;
+const POINTER_HEIGHT: f32 = 7.0;
+const BUBBLE_GAP: f32 = 4.0;
 
 thread_local! {
     /// Where the pointer is over the seek bar (a fraction), for its bubble.
     /// Kept outside the bar, which rebuilds on every position tick.
     static SEEK_HOVER: Signal<Option<f32>> = Signal::new(None);
+    static VOLUME_HOVER: Signal<bool> = Signal::new(false);
+    static VOLUME_DRAGGING: Signal<bool> = Signal::new(false);
 }
 
 /// A borderless, boxy rail with grey `buffered` (start, end) stretches,
@@ -146,7 +151,7 @@ fn track(
         .into(),
     );
     if let Some(label) = label.clone() {
-        parts.push(bubble(width, label));
+        parts.push(bubble(width, rail_top, label));
     }
 
     let visual = SizedBox::new()
@@ -161,8 +166,8 @@ fn track(
         }
     };
     let last = Rc::new(std::cell::Cell::new(fraction));
-    let (tap, drag, release) = (change.clone(), change.clone(), change);
-    let (drag_last, release_last) = (last.clone(), last);
+    let (tap, drag, release, cancel) = (change.clone(), change.clone(), change.clone(), change);
+    let (drag_last, release_last, cancel_last) = (last.clone(), last.clone(), last);
     let gestures = GestureDetector::new(visual)
         .behavior(HitTestBehavior::Opaque)
         .on_tap_down(move |details| tap(at(details.local_position.x), true))
@@ -172,7 +177,8 @@ fn track(
             set_hover(Some(value));
             drag(value, false);
         })
-        .on_horizontal_drag_end(move |_| release(release_last.get(), true));
+        .on_horizontal_drag_end(move |_| release(release_last.get(), true))
+        .on_horizontal_drag_cancel(move || cancel(cancel_last.get(), true));
     if !hovering {
         return gestures.into();
     }
@@ -184,38 +190,37 @@ fn track(
 
 /// The time bubble: a white rounded label with a small pointer, above the
 /// rail at the hovered position. Rebuilds alone as the pointer moves.
-fn bubble(width: f32, label: Rc<dyn Fn(f32) -> String>) -> Widget {
+fn bubble_geometry(width: f32, fraction: f32) -> (f32, f32) {
+    let centre = fraction.clamp(0.0, 1.0) * width;
+    let left = (centre - BUBBLE_WIDTH / 2.0).clamp(0.0, (width - BUBBLE_WIDTH).max(0.0));
+    // Clamp the label, never its arrow: the tip follows the actual pointer
+    // even at the beginning and end of the timeline.
+    (left, centre - POINTER_WIDTH / 2.0)
+}
+
+fn bubble(width: f32, rail_top: f32, label: Rc<dyn Fn(f32) -> String>) -> Widget {
     Positioned::new(IgnorePointer::new(Builder::new(move |_| {
         let Some(at) = SEEK_HOVER.with(|hover| hover.get()) else {
             return SizedBox::shrink().into();
         };
-        let centre = at * width;
-        let left = (centre - BUBBLE_WIDTH / 2.0).clamp(0.0, (width - BUBBLE_WIDTH).max(0.0));
-        let pointer = (centre - left - 7.0).clamp(8.0, BUBBLE_WIDTH - 22.0);
-        Padding::new(
-            EdgeInsets::only(left, 0.0, 0.0, 0.0),
-            vcol(vec![
-                Container::new()
+        let (left, pointer) = bubble_geometry(width, at);
+        SizedBox::new().width(width).height(BUBBLE_HEIGHT + POINTER_HEIGHT)
+            .child(layers(vec![
+                Positioned::new(Container::new()
                     .width(BUBBLE_WIDTH)
-                    .height(24.0)
+                    .height(BUBBLE_HEIGHT)
                     .alignment(Alignment::CENTER)
                     .radius(4.0)
                     .color(Color::WHITE)
-                    .child(text(label(at), 12.5, FontWeight::W600, ON_SELECTED))
-                    .into(),
-                Padding::new(
-                    EdgeInsets::only(pointer, 0.0, 0.0, 0.0),
-                    CustomPaint::from_painter(Size::new(14.0, 7.0), Pointer),
-                )
-                .into(),
-            ])
-            .cross_axis_alignment(CrossAxisAlignment::Start)
-            .main_axis_size(MainAxisSize::Min),
-        )
+                    .child(text(label(at), 12.5, FontWeight::W600, ON_SELECTED)))
+                    .left(left).top(0.0).into(),
+                Positioned::new(CustomPaint::from_painter(Size::new(POINTER_WIDTH, POINTER_HEIGHT), Pointer))
+                    .left(pointer).top(BUBBLE_HEIGHT).into(),
+            ]).clip_behavior(incular::config::Clip::None))
         .into()
     })))
     .left(0.0)
-    .top(-BUBBLE_RISE)
+    .top(rail_top - BUBBLE_HEIGHT - POINTER_HEIGHT - BUBBLE_GAP)
     .into()
 }
 
@@ -934,6 +939,35 @@ fn picture_panel(app: &App) -> Panel {
     panel
 }
 
+fn more_panel(app: &App) -> Panel {
+    let mut panel = Panel::new();
+    panel.push(panel_header(app, "Video actions", None, Vec::new()), 30.0);
+    panel.gap(8.0);
+    let title = app.player.state.peek(|s| s.title.clone());
+    let mut copies: Vec<(&str, String)> = Vec::new();
+    if let Some((stream, _, _)) = app.player.current_media() {
+        if let Some(url) = crate::player::source::magnet_url(&stream, &title) {
+            copies.push(("Copy magnet URL", url));
+            if let crate::addons::types::StreamSource::Torrent { info_hash, .. } = stream.source() {
+                copies.push(("Copy torrent hash", info_hash));
+            }
+        } else if let Some(source) = crate::player::source::source_copy(&stream) {
+            copies.push(source);
+        }
+        let details = stream.details();
+        if !details.is_empty() { copies.push(("Copy source details", details)); }
+    }
+    if !title.is_empty() { copies.push(("Copy title", title)); }
+    for (label, value) in copies {
+        let app = app.clone();
+        panel.push(menu_item(label.to_owned(), false, move || {
+            app.set_player_menu(Menu::None);
+            crate::state::copy_text(value.clone(), format!("{} copied", label.trim_start_matches("Copy ")));
+        }), MENU_ROW);
+    }
+    panel
+}
+
 fn menu_panel(app: &App, menu: Menu) -> Option<Widget> {
     let panel = match menu {
         Menu::None => return None,
@@ -943,6 +977,7 @@ fn menu_panel(app: &App, menu: Menu) -> Option<Widget> {
         Menu::Subtitles => subtitles_panel(app),
         Menu::SubtitleStyle => subtitle_style_panel(app),
         Menu::Picture => picture_panel(app),
+        Menu::More => more_panel(app),
         // Drawn outside the focus-excluded controls (it has a text field).
         Menu::Together => return None,
     };
@@ -1258,15 +1293,43 @@ fn menu_button(glyph: Glyph, open: bool, changed: bool, on_click: impl Fn() + 's
         .into()
 }
 
+fn volume_control(app: &App) -> Widget {
+    let app = app.clone();
+    Builder::new(move |_| {
+        let open = VOLUME_HOVER.with(|value| value.get()) | VOLUME_DRAGGING.with(|value| value.get());
+        let (volume, muted) = app.player.state.read(|s| (s.volume, s.muted));
+        let shown = if muted { 0.0 } else { volume };
+        let mute = app.clone();
+        let label = if muted || volume <= 0.0 { "Unmute" } else { "Mute" };
+        let button = icon_button(icon(if muted || volume <= 0.0 { icons::volume_x() } else { icons::volume_2() },
+            CONTROL_ICON, TEXT).accessibility_label(label), CONTROL_BUTTON,
+            move || { mute.toggle_mute(); mute.player_activity(); });
+        let change = app.clone();
+        let extra: Widget = row(vec![hgap(6.0), slider(84.0, shown / MAX_VOLUME, Rc::new(move |value, committed| {
+            VOLUME_DRAGGING.with(|dragging| dragging.set(!committed));
+            change.set_volume(value * MAX_VOLUME);
+        })), hgap(10.0)]).into();
+        let hover = app.clone();
+        MouseRegion::new(TweenAnimationBuilder::new(if open { 1.0f32 } else { 0.0 },
+            std::time::Duration::from_millis(if incular::animation::disable_animations() { 0 } else { 180 }),
+            move |_, amount, child| control_surface(row(vec![button.clone(),
+                ClipRect::new(Align::new(Alignment::CENTER_LEFT, child.expect("volume slider"))
+                    .width_factor(amount)).into(),
+            ]), EdgeInsets::all(2.0)))
+            .curve(Curve::EaseOutCubic).child(extra))
+            .on_enter(move |_| { VOLUME_HOVER.with(|value| value.set(true)); hover.player_activity(); })
+            .on_exit(move |_| { VOLUME_HOVER.with(|value| value.set(false)); })
+            .into()
+    }).into()
+}
+
 fn bottom_bar(app: &App) -> Widget {
-    let (live, paused, ended, volume, muted_now, speed, menu, has_next, torrent, has_subs, brightness) =
+    let (live, paused, ended, speed, menu, has_next, torrent, has_subs, brightness) =
         app.player.state.peek(|s| {
             (
                 s.live,
                 s.paused,
                 s.status == Status::Ended,
-                s.volume,
-                s.muted,
                 s.speed,
                 s.menu,
                 s.next.is_some(),
@@ -1317,38 +1380,7 @@ fn bottom_bar(app: &App) -> Widget {
         ));
     }
     controls.push(hgap(CONTROL_GAP));
-    let mut volume_controls = vec![icon_button(
-        icon(
-            if muted_now || volume <= 0.0 { icons::volume_x() } else { icons::volume_2() },
-            CONTROL_ICON,
-            TEXT,
-        ),
-        CONTROL_BUTTON,
-        action(|app| app.toggle_mute()),
-    )];
-    {
-        let app = app.clone();
-        let shown = if muted_now { 0.0 } else { volume };
-        volume_controls.push(slider(
-            120.0,
-            shown / MAX_VOLUME,
-            Rc::new(move |value, _| app.set_volume(value * MAX_VOLUME)),
-        ));
-        volume_controls.push(hgap(8.0));
-        volume_controls.push(
-            SizedBox::new()
-                .width(40.0)
-                .child(text(
-                    format!("{:.0}%", shown * 100.0),
-                    12.0,
-                    FontWeight::W600,
-                    // Boosted past 100 % reads as a warning colour.
-                    if shown > 1.0 { ACCENT } else { MUTED },
-                ))
-                .into(),
-        );
-    }
-    controls.push(control_surface(row(volume_controls), EdgeInsets::only(0.0, 2.0, 12.0, 2.0)));
+    controls.push(volume_control(app));
     controls.push(hgap(CONTROL_GAP));
     controls.push(control_surface(
         SizedBox::new().height(PRIMARY_BUTTON).child(Center::new(clock(app))),
@@ -1363,22 +1395,22 @@ fn bottom_bar(app: &App) -> Widget {
     });
     if let Some(room) = room {
         controls.push(
-            control_surface(row(vec![
+            control_surface(SizedBox::new().height(PRIMARY_BUTTON).child(Center::new(row(vec![
                 icon(icons::users(), 15.0, ACCENT),
                 hgap(6.0),
                 text(format!("{room} · {people}"), 12.0, FontWeight::W600, ACCENT).into(),
-            ]), EdgeInsets::symmetric(12.0, 14.0)),
+            ]))), EdgeInsets::symmetric(12.0, 0.0)),
         );
         controls.push(hgap(14.0));
     }
     if let Some(stats) = torrent {
         controls.push(
-            control_surface(text(
+            control_surface(SizedBox::new().height(PRIMARY_BUTTON).child(Center::new(text(
                 format!("{} peers · {}", stats.peers, format_speed(stats.download_speed)),
                 12.0,
                 FontWeight::W500,
                 MUTED,
-            ), EdgeInsets::symmetric(12.0, 14.0)),
+            ))), EdgeInsets::symmetric(12.0, 0.0)),
         );
         controls.push(hgap(14.0));
     }
@@ -1407,6 +1439,11 @@ fn bottom_bar(app: &App) -> Widget {
         menu_controls.push(hgap(CONTROL_GAP));
     }
     let fullscreen = app.player.fullscreen.get();
+    let more = app.clone();
+    menu_controls.push(icon_button(icon(icons::more_horizontal(), CONTROL_ICON,
+        if menu == Menu::More { ACCENT } else { TEXT }).accessibility_label("More video actions"),
+        CONTROL_BUTTON, move || more.set_player_menu(Menu::More)));
+    menu_controls.push(hgap(CONTROL_GAP));
     let fullscreen_label = if fullscreen { "Exit fullscreen" } else { "Enter fullscreen" };
     menu_controls.push(icon_button(
         icon(

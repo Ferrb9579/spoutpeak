@@ -87,6 +87,7 @@ fn titlebar(app: &App, window: &WindowHandle) -> Widget {
 
     let maximized = window.observed_state().maximized.unwrap_or(false);
     let (minimize, maximize, close) = (window.clone(), window.clone(), window.clone());
+    let shutdown = app.clone();
     let controls = Container::new().radius(12.0).color(Color::rgba(0, 0, 0, 55))
         .padding(EdgeInsets::all(CAPTION_PADDING))
         .child(row(vec![
@@ -96,7 +97,10 @@ fn titlebar(app: &App, window: &WindowHandle) -> Widget {
             caption_button(if maximized { icons::window_restore() } else { icons::window_maximize() },
                 if maximized { "Restore window" } else { "Maximize window" }, false,
                 move || toggle_maximized(&maximize)),
-            caption_button(icons::x(), "Close window", true, move || { let _ = close.close(); }),
+            caption_button(icons::x(), "Close window", true, move || {
+                shutdown.stop_playback();
+                let _ = close.close();
+            }),
         ]));
     let mut children = vec![Expanded::new(drag_area).into()];
     // Keep interactive tools outside the native drag/double-click region.
