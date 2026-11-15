@@ -1224,7 +1224,8 @@ async fn serve_file(
     };
     // A player is waiting on this response: its pieces come before any
     // read-ahead.
-    reader.set_priority(StreamPriority::Playback);
+    let preview = headers.get("x-spoutpeak-preview").is_some_and(|value| value == "1");
+    reader.set_priority(if preview { StreamPriority::Background } else { StreamPriority::Playback });
     let len = reader.len();
 
     let mut out = HeaderMap::new();
@@ -1263,7 +1264,7 @@ async fn serve_file(
         inner: body,
         active,
         last_used,
-        readahead,
+        readahead: if preview { None } else { readahead },
         id: next_reader_id(),
         position: start,
         opened: Instant::now(),

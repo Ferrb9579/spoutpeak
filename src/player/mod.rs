@@ -4,6 +4,7 @@
 pub mod engine;
 pub mod subtitles;
 pub mod source;
+pub mod preview;
 
 use crate::state::{App, Route, Shared, spawn, ui};
 use crate::store::{PlayerKind, Settings, SubtitleStyle};
@@ -109,9 +110,44 @@ struct Session {
 }
 
 #[derive(Clone)]
+/// Playback following is independent of scroll activity driven by the user.
+pub struct SubtitleFollow {
+    enabled: Rc<Cell<bool>>,
+    pending: Rc<Cell<bool>>,
+    pressed: Rc<Cell<bool>>,
+    automatic: Rc<Cell<bool>>,
+}
+
+impl SubtitleFollow {
+    fn new() -> Self {
+        Self {
+            enabled: Rc::new(Cell::new(true)),
+            pending: Rc::new(Cell::new(false)),
+            pressed: Rc::new(Cell::new(false)),
+            automatic: Rc::new(Cell::new(false)),
+        }
+    }
+
+    fn resume(&self) { self.enabled.set(true); }
+    pub fn suspend(&self) { self.enabled.set(false); }
+    pub fn set_pressed(&self, pressed: bool) { self.pressed.set(pressed); }
+
+    pub fn on_scroll(&self, event: ScrollNotification) {
+        if !self.automatic.get() && (event.kind == ScrollNotificationType::UserScroll
+            || event.drag_position.is_some()
+            || (self.pressed.get() && event.kind == ScrollNotificationType::Update && event.delta != 0.0))
+        {
+            self.suspend();
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct PlayerUi {
     pub frame: Signal<Option<ImageHandle>>,
+    pub preview: preview::SeekPreview,
     pub position: Signal<f64>,
+    pub subtitle_follow: SubtitleFollow,
     pub cue: Signal<String>,
     /// Window mode is independent of playback updates and drives the app frame.
     pub fullscreen: Signal<bool>,
@@ -131,7 +167,9 @@ impl PlayerUi {
     pub fn new(settings: &Settings) -> Self {
         Self {
             frame: Signal::new(None),
+            preview: preview::SeekPreview::new(),
             position: Signal::new(0.0),
+            subtitle_follow: SubtitleFollow::new(),
             cue: Signal::new(String::new()),
             fullscreen: Signal::new(false),
             fullscreen_restore_maximized: Rc::new(Cell::new(false)),
@@ -571,6 +609,7 @@ impl App {
             s.up_next_cancelled = false;
         });
         let (volume, muted) = self.player.state.peek(|s| (s.volume, s.muted));
+        self.player.preview.configure(url.clone(), headers.clone(), torrent);
         let engine = Engine::open(
             OpenRequest {
                 url,
@@ -762,6 +801,7 @@ impl App {
     }
 
     fn player_info(&self, info: MediaInfo) {
+        self.player.preview.set_info(info.clone());
         let audio_index = {
             let preferred = self.profile.peek(|p| p.settings.audio_lang.clone());
             info.audio
@@ -794,6 +834,11 @@ impl App {
         }
 
         let delay = self.player.state.peek(|s| s.sub_delay);
+        if self.player.state.peek(|s| s.menu == Menu::Sync && !s.paused)
+            && self.player.subtitle_follow.enabled.get()
+        {
+            self.queue_subtitle_follow();
+        }
         let text = subtitles::active_text(&self.player.cues.borrow(), seconds - delay);
         if text != self.player.cue.get_untracked() {
             self.player.cue.set(text);
@@ -817,6 +862,10 @@ impl App {
         // The engine's wall-clock ticker continues while paused, so the same
         // idle timeout applies in either state. Menus and active scrubs stay up.
         let hide = visible && idle && menu == Menu::None && self.player.scrub.get().is_none();
+        if hide {
+            crate::ui::hide_player_tooltips();
+            self.player.preview.cancel();
+        }
         if was_stalled != stalled || hide {
             self.player.state.write(|s| {
                 s.stalled = stalled;
@@ -933,6 +982,10 @@ impl App {
     }
 
     pub fn stop_playback(&self) {
+        self.player.subtitle_follow.suspend();
+        self.player.subtitle_follow.set_pressed(false);
+        crate::ui::hide_player_tooltips();
+        self.player.preview.clear();
         // Also restore the window if playback is still preparing without an engine.
         if self.player.fullscreen.get_untracked() {
             self.apply_fullscreen(false);
@@ -1138,20 +1191,36 @@ impl App {
 
     /// Opens the line list, scrolled to where the subtitles currently are.
     pub fn open_subtitle_sync(&self) {
-        let position = self.player.position.get_untracked();
-        let delay = self.player.state.peek(|s| s.sub_delay);
-        let cues = self.player.cue_list();
-        let index = cues
-            .iter()
-            .position(|cue| cue.end > position - delay)
-            .unwrap_or(cues.len().saturating_sub(1));
         self.player.state.write(|s| s.menu = Menu::Sync);
+        self.scroll_subtitle_sync_to_current();
+    }
+
+    /// Returns to the playing line or marker and resumes following playback.
+    pub fn scroll_subtitle_sync_to_current(&self) {
+        self.player.subtitle_follow.resume();
         self.player_activity();
-        let offset = (index.saturating_sub(2)) as f32 * Self::SYNC_ROW;
-        // After the list has been built with its new contents.
-        ui(move |app| {
-            app.controllers.sync_list.jump_to(offset);
+        self.queue_subtitle_follow();
+    }
+
+    fn queue_subtitle_follow(&self) {
+        if self.player.subtitle_follow.pending.replace(true) { return; }
+        let app = self.clone();
+        // Wait for the marker and list extents to reflect this playback tick.
+        add_post_frame_callback(move |_| {
+            let follow = &app.player.subtitle_follow;
+            follow.pending.set(false);
+            if !follow.enabled.get() || app.player.state.peek(|s| s.menu != Menu::Sync) { return; }
+            let position = app.player.position.get_untracked();
+            let delay = app.player.state.peek(|s| s.sub_delay);
+            let cues = app.player.cue_list();
+            let index = subtitles::position_at(&cues, position - delay).index;
+            let controller = &app.controllers.sync_list;
+            let offset = (index.saturating_sub(2)) as f32 * Self::SYNC_ROW;
+            follow.automatic.set(true);
+            controller.jump_to(offset.clamp(controller.min_offset(), controller.max_offset()));
+            follow.automatic.set(false);
         });
+        schedule_frame();
     }
 
     /// Re-times the subtitles so the line starting at `cue_start` is the one
@@ -1334,5 +1403,50 @@ impl App {
                 app.notify("Fullscreen is not available");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod subtitle_follow_tests {
+    use super::*;
+
+    fn scroll(kind: ScrollNotificationType) -> ScrollNotification {
+        ScrollNotification {
+            kind, metrics: ScrollMetrics::default(), delta: 20.0,
+            overscroll: 0.0, velocity: 0.0, drag_position: None, depth: 0,
+        }
+    }
+
+    #[test]
+    fn automatic_scrolls_and_layout_updates_keep_following() {
+        let follow = SubtitleFollow::new();
+        follow.on_scroll(scroll(ScrollNotificationType::Metrics));
+        follow.on_scroll(scroll(ScrollNotificationType::Update));
+        assert!(follow.enabled.get());
+        follow.set_pressed(true);
+        follow.automatic.set(true);
+        follow.on_scroll(scroll(ScrollNotificationType::Update));
+        follow.automatic.set(false);
+        assert!(follow.enabled.get());
+    }
+
+    #[test]
+    fn manual_scroll_stays_suspended_until_current_position_resumes_it() {
+        let follow = SubtitleFollow::new();
+        follow.set_pressed(true);
+        follow.on_scroll(scroll(ScrollNotificationType::Update));
+        follow.set_pressed(false);
+        assert!(!follow.enabled.get());
+        follow.on_scroll(scroll(ScrollNotificationType::End));
+        assert!(!follow.enabled.get());
+        follow.resume();
+        assert!(follow.enabled.get());
+        follow.on_scroll(scroll(ScrollNotificationType::UserScroll));
+        assert!(!follow.enabled.get());
+        follow.resume();
+        let mut drag = scroll(ScrollNotificationType::Update);
+        drag.drag_position = Some(Offset::new(10.0, 20.0));
+        follow.on_scroll(drag);
+        assert!(!follow.enabled.get());
     }
 }

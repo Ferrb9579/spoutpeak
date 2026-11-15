@@ -7,6 +7,21 @@ pub struct Cue {
     pub text: String,
 }
 
+/// A playing line, or the insertion point for a marker between sorted cues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CuePosition {
+    pub index: usize,
+    pub in_gap: bool,
+}
+
+pub fn position_at(cues: &[Cue], seconds: f64) -> CuePosition {
+    if let Some(index) = cues.iter().position(|cue| cue.start <= seconds && seconds < cue.end) {
+        CuePosition { index, in_gap: false }
+    } else {
+        CuePosition { index: cues.partition_point(|cue| cue.start <= seconds), in_gap: true }
+    }
+}
+
 /// Parses a whole SRT or VTT document.
 pub fn parse(document: &str) -> Vec<Cue> {
     let normalized = document.replace("\r\n", "\n").replace('\r', "\n");
@@ -82,4 +97,35 @@ pub fn active_text(cues: &[Cue], time: f64) -> String {
         .map(|cue| cue.text.as_str())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+
+    fn cue(start: f64, end: f64) -> Cue {
+        Cue { start, end, text: String::new() }
+    }
+
+    #[test]
+    fn gaps_have_a_marker_before_between_and_after_lines() {
+        let cues = [cue(10.0, 12.0), cue(20.0, 22.0)];
+        for (seconds, index) in [(0.0, 0), (12.0, 1), (19.9, 1), (22.0, 2), (30.0, 2)] {
+            assert_eq!(position_at(&cues, seconds), CuePosition { index, in_gap: true });
+        }
+        for (seconds, index) in [(10.0, 0), (11.9, 0), (20.0, 1), (21.9, 1)] {
+            assert_eq!(position_at(&cues, seconds), CuePosition { index, in_gap: false });
+        }
+        assert_eq!(position_at(&[], 5.0), CuePosition { index: 0, in_gap: true });
+    }
+
+    #[test]
+    fn overlapping_lines_stay_active_until_every_line_has_ended() {
+        let cues = [cue(10.0, 30.0), cue(15.0, 17.0), cue(35.0, 40.0)];
+        assert_eq!(position_at(&cues, 20.0), CuePosition { index: 0, in_gap: false });
+        assert_eq!(position_at(&cues, 30.0), CuePosition { index: 2, in_gap: true });
+        // A positive subtitle delay moves the marker back on the cue timeline.
+        assert_eq!(position_at(&cues, 36.0 - 5.0), CuePosition { index: 2, in_gap: true });
+        assert_eq!(position_at(&cues, 36.0), CuePosition { index: 2, in_gap: false });
+    }
 }

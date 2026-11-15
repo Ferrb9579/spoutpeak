@@ -9,6 +9,7 @@ mod stream_details;
 mod downloads;
 mod motion;
 mod player;
+pub(crate) use player::hide_tooltips as hide_player_tooltips;
 mod together;
 pub mod tooltip;
 mod settings;

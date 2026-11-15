@@ -20,6 +20,9 @@ mod ui;
 mod util;
 mod window;
 
+#[cfg(test)]
+mod text_tests;
+
 use incular::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

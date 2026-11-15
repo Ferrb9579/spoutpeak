@@ -26,6 +26,14 @@ with Mesa software rendering. It uploads a screenshot as `linux-startup`.
 This checks startup, not interactive playback on a hardware GPU. A separate
 job builds/tests the watch server and checks its HTTP health endpoint.
 
+Application tests cover tooltip coordinates on translated/scaled rails, screen
+edge positioning, preview cache limits, and cancellation of stale frames.
+Chinese, Japanese, and Thai text layout tests fail on missing segmentation
+models. With FFmpeg and FFprobe on PATH, run
+`cargo test real_decoder_returns_frames -- --ignored`
+to generate a test video and check actual preview-frame pixels.
+Full-screen screenshot baseline comparisons are not currently configured.
+
 Windows/Linux include checksum-verified FFmpeg 9.0 LGPL builds from
 [FFmpeg-Builds](https://github.com/FFmpeg-Builds/FFmpeg-Builds). macOS uses
 [Martin Riedl's static FFmpeg 9.0.2 GPL builds](https://ffmpeg.martin-riedl.de/),

@@ -65,6 +65,13 @@ fn run(simulation: &Simulation, script: &str, dir: &PathBuf) {
                             _ => {
                                 eprintln!("[script] window {:?}", window.observed_state());
                                 eprintln!("[script] player fullscreen={}", app.player.fullscreen.get_untracked());
+                                let preview = match app.player.preview.frame.get_untracked() {
+                                    crate::player::preview::PreviewFrame::Idle => "idle",
+                                    crate::player::preview::PreviewFrame::Loading => "loading",
+                                    crate::player::preview::PreviewFrame::Ready(_) => "ready",
+                                    crate::player::preview::PreviewFrame::Unavailable => "unavailable",
+                                };
+                                eprintln!("[script] seek preview={preview}");
                                 app.board.peek(|b| eprintln!("[script] carousel index={} paused={}",
                                     b.carousel.index.get_untracked(), b.carousel.paused.get_untracked()));
                             }

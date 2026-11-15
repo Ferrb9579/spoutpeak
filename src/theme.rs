@@ -13,6 +13,7 @@ pub const LINE: Color = Color::rgba(51, 51, 51, 255);
 pub const TEXT: Color = Color::rgba(241, 241, 241, 255);
 pub const MUTED: Color = Color::rgba(159, 159, 159, 255);
 pub const FAINT: Color = Color::rgba(109, 109, 109, 255);
+pub const CONTROL_TINT: Color = Color::rgba(0, 0, 0, 77);
 // Monochrome: the interface is black and white; colour comes only from the
 // artwork on screen (the ambient backdrop, posters, the video itself).
 /// Primary actions and highlights: near-white, with black text on it.
@@ -306,6 +307,11 @@ pub fn glass(radius: f32) -> Container {
 /// `child`, normally a [`glass`] panel, is drawn over it.
 pub fn frosted_glass(child: impl Into<Widget>, radius: f32, sigma: f32) -> Widget {
     ClipRRect::new(radius, incular::widgets::BackdropFilter::blur(sigma, child)).into()
+}
+
+/// Shared background for player controls and tooltips: 30% black opacity.
+pub fn translucent_surface(child: impl Into<Widget>, radius: f32) -> Widget {
+    ClipRRect::new(radius, Container::new().radius(radius).color(CONTROL_TINT).child(child)).into()
 }
 
 pub fn divider() -> Widget {

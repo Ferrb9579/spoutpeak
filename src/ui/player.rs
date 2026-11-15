@@ -3,6 +3,7 @@
 use super::motion::{self, WheelAxis};
 use crate::player::{Menu, Status, SubChoice};
 use crate::player::engine::MAX_VOLUME;
+use crate::player::preview::{PreviewFrame, SeekPreview};
 use crate::state::App;
 use crate::store::{SubtitleEdge, SubtitleStyle};
 use crate::theme::*;
@@ -11,12 +12,9 @@ use incular::controls::{Button, ButtonStyle, StateColor};
 use incular::prelude::*;
 use incular::widgets::{HitTestBehavior, StackFit, CompositedTransformTarget, CompositedTransformFollower, LayerLink, OverlayPortal};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 const OVERLAY: Color = Color::rgba(10, 10, 10, 205);
-/// YouTube's modern control surface: black at 30%, with a 16px backdrop blur.
-const CONTROL_TINT: Color = Color::rgba(0, 0, 0, 77);
 // Liner MiniPlayer: 16px primary glyph, 18px secondary glyphs, 8px gaps.
 const PRIMARY_ICON: f32 = 16.0;
 const CONTROL_ICON: f32 = 18.0;
@@ -25,12 +23,7 @@ const CONTROL_BUTTON: f32 = 30.0;
 const CONTROL_GAP: f32 = 8.0;
 
 fn control_surface(child: impl Into<Widget>, padding: EdgeInsets) -> Widget {
-    let surface = Container::new()
-        .radius(24.0)
-        .color(CONTROL_TINT)
-        .padding(padding)
-        .child(child);
-    frosted_glass(surface, 24.0, 16.0)
+    translucent_surface(Padding::new(padding, child), 24.0)
 }
 
 fn floating_button(child: Widget, size: f32, on_click: impl Fn() + 'static) -> Widget {
@@ -67,19 +60,70 @@ const RAIL: Color = CONTROL_TINT;
 /// How far above the rail the time bubble floats (outside the bar's box).
 const BUBBLE_WIDTH: f32 = 78.0;
 const BUBBLE_HEIGHT: f32 = 24.0;
-const POINTER_WIDTH: f32 = 14.0;
-const POINTER_HEIGHT: f32 = 7.0;
 const BUBBLE_GAP: f32 = 4.0;
+const PREVIEW_WIDTH: f32 = 216.0;
+const PREVIEW_HEIGHT: f32 = 117.0;
+
+#[derive(Clone)]
+struct SeekLabel { duration: f64, preview: SeekPreview }
+
+#[derive(Clone)]
+struct ControlTip {
+    visible: Signal<bool>,
+    turn: Rc<std::cell::Cell<u64>>,
+}
+
+impl ControlTip {
+    fn new() -> Self {
+        Self { visible: Signal::new(false), turn: Rc::new(std::cell::Cell::new(0)) }
+    }
+
+    fn enter(&self) {
+        self.hide();
+        if !TIPS_ENABLED.with(|enabled| enabled.get()) { return; }
+        let mine = self.turn.get();
+        let tip = self.clone();
+        super::tooltip::after_delay(move || tip.show_if_current(mine));
+    }
+
+    fn show_if_current(&self, turn: u64) {
+        if self.turn.get() == turn && TIPS_ENABLED.with(|enabled| enabled.get()) {
+            self.visible.set(true);
+        }
+    }
+
+    fn hide(&self) {
+        // Invalidate pending shows as well as hiding an already visible label.
+        self.turn.set(self.turn.get().wrapping_add(1));
+        if self.visible.get_untracked() { self.visible.set(false); }
+    }
+}
 
 thread_local! {
     /// Where the pointer is over the seek bar (a fraction), for its bubble.
     /// Kept outside the bar, which rebuilds on every position tick.
     static SEEK_HOVER: Signal<Option<f32>> = Signal::new(None);
+    static SEEK_LINK: LayerLink = LayerLink::default();
     static VOLUME_HOVER: Signal<bool> = Signal::new(false);
     static VOLUME_DRAGGING: Signal<bool> = Signal::new(false);
     static VOLUME_POSITION: Signal<Option<f32>> = Signal::new(None);
     static VOLUME_LINK: LayerLink = LayerLink::default();
-    static BUTTON_TIPS: std::cell::RefCell<std::collections::HashMap<String, Signal<bool>>> = Default::default();
+    static BUTTON_TIPS: std::cell::RefCell<std::collections::HashMap<String, ControlTip>> = Default::default();
+    static TIPS_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+fn hide_control_tips() {
+    BUTTON_TIPS.with(|tips| {
+        for tip in tips.borrow().values() { tip.hide(); }
+    });
+}
+
+/// Called before controls fade or the player closes, outside widget builds.
+pub fn hide_tooltips() {
+    TIPS_ENABLED.with(|enabled| enabled.set(false));
+    hide_control_tips();
+    SEEK_HOVER.with(|hover| hover.set(None));
+    VOLUME_POSITION.with(|hover| hover.set(None));
 }
 
 /// A borderless, boxy rail with grey `buffered` (start, end) stretches,
@@ -92,7 +136,7 @@ fn track(
     buffered: &[(f32, f32)],
     change: Rc<dyn Fn(f32, bool)>,
     rail: Rail,
-    label: Option<Rc<dyn Fn(f32) -> String>>,
+    label: Option<SeekLabel>,
     hover: Signal<Option<f32>>,
 ) -> Widget {
     let fraction = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 0.0 };
@@ -121,11 +165,7 @@ fn track(
 
     let mut parts: Vec<Widget> = vec![
         Positioned::new(
-            frosted_glass(
-                Container::new().width(width).height(rail.height).radius(rail.radius).color(RAIL),
-                rail.radius,
-                16.0,
-            ),
+            Container::new().width(width).height(rail.height).radius(rail.radius).color(RAIL),
         )
         .left(0.0)
         .top(rail_top)
@@ -154,8 +194,9 @@ fn track(
         .top(top)
         .into(),
     );
+    let link = SEEK_LINK.with(Clone::clone);
     if let Some(label) = label.clone() {
-        parts.push(bubble(width, rail_top, label, hover.clone()));
+        parts.push(bubble(width, rail_top, label, hover.clone(), link.clone()));
     }
 
     let visual = SizedBox::new()
@@ -166,6 +207,9 @@ fn track(
     let hovering = label.is_some();
     let set_hover = move |value: Option<f32>| {
         if hovering {
+            if let Some(label) = &label {
+                label.preview.request(value.map(|at| f64::from(at) * label.duration));
+            }
             hover.set(value);
         }
     };
@@ -187,21 +231,27 @@ fn track(
     if !hovering {
         return gestures.into();
     }
+    let target = CompositedTransformTarget::new(link.clone(), gestures);
     let exit_hover = set_hover.clone();
-    MouseRegion::new(gestures)
-        .on_hover(move |event| set_hover(Some(at(event.local_position.x))))
+    MouseRegion::new(target)
+        .on_hover(move |event| set_hover(link.leader_transform()
+            .and_then(|transform| track_hover_fraction(width, event.position, transform))))
         .on_exit(move |_| exit_hover(None))
         .into()
 }
 
-/// The time bubble: a white rounded label with a small pointer, above the
-/// rail at the hovered position. Rebuilds alone as the pointer moves.
-fn bubble_geometry(width: f32, fraction: f32) -> (f32, f32) {
-    let centre = fraction.clamp(0.0, 1.0) * width;
-    let left = (centre - BUBBLE_WIDTH / 2.0).clamp(0.0, (width - BUBBLE_WIDTH).max(0.0));
-    // Clamp the label, never its arrow: the tip follows the actual pointer
-    // even at the beginning and end of the timeline.
-    (left, centre - POINTER_WIDTH / 2.0)
+/// MouseRegion hover events currently carry window coordinates. Convert them
+/// through the painted rail, rather than counting its padding as seek time.
+fn track_hover_fraction(width: f32, position: Offset, transform: AffineTransform) -> Option<f32> {
+    if !width.is_finite() || width <= 0.0 { return None; }
+    let local = transform.inverse_transform_point(position)?;
+    local.x.is_finite().then(|| (local.x / width).clamp(0.0, 1.0))
+}
+
+/// The timestamp/preview card above the hovered rail position.
+/// Rebuilds alone as the pointer moves.
+fn bubble_left(anchor: f32, width: f32, left_edge: f32, right_edge: f32) -> f32 {
+    (anchor - width / 2.0).clamp(left_edge, (right_edge - width).max(left_edge))
 }
 
 #[cfg(test)]
@@ -209,68 +259,128 @@ mod bubble_tests {
     use super::*;
 
     #[test]
-    fn arrow_tracks_the_pointer_even_when_the_label_is_clamped() {
+    fn clicked_or_hidden_controls_cannot_show_a_pending_tooltip() {
+        TIPS_ENABLED.with(|enabled| enabled.set(true));
+        let tip = ControlTip::new();
+        let pending = tip.turn.get();
+        tip.hide();
+        tip.show_if_current(pending);
+        assert!(!tip.visible.get_untracked());
+
+        tip.show_if_current(tip.turn.get());
+        assert!(tip.visible.get_untracked());
+        tip.hide();
+        assert!(!tip.visible.get_untracked());
+
+        TIPS_ENABLED.with(|enabled| enabled.set(false));
+        tip.show_if_current(tip.turn.get());
+        assert!(!tip.visible.get_untracked());
+        TIPS_ENABLED.with(|enabled| enabled.set(true));
+    }
+
+    #[test]
+    fn popup_stays_inside_the_viewport_at_timeline_ends() {
         for fraction in [0.0, 0.01, 0.5, 0.99, 1.0] {
-            let (label, arrow) = bubble_geometry(800.0, fraction);
-            assert_eq!(arrow + POINTER_WIDTH / 2.0, fraction * 800.0);
-            assert!(label >= 0.0 && label + BUBBLE_WIDTH <= 800.0);
+            let label = bubble_left(fraction * 800.0, BUBBLE_WIDTH, -12.0, 812.0);
+            assert!(label >= -12.0 && label + BUBBLE_WIDTH <= 812.0);
         }
     }
 
     #[test]
-    fn volume_popup_keeps_its_label_inside_the_short_track() {
-        assert_eq!(bubble_geometry(84.0, 0.0).0, 0.0);
-        assert_eq!(bubble_geometry(84.0, 1.0).0, 84.0 - BUBBLE_WIDTH);
+    fn volume_popup_stays_centred_even_at_the_track_ends() {
+        for anchor in [0.0, 40.74, 84.0] {
+            let left = bubble_left(anchor, BUBBLE_WIDTH, f32::NEG_INFINITY, f32::INFINITY);
+            assert_eq!(left + BUBBLE_WIDTH / 2.0, anchor);
+        }
     }
+
+    #[test]
+    fn hovering_the_thumb_preserves_its_position_through_offsets_and_scaling() {
+        let duration = 42.0 * 60.0 + 59.0;
+        let position = 38.0 * 60.0 + 11.0;
+        for width in [800.0f32, 1280.0, 1666.6666] {
+            for origin in [20.0, 100.0, 320.0] {
+                for scale in [1.0f32, 1.25, 1.5, 2.0] {
+                    let transform = AffineTransform::from_coefficients([
+                        f64::from(scale), 0.0, 0.0, f64::from(scale), f64::from(origin), 700.0]);
+                    let thumb = width * (position / duration) as f32;
+                    let pointer = Offset::new(origin + thumb * scale, 700.0 + 14.0 * scale);
+                    let at = track_hover_fraction(width, pointer, transform).unwrap();
+                    let left = bubble_left(width * at, BUBBLE_WIDTH, -12.0, width + 12.0);
+                    assert!((left + BUBBLE_WIDTH / 2.0 - thumb).abs() < 0.001);
+                    assert!((f64::from(at) * duration - position).abs() < 0.001);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hover_conversion_clamps_to_the_rail_and_ignores_unusable_geometry() {
+        let transform = AffineTransform::translation(Offset::new(100.0, 50.0));
+        assert_eq!(track_hover_fraction(84.0, Offset::new(90.0, 64.0), transform), Some(0.0));
+        assert_eq!(track_hover_fraction(84.0, Offset::new(200.0, 64.0), transform), Some(1.0));
+        assert_eq!(track_hover_fraction(0.0, Offset::ZERO, transform), None);
+        assert_eq!(track_hover_fraction(84.0, Offset::ZERO, AffineTransform::scale(0.0)), None);
+    }
+
+
 }
 
-fn bubble(width: f32, rail_top: f32, label: Rc<dyn Fn(f32) -> String>, hover: Signal<Option<f32>>) -> Widget {
-    Positioned::new(IgnorePointer::new(Builder::new(move |_| {
+fn bubble(width: f32, rail_top: f32, label: SeekLabel, hover: Signal<Option<f32>>, link: LayerLink) -> Widget {
+    Positioned::new(IgnorePointer::new(Builder::new(move |context| {
         let Some(at) = hover.get() else {
             return SizedBox::shrink().into();
         };
-        let (left, pointer) = bubble_geometry(width, at);
-        SizedBox::new().width(width).height(BUBBLE_HEIGHT + POINTER_HEIGHT)
+        let frame = label.preview.frame.get();
+        let show_preview = !matches!(frame, PreviewFrame::Unavailable);
+        let card_width = if show_preview { PREVIEW_WIDTH } else { BUBBLE_WIDTH };
+        let card_height = BUBBLE_HEIGHT + if show_preview { PREVIEW_HEIGHT + 4.0 } else { 0.0 };
+        let transform = link.leader_transform().unwrap_or_default();
+        let origin = transform.transform_point(Offset::ZERO);
+        let viewport = context.media_query_size().map_or(width + origin.x * 2.0, |size| size.width);
+        let min = transform.inverse_transform_point(Offset::new(8.0, origin.y)).map_or(0.0, |at| at.x);
+        let max = transform.inverse_transform_point(Offset::new(viewport - 8.0, origin.y)).map_or(width, |at| at.x);
+        let left = bubble_left(width * at, card_width, min, max);
+        let preview = show_preview.then(|| match frame {
+            PreviewFrame::Ready(image) => ClipRRect::new(4.0,
+                Image::new(image).width(PREVIEW_WIDTH - 8.0).height(PREVIEW_HEIGHT).fit(BoxFit::Contain)).into(),
+            _ => Container::new().width(PREVIEW_WIDTH - 8.0).height(PREVIEW_HEIGHT)
+                .alignment(Alignment::CENTER).child(spinner(18.0)).into(),
+        });
+        Transform::translation(Offset::new(0.0, -card_height),
+            SizedBox::new().width(width).height(card_height)
             .child(layers(vec![
-                Positioned::new(Container::new()
-                    .width(BUBBLE_WIDTH)
-                    .height(BUBBLE_HEIGHT)
-                    .alignment(Alignment::CENTER)
-                    .radius(4.0)
-                    .color(Color::WHITE)
-                    .child(text(label(at), 12.5, FontWeight::W600, ON_SELECTED)))
+                Positioned::new(bubble_card(format_time(f64::from(at) * label.duration),
+                    card_width, preview))
                     .left(left).top(0.0).into(),
-                Positioned::new(CustomPaint::from_painter(Size::new(POINTER_WIDTH, POINTER_HEIGHT), Pointer(false)))
-                    .left(pointer).top(BUBBLE_HEIGHT).into(),
-            ]).clip_behavior(incular::config::Clip::None))
-        .into()
+            ]).clip_behavior(incular::config::Clip::None))).into()
     })))
     .left(0.0)
-    .top(rail_top - BUBBLE_HEIGHT - POINTER_HEIGHT - BUBBLE_GAP)
+    .top(rail_top - BUBBLE_GAP)
     .into()
 }
 
-/// The bubble's downward pointer: a small white triangle.
-struct Pointer(bool);
-
-impl CustomPainter for Pointer {
-    fn paint(&self, size: Size) -> DisplayList {
-        let mut builder = Path::builder();
-        let (base, tip) = if self.0 { (size.height, 0.0) } else { (0.0, size.height) };
-        builder.move_to(Offset::new(0.0, base));
-        builder.line_to(Offset::new(size.width, base));
-        builder.line_to(Offset::new(size.width / 2.0, tip));
-        builder.close();
-        let mut canvas = Canvas::default();
-        canvas.fill_path(Arc::new(builder.build()), Color::WHITE, FillRule::NonZero);
-        canvas.finish()
-    }
-    fn should_repaint(&self, _: &Self) -> bool {
-        false
-    }
+/// Translucency affects the background only, keeping captions fully legible.
+fn tooltip_bubble(label: String, width: f32) -> Widget {
+    bubble_card(label, width, None)
 }
 
-/// The same white label and arrow used by the timeline, anchored to a control.
+fn bubble_card(label: String, width: f32, preview: Option<Widget>) -> Widget {
+    let preview_height = if preview.is_some() { PREVIEW_HEIGHT + 4.0 } else { 0.0 };
+    let body_height = BUBBLE_HEIGHT + preview_height;
+    let mut children = vec![
+        Positioned::new(Container::new().width(width).height(BUBBLE_HEIGHT)
+            .alignment(Alignment::CENTER).child(text(label, 12.5, FontWeight::W600, TEXT)))
+            .left(0.0).top(preview_height).into(),
+    ];
+    if let Some(preview) = preview {
+        children.push(Positioned::new(preview).left(4.0).top(4.0).into());
+    }
+    translucent_surface(SizedBox::new().width(width).height(body_height)
+        .child(layers(children).clip_behavior(incular::config::Clip::None)), 6.0)
+}
+
+/// A translucent label anchored to a player control.
 fn player_tip(label: impl Into<String>, child: Widget) -> Widget {
     player_tip_at(label, child, false)
 }
@@ -279,13 +389,13 @@ fn player_tip_at(label: impl Into<String>, child: Widget, below: bool) -> Widget
     let label = label.into();
     let child = child.accessibility_label(label.clone());
     let hover = BUTTON_TIPS.with(|tips| tips.borrow_mut()
-        .entry(label.clone()).or_insert_with(|| Signal::new(false)).clone());
+        .entry(label.clone()).or_insert_with(ControlTip::new).clone());
     Builder::new(move |_| {
-        let visible = hover.get();
+        let visible = hover.visible.get();
         let (enter, exit) = (hover.clone(), hover.clone());
         let anchor = MouseRegion::new(child.clone())
-            .on_enter(move |_| { enter.set(true); })
-            .on_exit(move |_| { exit.set(false); });
+            .on_enter(move |_| { enter.enter(); })
+            .on_exit(move |_| { exit.hide(); });
         let caption = label.clone();
         OverlayPortal::new(anchor).presentation(incular::config::TransientPresentation::Overlay)
             .role(incular::config::TransientRole::Tooltip).root_overlay(true)
@@ -297,15 +407,11 @@ fn player_tip_at(label: impl Into<String>, child: Widget, below: bool) -> Widget
                 let top = if below {
                     info.anchor_rect.origin.y + info.anchor_rect.size.height + BUBBLE_GAP
                 } else {
-                    info.anchor_rect.origin.y - BUBBLE_GAP - BUBBLE_HEIGHT - POINTER_HEIGHT
+                    info.anchor_rect.origin.y - BUBBLE_GAP - BUBBLE_HEIGHT
                 };
                 IgnorePointer::new(Stack::new(vec![
-                    Positioned::new(Container::new().width(width).height(BUBBLE_HEIGHT)
-                        .alignment(Alignment::CENTER).radius(4.0).color(Color::WHITE)
-                        .child(text(caption.clone(), 12.5, FontWeight::W600, ON_SELECTED)))
-                        .left(left).top(top + if below { POINTER_HEIGHT } else { 0.0 }).into(),
-                    Positioned::new(CustomPaint::from_painter(Size::new(POINTER_WIDTH, POINTER_HEIGHT), Pointer(below)))
-                        .left(centre - POINTER_WIDTH / 2.0).top(top + if below { 0.0 } else { BUBBLE_HEIGHT }).into(),
+                    Positioned::new(tooltip_bubble(caption.clone(), width))
+                        .left(left).top(top).into(),
                 ] as Vec<Widget>).fit(StackFit::Expand)).into()
             })
             .show(visible).into()
@@ -322,8 +428,7 @@ fn seek_bar(app: &App) -> Widget {
             .state
             .peek(|s| (s.duration, s.torrent.as_ref().map(|t| t.ranges.clone()).unwrap_or_default()));
         let fraction = if duration > 0.0 { (position / duration) as f32 } else { 0.0 };
-        let label: Option<Rc<dyn Fn(f32) -> String>> = (duration > 0.0)
-            .then(|| Rc::new(move |at: f32| format_time(f64::from(at) * duration)) as Rc<dyn Fn(f32) -> String>);
+        let label = (duration > 0.0).then(|| SeekLabel { duration, preview: app.player.preview.clone() });
         let app = app.clone();
         track(
             width,
@@ -1164,13 +1269,16 @@ fn caption_block(lines: &[&str], size: f32, style: &SubtitleStyle) -> Widget {
 /// Every subtitle line with its time. Clicking the line being spoken right
 /// now re-times the whole track, instead of guessing a delay.
 fn sync_panel(app: &App) -> Widget {
+    let app = app.clone();
+    Builder::new(move |_| sync_panel_content(&app)).into()
+}
+
+fn sync_panel_content(app: &App) -> Widget {
     const WIDTH: f32 = 470.0;
     let cues = Rc::new(app.player.cue_list());
     let (delay, paused) = app.player.state.peek(|s| (s.sub_delay, s.paused));
-    let position = app.player.position.get_untracked();
-    let current = cues
-        .iter()
-        .position(|cue| cue.start <= position - delay && position - delay < cue.end);
+    let position = app.player.position.get();
+    let current = crate::player::subtitles::position_at(&cues, position - delay);
 
     let (back, reset, pause) = (app.clone(), app.clone(), app.clone());
     let header = hrow(vec![
@@ -1219,11 +1327,28 @@ fn sync_panel(app: &App) -> Widget {
     } else {
         let controller = app.controllers.sync_list.clone();
         let wheel_controller = controller.clone();
+        let (scroll_follow, wheel_follow, press_follow, release_follow, cancel_follow) = (
+            app.player.subtitle_follow.clone(), app.player.subtitle_follow.clone(),
+            app.player.subtitle_follow.clone(), app.player.subtitle_follow.clone(),
+            app.player.subtitle_follow.clone(),
+        );
         let app = app.clone();
-        let count = cues.len();
-        let list = ListView::builder(count, move |index| {
+        let count = cues.len() + usize::from(current.in_gap);
+        let list = ListView::builder(count, move |index| -> Widget {
+            if current.in_gap && index == current.index {
+                return SizedBox::new().height(App::SYNC_ROW).child(Center::new(hrow(vec![
+                    Container::new().width(6.0).height(6.0).radius(3.0).color(TEXT).into(),
+                    hgap(8.0),
+                    text(format!("{} · Current position", format_time(position)), 12.0,
+                        FontWeight::W600, TEXT).into(),
+                    hgap(10.0),
+                    Expanded::new(Container::new().height(1.0)
+                        .color(Color::rgba(255, 255, 255, 110))).into(),
+                ]))).into();
+            }
+            let index = index - usize::from(current.in_gap && index > current.index);
             let cue = &cues[index];
-            let selected = current == Some(index);
+            let selected = !current.in_gap && current.index == index;
             let start = cue.start;
             let app = app.clone();
             let background = if selected { ACCENT_DIM } else { Color::TRANSPARENT };
@@ -1256,11 +1381,20 @@ fn sync_panel(app: &App) -> Widget {
                 ..ButtonStyle::default()
             })
             .on_click(move || app.sync_subtitle_to(start))
+            .into()
         })
         .item_extent(App::SYNC_ROW)
         .physics(motion::APP_SCROLLED)
         .controller(controller);
-        motion::wheel(&wheel_controller, WheelAxis::Vertical, list)
+        NotificationListener::new(Listener::new(motion::wheel(&wheel_controller, WheelAxis::Vertical, list))
+            .on_pointer_signal(move |event| {
+                if event.scroll_delta.y != 0.0 { wheel_follow.suspend(); }
+            })
+            .on_pointer_down(move |_| press_follow.set_pressed(true))
+            .on_pointer_up(move |_| release_follow.set_pressed(false))
+            .on_pointer_cancel(move |_| cancel_follow.set_pressed(false)))
+            .on_notification(move |event| { scroll_follow.on_scroll(event); false })
+            .into()
     };
 
     Container::new()
@@ -1284,7 +1418,16 @@ fn sync_panel(app: &App) -> Widget {
                 )
                 .into(),
                 gap(8.0),
-                SizedBox::new().height(30.0).child(status).into(),
+                SizedBox::new().height(30.0).child(if app.player.cue_count() == 0 {
+                    status
+                } else {
+                    let jump = app.clone();
+                    hrow(vec![
+                        Expanded::new(status).into(),
+                        hgap(8.0),
+                        pill("Current position", false, move || jump.scroll_subtitle_sync_to_current()),
+                    ]).into()
+                }).into(),
                 gap(6.0),
                 Expanded::new(list).into(),
             ])
@@ -1453,8 +1596,20 @@ fn volume_control(app: &App) -> Widget {
             VOLUME_DRAGGING.with(|dragging| dragging.set(!committed));
             change.set_volume(value * MAX_VOLUME);
         }), Rail::THIN, None, VOLUME_POSITION.with(Clone::clone));
+        let hover_link = link.clone();
         let rail = MouseRegion::new(CompositedTransformTarget::new(link.clone(), rail))
-            .on_hover(|event| { VOLUME_POSITION.with(|value| value.set(Some((event.local_position.x / 84.0).clamp(0.0, 1.0)))); })
+            .on_hover(move |event| {
+                // Expanding the slider can rebuild its button before an exit
+                // event arrives. Do not leave its old tip over the volume tip.
+                BUTTON_TIPS.with(|tips| {
+                    for label in ["Mute", "Unmute"] {
+                        if let Some(tip) = tips.borrow().get(label) { tip.hide(); }
+                    }
+                });
+                let at = hover_link.leader_transform()
+                    .and_then(|transform| track_hover_fraction(84.0, event.position, transform));
+                VOLUME_POSITION.with(|value| value.set(at));
+            })
             .on_exit(|_| { VOLUME_POSITION.with(|value| value.set(None)); });
         let extra: Widget = row(vec![hgap(6.0), rail.into(), hgap(10.0)]).into();
         let hover = app.clone();
@@ -1473,15 +1628,16 @@ fn volume_control(app: &App) -> Widget {
                 VOLUME_POSITION.with(|value| value.set(None));
             });
         let at = VOLUME_POSITION.with(|value| value.get());
-        let (left, pointer) = bubble_geometry(84.0, at.unwrap_or(shown / MAX_VOLUME));
-        let popup = SizedBox::new().width(84.0).height(BUBBLE_HEIGHT + POINTER_HEIGHT)
+        // The label displays the actual volume, so point at its thumb rather
+        // than at a different volume under the hovering mouse.
+        let centre = ((shown / MAX_VOLUME).clamp(0.0, 1.0) * 84.0 - Rail::THIN.thumb / 2.0)
+            .clamp(0.0, 84.0 - Rail::THIN.thumb) + Rail::THIN.thumb / 2.0;
+        let left = bubble_left(centre,
+            BUBBLE_WIDTH, f32::NEG_INFINITY, f32::INFINITY);
+        let popup = SizedBox::new().width(84.0).height(BUBBLE_HEIGHT)
             .child(layers(vec![
-                Positioned::new(Container::new().width(BUBBLE_WIDTH).height(BUBBLE_HEIGHT)
-                    .alignment(Alignment::CENTER).radius(4.0).color(Color::WHITE)
-                    .child(text(format!("{:.0}%", shown * 100.0), 12.5, FontWeight::W600, ON_SELECTED)))
+                Positioned::new(tooltip_bubble(format!("{:.0}%", shown * 100.0), BUBBLE_WIDTH))
                     .left(left).top(0.0).into(),
-                Positioned::new(CustomPaint::from_painter(Size::new(POINTER_WIDTH, POINTER_HEIGHT), Pointer(false)))
-                    .left(pointer).top(BUBBLE_HEIGHT).into(),
             ]).clip_behavior(incular::config::Clip::None));
         OverlayPortal::new(surface).presentation(incular::config::TransientPresentation::Overlay)
             .role(incular::config::TransientRole::Tooltip).root_overlay(true)
@@ -1579,7 +1735,7 @@ fn bottom_bar(app: &App) -> Widget {
                 format!("{} peers · {}", stats.peers, format_speed(stats.download_speed)),
                 12.0,
                 FontWeight::W500,
-                MUTED,
+                TEXT,
             ))), EdgeInsets::symmetric(12.0, 0.0)))
                 .behavior(HitTestBehavior::Opaque)
                 .on_tap(move || peers.set_player_menu(Menu::Peers)).into()),
@@ -1674,7 +1830,7 @@ fn up_next_card(app: &App, next: &crate::addons::types::Video, left: u32, lifted
                     play.play_next(video.clone())
                 }),
                 hgap(8.0),
-                button("Cancel", Tone::Glass, move || cancel.cancel_up_next()),
+                button("Cancel", Tone::Neutral, move || cancel.cancel_up_next()),
             ])
             .into(),
         ]));
@@ -1986,7 +2142,7 @@ pub fn screen(app: &App) -> Widget {
         }
         Status::Ended => {
             let (replay, forward) = (app.clone(), app.clone());
-            let mut actions = vec![button("Replay", Tone::Glass, move || replay.seek_to(0.0))];
+            let mut actions = vec![button("Replay", Tone::Neutral, move || replay.seek_to(0.0))];
             if let Some(next) = next.clone() {
                 actions.push(hgap(10.0));
                 actions.push(button("Next episode", Tone::Primary, move || {
@@ -2034,6 +2190,7 @@ pub fn screen(app: &App) -> Widget {
     // The controls fade in and out. While fading out they stay in the tree
     // but ignore the pointer; a rebuild after the fade removes them.
     let fade = CHROME.with(|c| c.clone());
+    TIPS_ENABLED.with(|enabled| enabled.set(visible));
     if CHROME_SHOWN.with(|shown| shown.replace(visible)) != visible {
         fade.fade_to(
             if visible { 1.0 } else { 0.0 },
@@ -2080,7 +2237,8 @@ pub fn screen(app: &App) -> Widget {
         surface_layers.push(popup_layer(app, motion::pop_in(super::together::player_panel(app), 8.0).into()));
     }
     KeyboardListener::new(
-        MouseRegion::new(Stack::new(surface_layers).fit(StackFit::Expand))
+        MouseRegion::new(Listener::new(Stack::new(surface_layers).fit(StackFit::Expand))
+            .on_pointer_down(|_| hide_control_tips()))
             .on_hover(move |_| hover.player_activity()),
     )
     .focus_node(app.controllers.player_focus.clone())

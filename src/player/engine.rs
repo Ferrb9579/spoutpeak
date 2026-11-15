@@ -1222,7 +1222,7 @@ const HDR_TO_SDR: &str = ",zscale=t=linear:npl=203,format=gbrpf32le,zscale=p=bt7
 
 /// The decoder's filter chain: frame rate, size and the colour conversion the
 /// source needs to look right as SDR RGBA.
-fn video_filter(info: &MediaInfo, width: u32, height: u32, fps: f64, live: bool) -> String {
+pub(super) fn video_filter(info: &MediaInfo, width: u32, height: u32, fps: f64, live: bool) -> String {
     let probe = if live { "showinfo," } else { "" };
     let rate = format!("fps={fps:.3}");
     if info.dolby_vision && libplacebo_available() {
