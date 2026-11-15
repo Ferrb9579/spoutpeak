@@ -1406,15 +1406,17 @@ fn bottom_bar(app: &App) -> Widget {
         menu_controls.push(menu_button(glyph, open, changed, move || app.set_player_menu(target)));
         menu_controls.push(hgap(CONTROL_GAP));
     }
+    let fullscreen = app.player.fullscreen.get();
+    let fullscreen_label = if fullscreen { "Exit fullscreen" } else { "Enter fullscreen" };
     menu_controls.push(icon_button(
         icon(
-            if app.player.state.read(|s| s.fullscreen) { icons::minimize() } else { icons::maximize() },
+            if fullscreen { icons::minimize() } else { icons::maximize() },
             CONTROL_ICON,
             TEXT,
-        ),
+        ).accessibility_label(fullscreen_label),
         CONTROL_BUTTON,
         action(|app| app.toggle_fullscreen()),
-    ));
+    ).accessibility_label(fullscreen_label));
     controls.push(control_surface(row(menu_controls), EdgeInsets::symmetric(4.0, 2.0)));
 
     Container::new()

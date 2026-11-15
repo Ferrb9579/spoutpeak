@@ -2,7 +2,7 @@
 
 use super::motion;
 use super::widgets::*;
-use crate::state::{App, FeaturedCarousel, LibrarySort, Load, Route, featured_titles, ui};
+use crate::state::{App, FeaturedCarousel, LibrarySort, Load, featured_titles, ui};
 use crate::addons::types::{LibraryItem, Meta};
 use crate::theme::*;
 use incular::prelude::*;
@@ -87,35 +87,107 @@ fn continue_watching(app: &App) -> Option<Widget> {
     )
 }
 
-/// One featured slide. The carousel clips the completed image and scrim once.
+/// A near-widescreen canvas keeps landscape artwork close to its original crop.
 fn hero_height(width: f32) -> f32 {
-    (width * 0.34).clamp(340.0, 480.0)
+    (width * 0.5).max(340.0)
 }
 
-/// Keep the complete landscape image on the right; a blurred extension fills
-/// the remaining space rather than cropping faces to fit an ultrawide strip.
+/// One continuous artwork surface, without a separate area reserved for copy.
 fn hero_art(url: Option<&str>, width: f32, height: f32) -> Widget {
     let Some(url) = url else { return SizedBox::new().into(); };
     let picture = crate::images::picture(url, 1920);
-    let blurred = crate::images::blurred(url);
     Builder::new(move |_| {
-        let mut art = Vec::new();
-        if let crate::images::Picture::Ready(handle) = blurred.get() {
-            art.push(Image::new(handle).width(width).height(height).fit(BoxFit::Cover).into());
+        match picture.get() {
+            crate::images::Picture::Ready(handle) => Image::new(handle)
+                .width(width).height(height).fit(BoxFit::Cover).into(),
+            _ => SizedBox::new().into(),
         }
-        if let crate::images::Picture::Ready(handle) = picture.get() {
-            art.push(Image::new(handle).width(width).height(height)
-                .fit(BoxFit::Contain).alignment(Alignment::CENTER_RIGHT).into());
-        }
-        layers(art).fit(incular::widgets::StackFit::Expand).into()
     }).into()
 }
 
-fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
+#[derive(Clone, Copy, PartialEq)]
+struct HeroCaptionLayout {
+    progress: f32,
+    inset: f32,
+    baseline: f32,
+    copy_width: f32,
+}
+
+impl MultiChildLayoutDelegate for HeroCaptionLayout {
+    fn perform_layout(&self, size: Size, children: &mut MultiChildLayoutContext<'_>) {
+        let copy = children.layout_child("copy", Constraints::loose(
+            Size::new(self.copy_width, (size.height - self.baseline - self.inset).max(0.0)),
+        ));
+        // Measure the wrapped synopsis, reserving the top controls and keeping
+        // the entire title inside the artwork even for very long descriptions.
+        let max_lift = (size.height - self.baseline - copy.height - self.inset - 44.0)
+            .clamp(0.0, 160.0);
+        let description = children.layout_child("description", Constraints::loose(
+            Size::new(self.copy_width.min(640.0), (max_lift - 16.0).max(0.0)),
+        ));
+        let lift = (description.height + 16.0).min(max_lift);
+        let top = size.height - self.baseline - copy.height - lift * self.progress;
+        children.position_child("copy", Offset::new(self.inset, top));
+        children.position_child("description", Offset::new(self.inset, top + copy.height + 16.0));
+    }
+
+    fn should_relayout(&self, old: &Self) -> bool {
+        self != old
+    }
+}
+
+fn hero_caption(copy: Widget, description: Option<&str>, hovered: Signal<bool>,
+    width: f32, height: f32, inset: f32) -> Widget {
+    let compact = width < 800.0;
+    let copy_width = width - inset * 2.0 - if compact { 0.0 } else { 250.0 };
+    let baseline = inset + if compact { 56.0 } else { 0.0 };
+    let Some(description) = description.filter(|description| !description.trim().is_empty()) else {
+        return Positioned::new(copy).left(inset).width(copy_width).bottom(baseline).into();
+    };
+    let description = text(description.to_owned(), 14.0, FontWeight::W400,
+        Color::rgba(230, 232, 235, 255))
+        .max_lines(Some(5)).overflow(TextOverflow::Ellipsis);
+    let scrim: Widget = Container::new().width(width).height(height)
+        .decoration(BoxDecoration::new().gradient(LinearGradient::new(
+            Offset::ZERO, Offset::new(0.0, height),
+            GradientStops::new(vec![
+                GradientStop { offset: 0.0, color: Color::TRANSPARENT },
+                GradientStop { offset: 0.40, color: Color::TRANSPARENT },
+                GradientStop { offset: 0.70, color: Color::rgba(6, 9, 10, 120) },
+                GradientStop { offset: 1.0, color: Color::rgba(6, 9, 10, 80) },
+            ]),
+        ))).into();
+    Builder::new(move |_| {
+        let (description, scrim) = (description.clone(), scrim.clone());
+        TweenAnimationBuilder::new(
+            if hovered.get() { 1.0f32 } else { 0.0 },
+            std::time::Duration::from_millis(if incular::animation::disable_animations() { 0 } else { 380 }),
+            move |_, progress, copy| {
+                // Let the caption make room before the synopsis fades in.
+                let opacity = ((progress - 0.35) / 0.65).clamp(0.0, 1.0);
+                layers(vec![
+                    IgnorePointer::new(Opacity::new(progress, scrim.clone())).into(),
+                    CustomMultiChildLayout::new(
+                        HeroCaptionLayout { progress, inset, baseline, copy_width },
+                        vec![
+                            LayoutId::new("copy", copy.expect("the caption is supplied as the animation child")),
+                            LayoutId::new("description", ClipRect::new(IgnorePointer::new(
+                                Opacity::new(opacity, description.clone()),
+                            ))),
+                        ],
+                    ).into(),
+                ]).fit(incular::widgets::StackFit::Expand)
+            },
+        ).curve(Curve::EaseOutCubic).child(copy.clone()).into()
+    }).into()
+}
+
+fn hero(app: &App, meta: &Meta, source: &str, hovered: Signal<bool>) -> Widget {
     let (app, meta, source) = (app.clone(), meta.clone(), source.to_owned());
     LayoutBuilder::new(move |_, constraints| {
         let width = constraints.max_width().clamp(320.0, 2400.0);
         let height = hero_height(width);
+        let inset = if width >= 800.0 { 28.0 } else { 22.0 };
         let art = meta.background.as_deref().or(meta.poster.as_deref());
         let mut facts: Vec<String> = Vec::new();
         facts.extend(meta.release_line());
@@ -125,41 +197,24 @@ fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
         if let Some(runtime) = meta.runtime.as_deref().filter(|r| !r.is_empty()) {
             facts.push(runtime.to_owned());
         }
-        facts.extend(meta.genres.iter().take(3).cloned());
+        facts.extend(meta.genres.iter().take(2).cloned());
 
         let mut copy: Vec<Widget> = vec![
-            text(format!("FEATURED  ·  {}", source.to_uppercase()), 10.5, FontWeight::W700, ACCENT)
-                .into(),
+            line(format!("FEATURED  ·  {}", source.to_uppercase()), 10.0, FontWeight::W700,
+                Color::rgba(222, 222, 222, 255)),
             gap(8.0),
-            SizedBox::new()
-                .width((width - 72.0).min(620.0))
-                .child(line(meta.title().to_owned(), 32.0, FontWeight::W700, TEXT))
-                .into(),
+            line(meta.title().to_owned(), if width >= 800.0 { 30.0 } else { 26.0 },
+                FontWeight::W700, TEXT),
         ];
         if !facts.is_empty() {
             copy.push(gap(6.0));
-            copy.push(text(facts.join("   ·   "), 12.5, FontWeight::W500, MUTED).into());
-        }
-        if let Some(description) = meta.description.as_deref().filter(|d| !d.is_empty()) {
-            copy.push(gap(10.0));
-            copy.push(
-                SizedBox::new()
-                    .width((width - 72.0).min(560.0))
-                    .child(
-                        Text::new(description.to_owned())
-                            .style(style(13.5, FontWeight::W400, Color::rgba(222, 222, 222, 255)))
-                            .max_lines(Some(2))
-                            .overflow(TextOverflow::Ellipsis),
-                    )
-                    .into(),
-            );
+            copy.push(line(facts.join("   ·   "), 12.0, FontWeight::W500,
+                Color::rgba(202, 204, 207, 255)));
         }
         let (open, save) = (app.clone(), app.clone());
         let (open_meta, save_meta) = (meta.clone(), meta.clone());
         let saved = app.in_library(meta.id());
-        copy.push(gap(16.0));
-        copy.push(
-            row(vec![
+        let actions = row(vec![
                 button("View details", Tone::Primary, move || open.open_detail(open_meta.clone())),
                 hgap(10.0),
                 icon_text_button(
@@ -168,9 +223,14 @@ fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
                     Tone::Glass,
                     move || save.toggle_library(&save_meta),
                 ),
-            ])
-            .into(),
-        );
+            ]);
+        let caption = hero_caption(col(copy).cross_axis_alignment(CrossAxisAlignment::Stretch).into(),
+            meta.description.as_deref(), hovered.clone(), width, height, inset);
+        let actions: Widget = if width >= 800.0 {
+            Positioned::new(actions).right(inset).bottom(inset).into()
+        } else {
+            Positioned::new(actions).left(inset).bottom(inset).into()
+        };
 
         let surface = |color: Color| -> Widget {
             Container::new()
@@ -185,17 +245,20 @@ fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
             .child(layers(vec![
                 surface(SURFACE),
                 hero_art(art, width, height),
-                // Keep copy legible while leaving the main artwork visible.
+                // A bottom scrim gives the compact caption contrast while
+                // leaving the scene above it unobstructed.
                 Container::new().width(width).height(height).decoration(BoxDecoration::new().gradient(LinearGradient::new(
-                    Offset::ZERO, Offset::new(width, 0.0),
+                    Offset::ZERO, Offset::new(0.0, height),
                     GradientStops::new(vec![
-                        GradientStop { offset: 0.0, color: Color::rgba(6, 9, 10, 225) },
-                        GradientStop { offset: 0.42, color: Color::rgba(6, 9, 10, 160) },
-                        GradientStop { offset: 0.75, color: Color::rgba(6, 9, 10, 35) },
-                        GradientStop { offset: 1.0, color: Color::rgba(6, 9, 10, 30) },
+                        GradientStop { offset: 0.0, color: Color::TRANSPARENT },
+                        GradientStop { offset: 0.40, color: Color::TRANSPARENT },
+                        GradientStop { offset: 0.65, color: Color::rgba(6, 9, 10, 55) },
+                        GradientStop { offset: 0.82, color: Color::rgba(6, 9, 10, 185) },
+                        GradientStop { offset: 1.0, color: Color::rgba(6, 9, 10, 245) },
                     ]),
                 ))).into(),
-                Positioned::new(col(copy)).left(32.0).bottom(28.0).into(),
+                caption,
+                actions,
             ]))
             .into()
     })
@@ -229,11 +292,13 @@ fn featured_carousel(app: &App, slides: Vec<(Meta, String)>) -> Widget {
     let app = app.clone();
     let slides = Rc::new(slides);
     let carousel = app.board.peek(|board| board.carousel.clone());
+    let hovered = Signal::new(carousel.hovered.get());
     let last_ready = Rc::new(std::cell::RefCell::new(None::<Widget>));
     LayoutBuilder::new(move |_, constraints| {
         let width = constraints.max_width().clamp(320.0, 2400.0);
         let height = hero_height(width);
         let (app, slides, carousel) = (app.clone(), slides.clone(), carousel.clone());
+        let hovered = hovered.clone();
         let last_ready = last_ready.clone();
         Builder::new(move |_| {
             let count = slides.len();
@@ -249,7 +314,7 @@ fn featured_carousel(app: &App, slides: Vec<(Meta, String)>) -> Widget {
                 }
             }
             let slide_key = format!("featured:{}:{}", meta.kind, meta.id());
-            let slide = hero(&app, meta, source).with_key(slide_key.as_str());
+            let slide = hero(&app, meta, source, hovered.clone()).with_key(slide_key.as_str());
             // A fade must start with the artwork, not finish while it loads.
             let ready = meta.background.as_deref().or(meta.poster.as_deref()).is_none_or(|url| {
                 let picture = crate::images::picture(url, 1920).get();
@@ -298,10 +363,16 @@ fn featured_carousel(app: &App, slides: Vec<(Meta, String)>) -> Widget {
                             toggle.toggle_pause();
                         }));
                 }
-                layers.push(Positioned::new(row(controls)).right(20.0).bottom(16.0).into());
+                let controls = Container::new().radius(22.0)
+                    .color(Color::rgba(6, 9, 10, 150))
+                    .padding(EdgeInsets::symmetric(8.0, 5.0))
+                    .child(row(controls));
+                layers.push(Positioned::new(controls).right(18.0).top(18.0).into());
             }
             let enter = carousel.clone();
             let exit = carousel.clone();
+            let reveal = hovered.clone();
+            let conceal = hovered.clone();
             let swipe = carousel.clone();
             let distance = Rc::new(std::cell::Cell::new(0.0f32));
             let start = distance.clone();
@@ -319,8 +390,8 @@ fn featured_carousel(app: &App, slides: Vec<(Meta, String)>) -> Widget {
                 }
             });
             MouseRegion::new(gestures)
-                .on_enter(move |_| enter.hover(true))
-                .on_exit(move |_| exit.hover(false))
+                .on_enter(move |_| { enter.hover(true); reveal.set(true); })
+                .on_exit(move |_| { exit.hover(false); conceal.set(false); })
                 .into()
         }).into()
     }).into()
@@ -343,35 +414,14 @@ pub fn board(app: &App) -> Widget {
             MUTED,
         ));
     }
-    let refresh = {
-        let app = app.clone();
-        super::tooltip::tooltip("Refresh Home",
-            icon_button(icon(icons::rotate_ccw(), 18.0, TEXT).accessibility_label("Refresh Home"), 36.0, move || app.load_board())
-                .accessibility_label("Refresh Home"))
-    };
-    let submit = app.clone();
-    let field = input(&app.controllers.search, "Search movies, series…", 300.0, move |query| {
-        submit.submit_search(query);
-        submit.go(Route::Search);
-    }).size(Size::new(300.0, 36.0));
-    let search = app.clone();
-    let search_button = super::tooltip::tooltip("Search",
-        icon_button(icon(icons::search(), 18.0, TEXT).accessibility_label("Search Home"), 36.0, move || {
-            search.submit_search(search.controllers.search.text());
-            search.go(Route::Search);
-        }).accessibility_label("Search Home"));
-    page(
-        "Home",
-        vec![field.into(), hgap(4.0), search_button, hgap(8.0), refresh],
-        smooth(
-            &app.controllers.board,
-            SingleChildScrollView::new(Padding::new(
-                PAGE_PADDING,
-                col(sections).cross_axis_alignment(CrossAxisAlignment::Stretch),
-            ))
-            .physics(motion::APP_SCROLLED)
-            .controller(app.controllers.board.clone()),
-        ),
+    smooth(
+        &app.controllers.board,
+        SingleChildScrollView::new(Padding::new(
+            EdgeInsets::only(32.0, 12.0, 32.0, 32.0),
+            col(sections).cross_axis_alignment(CrossAxisAlignment::Stretch),
+        ))
+        .physics(motion::APP_SCROLLED)
+        .controller(app.controllers.board.clone()),
     )
 }
 

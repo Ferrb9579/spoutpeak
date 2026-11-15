@@ -5,13 +5,10 @@ use incular::controls::{Button, ButtonStyle, StateColor, TextField, TextFieldSty
 use incular::prelude::*;
 use std::sync::Arc;
 
-pub const PANEL: Color = Color::rgba(23, 23, 23, 255);
-
 pub const BG: Color = Color::rgba(8, 8, 8, 255);
 pub const SIDEBAR: Color = Color::rgba(20, 20, 20, 255);
 pub const SURFACE: Color = Color::rgba(30, 30, 30, 255);
 pub const SURFACE_HI: Color = Color::rgba(42, 42, 42, 255);
-pub const SURFACE_HOVER: Color = Color::rgba(53, 53, 53, 255);
 pub const LINE: Color = Color::rgba(51, 51, 51, 255);
 pub const TEXT: Color = Color::rgba(241, 241, 241, 255);
 pub const MUTED: Color = Color::rgba(159, 159, 159, 255);

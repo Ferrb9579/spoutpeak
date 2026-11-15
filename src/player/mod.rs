@@ -82,7 +82,6 @@ pub struct PlayerState {
     pub brightness: f32,
     pub controls_visible: bool,
     pub menu: Menu,
-    pub fullscreen: bool,
     pub torrent: Option<TorrentStats>,
     pub next: Option<Video>,
     /// Whole seconds left while the "Up next" card is showing.
@@ -111,6 +110,9 @@ pub struct PlayerUi {
     pub frame: Signal<Option<ImageHandle>>,
     pub position: Signal<f64>,
     pub cue: Signal<String>,
+    /// Window mode is independent of playback updates and drives the app frame.
+    pub fullscreen: Signal<bool>,
+    fullscreen_restore_maximized: Rc<Cell<bool>>,
     /// Position being previewed while the seek bar is dragged.
     pub scrub: Rc<Cell<Option<f64>>>,
     pub state: Shared<PlayerState>,
@@ -128,6 +130,8 @@ impl PlayerUi {
             frame: Signal::new(None),
             position: Signal::new(0.0),
             cue: Signal::new(String::new()),
+            fullscreen: Signal::new(false),
+            fullscreen_restore_maximized: Rc::new(Cell::new(false)),
             scrub: Rc::new(Cell::new(None)),
             state: Shared::new(PlayerState {
                 title: String::new(),
@@ -156,7 +160,6 @@ impl PlayerUi {
                 brightness: settings.brightness,
                 controls_visible: true,
                 menu: Menu::None,
-                fullscreen: false,
                 torrent: None,
                 next: None,
                 up_next: None,
@@ -916,6 +919,10 @@ impl App {
     }
 
     pub fn stop_playback(&self) {
+        // Also restore the window if playback is still preparing without an engine.
+        if self.player.fullscreen.get_untracked() {
+            self.apply_fullscreen(false);
+        }
         let engine = self.player.engine.borrow_mut().take();
         let Some(engine) = engine else {
             // Nothing decoding yet, but a torrent may still be preparing:
@@ -935,15 +942,11 @@ impl App {
         self.player.frame.set(None);
         self.player.cue.set(String::new());
         self.player.cues.borrow_mut().clear();
-        let (volume, fullscreen) = self.player.state.write(|s| {
+        let volume = self.player.state.write(|s| {
             s.status = Status::Idle;
             s.menu = Menu::None;
-            let fullscreen = std::mem::replace(&mut s.fullscreen, false);
-            (s.volume, fullscreen)
+            s.volume
         });
-        if fullscreen {
-            self.apply_fullscreen(false);
-        }
         self.update_settings(|s| s.volume = volume);
     }
 
@@ -1277,25 +1280,42 @@ impl App {
     }
 
     pub fn toggle_fullscreen(&self) {
-        let fullscreen = self.player.state.write(|s| {
-            s.fullscreen = !s.fullscreen;
-            s.fullscreen
-        });
-        self.apply_fullscreen(fullscreen);
+        self.apply_fullscreen(!self.player.fullscreen.get_untracked());
     }
 
     fn apply_fullscreen(&self, fullscreen: bool) {
         let mode = fullscreen.then_some(Fullscreen::Borderless);
-        if let Some(window) = self.player.window.borrow().as_ref() {
-            let _ = window.set_fullscreen(mode);
+        let window = self.player.window.borrow().clone();
+        if let Some(window) = window {
+            let was_maximized = fullscreen && window.observed_state().maximized.unwrap_or(false);
+            // An undecorated maximized window can keep a work-area-sized client
+            // surface in borderless mode. Restore it before requesting fullscreen.
+            let request = if was_maximized {
+                window.set_maximized(false).and_then(|()| window.set_fullscreen(mode))
+            } else {
+                window.set_fullscreen(mode)
+            };
+            match request {
+                Ok(()) => {
+                    if fullscreen {
+                        self.player.fullscreen_restore_maximized.set(was_maximized);
+                    } else if self.player.fullscreen_restore_maximized.replace(false) {
+                        if let Err(error) = window.set_maximized(true) {
+                            self.notify(format!("Could not restore window size: {error}"));
+                        }
+                    }
+                    self.player.fullscreen.set(fullscreen);
+                }
+                Err(error) => self.notify(format!("Could not change fullscreen: {error}")),
+            }
             return;
         }
         // The handle is not available while the app is still being built,
         // so it is looked up the first time it is needed.
         crate::state::with_window(move |app, window| {
             if let Some(window) = window {
-                let _ = window.set_fullscreen(mode);
                 *app.player.window.borrow_mut() = Some(window);
+                app.apply_fullscreen(fullscreen);
             } else {
                 app.notify("Fullscreen is not available");
             }

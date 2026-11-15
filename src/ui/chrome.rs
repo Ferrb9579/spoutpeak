@@ -1,6 +1,6 @@
 //! App-owned caption and native window actions for the undecorated window.
 
-use crate::state::App;
+use crate::state::{App, Load, Route};
 use crate::theme::*;
 use incular::controls::{Button, ButtonStyle, StateColor};
 use incular::prelude::*;
@@ -31,7 +31,46 @@ fn caption_button(glyph: Glyph, label: &str, close: bool, action: impl Fn() + 's
         .into()
 }
 
-fn titlebar(window: &WindowHandle) -> Widget {
+fn home_refresh(app: &App) -> Widget {
+    let app = app.clone();
+    // Subscribe only this control, keeping the search field stable as rows arrive.
+    Builder::new(move |_| {
+        let loading = app.board.read(|board| {
+            // No generation yet means initial addon discovery is still running.
+            board.generation == 0 || board.rows.iter().any(|row| matches!(row.items, Load::Loading))
+        });
+        let glyph: Widget = if loading {
+            SizedBox::new().width(18.0).height(18.0).child(
+                incular::material::CircularProgressIndicator::new()
+                    .indeterminate(true).size(18.0).stroke_width(2.0).color(TEXT),
+            ).into()
+        } else {
+            icon(icons::rotate_ccw(), 18.0, TEXT)
+        };
+        let refresh = app.clone();
+        super::tooltip::tooltip(if loading { "Loading catalogs…" } else { "Refresh Home" },
+            icon_button(glyph, 32.0, move || refresh.load_board())
+                .accessibility_label("Refresh Home"))
+    }).into()
+}
+
+fn home_tools(app: &App) -> Widget {
+    let submit = app.clone();
+    let field = input(&app.controllers.search, "Search movies, series…", 300.0, move |query| {
+        submit.submit_search(query);
+        submit.go(Route::Search);
+    }).size(Size::new(300.0, 32.0));
+    let search = app.clone();
+    let search_button = super::tooltip::tooltip("Search",
+        icon_button(icon(icons::search(), 18.0, TEXT).accessibility_label("Search Home"), 32.0, move || {
+            search.submit_search(search.controllers.search.text());
+            search.go(Route::Search);
+        }).accessibility_label("Search Home"));
+    row(vec![Widget::from(field).accessibility_label("Search movies and series"),
+        hgap(4.0), search_button, hgap(8.0), home_refresh(app)]).into()
+}
+
+fn titlebar(app: &App, window: &WindowHandle) -> Widget {
     let (drag, double) = (window.clone(), window.clone());
     // Start the OS move only once a drag is recognized. A stationary double
     // click remains available for maximize/restore, including on the logo.
@@ -57,10 +96,14 @@ fn titlebar(window: &WindowHandle) -> Widget {
                 move || toggle_maximized(&maximize)),
             caption_button(icons::x(), "Close window", true, move || { let _ = close.close(); }),
         ]));
-    SizedBox::new().height(44.0).child(row(vec![
-        Expanded::new(drag_area).into(),
-        controls.into(), hgap(10.0),
-    ])).into()
+    let mut children = vec![Expanded::new(drag_area).into()];
+    // Keep interactive tools outside the native drag/double-click region.
+    if app.current_route() == Route::Board {
+        children.extend([home_tools(app), hgap(16.0)]);
+    }
+    // Native caption actions should not steal the player's shortcut focus.
+    children.extend([ExcludeFocus::new(controls).into(), hgap(10.0)]);
+    SizedBox::new().height(44.0).child(row(children)).into()
 }
 
 /// The ambient layer sits behind this frame, so the caption has the same
@@ -69,10 +112,12 @@ pub fn frame(app: &App, content: Widget) -> Widget {
     let app = app.clone();
     LayoutBuilder::new(move |_, _| {
         let Some(window) = app.player.window.borrow().clone() else { return content.clone(); };
-        if window.observed_state().fullscreen.unwrap_or(false) {
+        // Native observed_state is a snapshot, not a reactive dependency. Use
+        // the requested mode so caption removal/restoration cannot miss a resize.
+        if app.player.fullscreen.get() {
             return content.clone();
         }
-        let body: Widget = Column::new(vec![titlebar(&window), Expanded::new(content.clone()).into()])
+        let body: Widget = Column::new(vec![titlebar(&app, &window), Expanded::new(content.clone()).into()])
             .cross_axis_alignment(CrossAxisAlignment::Stretch).into();
         if window.observed_state().maximized.unwrap_or(false) { return body; }
 

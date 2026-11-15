@@ -50,7 +50,11 @@ fn run(simulation: &Simulation, script: &str, dir: &PathBuf) {
             "doubleclickat" => {
                 let (x, y) = argument.split_once(',').unwrap_or(("0", "0"));
                 let position = Offset::new(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
-                simulation.click_at(position).and_then(|_| simulation.click_at(position))
+                simulation.click_at(position).and_then(|_| {
+                    // Respect the recognizer's minimum interval between taps.
+                    std::thread::sleep(Duration::from_millis(80));
+                    simulation.click_at(position)
+                })
             }
             "window" => {
                 let action = argument.to_owned();
@@ -60,6 +64,7 @@ fn run(simulation: &Simulation, script: &str, dir: &PathBuf) {
                             "restore" => { let _ = window.set_minimized(false); }
                             _ => {
                                 eprintln!("[script] window {:?}", window.observed_state());
+                                eprintln!("[script] player fullscreen={}", app.player.fullscreen.get_untracked());
                                 app.board.peek(|b| eprintln!("[script] carousel index={} paused={}",
                                     b.carousel.index.get_untracked(), b.carousel.paused.get_untracked()));
                             }
@@ -99,6 +104,7 @@ fn run(simulation: &Simulation, script: &str, dir: &PathBuf) {
                     "ArrowRight" => Code::ArrowRight,
                     "ArrowLeft" => Code::ArrowLeft,
                     "KeyF" => Code::KeyF,
+                    "F11" => Code::F11,
                     "KeyM" => Code::KeyM,
                     _ => Code::Tab,
                 };

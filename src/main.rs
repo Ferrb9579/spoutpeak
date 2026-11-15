@@ -55,7 +55,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.startup();
             // `spoutpeak <url-or-file>` plays it straight away.
             if let Some(target) = std::env::args().nth(1) {
-                app.booted.set(true);
                 app.play_url(target);
             }
         });

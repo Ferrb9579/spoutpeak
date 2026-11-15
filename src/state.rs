@@ -69,6 +69,9 @@ pub fn with_window(callback: impl FnOnce(&App, Option<WindowHandle>) + Send + 's
         let window = runtime.window_handle();
         let app = APP.with(|slot| slot.borrow().clone());
         if let Some(app) = app {
+            // Application-dispatched callbacks have no window scope; retain
+            // access to the main window captured when the app was built.
+            let window = window.or_else(|| app.player.window.borrow().clone());
             callback(&app, window);
         }
     });
@@ -544,8 +547,6 @@ pub struct App {
     pub addons: Shared<AddonsState>,
     /// Built-in torrent engine: `None` while starting, then whether it runs.
     pub server_online: Signal<Option<bool>>,
-    /// False while the startup screen is up.
-    pub booted: Signal<bool>,
     search_typing: Rc<std::cell::Cell<u64>>,
     pub player: PlayerUi,
     pub downloads: Shared<Vec<crate::downloads::Download>>,
@@ -582,7 +583,6 @@ impl App {
                 busy: false,
             }),
             server_online: Signal::new(None),
-            booted: Signal::new(false),
             search_typing: Rc::new(std::cell::Cell::new(0)),
             downloads: Shared::new(crate::downloads::load()),
             controllers,
@@ -599,7 +599,6 @@ impl App {
             spawn(addons::default_addons(), |app, addons| {
                 if addons.is_empty() {
                     app.notify("Could not reach the default addons. Check your connection.");
-                    app.finish_boot();
                 }
                 app.profile.write(|p| {
                     if p.addons.is_empty() {
@@ -616,33 +615,6 @@ impl App {
         std::thread::spawn(|| {
             let _ = crate::convert::encoder();
         });
-        // Never hold the startup screen hostage to a slow network.
-        spawn(
-            async { tokio::time::sleep(std::time::Duration::from_secs(8)).await },
-            |app, ()| app.finish_boot(),
-        );
-    }
-
-    pub fn finish_boot(&self) {
-        if !self.booted.get_untracked() {
-            self.booted.set(true);
-        }
-    }
-
-    /// Leaves the startup screen once enough of the board has arrived.
-    fn check_boot(&self) {
-        if self.booted.get_untracked() || std::env::var_os("SPOUTPEAK_HOLD_SPLASH").is_some() {
-            return;
-        }
-        let (done, total) = self.board.peek(|b| {
-            (
-                b.rows.iter().filter(|r| r.items != Load::Loading).count(),
-                b.rows.len(),
-            )
-        });
-        if total == 0 || done >= total.min(3) {
-            self.finish_boot();
-        }
     }
 
     pub fn save_profile(&self) {
@@ -761,11 +733,9 @@ impl App {
                             };
                         }
                     });
-                    app.check_boot();
                 },
             );
         }
-        self.check_boot();
         // Catalog selections may no longer exist after an addon change.
         self.discover.write(|d| {
             d.kind.clear();

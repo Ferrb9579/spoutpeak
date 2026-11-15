@@ -11,7 +11,6 @@ mod player;
 mod together;
 pub mod tooltip;
 mod settings;
-mod splash;
 mod widgets;
 
 use crate::state::{App, Route};
@@ -278,7 +277,7 @@ pub(super) fn handle_key(app: &App, event: &KeyboardEvent) -> bool {
             }
         }
         Code::Escape | Code::BrowserBack => {
-            if app.player.state.peek(|s| s.fullscreen) {
+            if app.player.fullscreen.get_untracked() {
                 app.toggle_fullscreen();
             } else {
                 app.back();
@@ -290,7 +289,6 @@ pub(super) fn handle_key(app: &App, event: &KeyboardEvent) -> bool {
 }
 
 const PAGE_ENTRANCE: Duration = Duration::from_millis(220);
-const SPLASH_FADE: Duration = Duration::from_millis(320);
 
 thread_local! {
     /// The pointer is over the sidebar's library card.
@@ -298,30 +296,6 @@ thread_local! {
     /// Fade and rise of the screen that just opened.
     static PAGE: motion::Entrance = motion::Entrance::new();
     static LAST_ROUTE: Cell<Option<Route>> = const { Cell::new(None) };
-    /// Set once the startup screen has finished fading out.
-    static SPLASH_GONE: Signal<bool> = Signal::new(false);
-}
-
-/// The startup screen; fades out once startup finishes, then leaves the tree.
-fn splash_layer(app: &App) -> Widget {
-    let app = app.clone();
-    Builder::new(move |_| {
-        if !app.booted.get() {
-            return island(&app, splash::screen);
-        }
-        IgnorePointer::new(
-            island(&app, splash::screen)
-                .animate()
-                .duration(SPLASH_FADE)
-                .curve(Curve::EaseOut)
-                .fade_out()
-                .on_complete(|| {
-                    SPLASH_GONE.with(|gone| gone.set(true));
-                }),
-        )
-        .into()
-    })
-    .into()
 }
 
 pub fn root(app: &App) -> Widget {
@@ -357,13 +331,10 @@ pub fn root(app: &App) -> Widget {
         }
     };
 
-    let mut stacked = vec![
+    let stacked = vec![
         content,
         IgnorePointer::new(toast(app)).into(),
     ];
-    if !SPLASH_GONE.with(|gone| gone.get()) && route != Route::Player {
-        stacked.push(splash_layer(app));
-    }
     let framed = chrome::frame(app, layers(stacked).fit(StackFit::Expand).into());
     let layered = layers(vec![IgnorePointer::new(ambient::layer(app)).into(), framed]).fit(StackFit::Expand);
     let keys = app.clone();
