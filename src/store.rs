@@ -194,6 +194,9 @@ pub enum ReadAhead {
     #[default]
     Auto,
     Megabytes(u32),
+    /// This much play time, from the file's average bitrate (Auto until the
+    /// player knows the duration).
+    Seconds(u32),
     /// Keep going to the end of the file.
     WholeFile,
 }

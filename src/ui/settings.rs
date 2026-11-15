@@ -426,19 +426,24 @@ fn streaming_card(app: &App, settings: &Settings) -> Widget {
         choices(app, ages, torrent.cache_max_age_days, |s, v| s.torrent.cache_max_age_days = v),
     ));
     let mut ahead: Vec<(String, ReadAhead)> = vec![("Auto".to_owned(), ReadAhead::Auto)];
-    ahead.extend([128u32, 256, 512, 1024, 2048].map(|mb| {
-        let label = if mb >= 1024 { format!("{} GB", mb / 1024) } else { format!("{mb} MB") };
-        (label, ReadAhead::Megabytes(mb))
-    }));
+    let seconds_label = |s: u32| {
+        if s % 60 == 0 { format!("{} min", s / 60) } else { format!("{s} s") }
+    };
+    let megabytes_label =
+        |mb: u32| if mb >= 1024 { format!("{} GB", mb / 1024) } else { format!("{mb} MB") };
+    ahead.extend([30u32, 60, 120, 300, 600].map(|s| (seconds_label(s), ReadAhead::Seconds(s))));
+    ahead.extend([256u32, 1024].map(|mb| (megabytes_label(mb), ReadAhead::Megabytes(mb))));
     ahead.push(("Whole file".to_owned(), ReadAhead::WholeFile));
-    if !ahead.iter().any(|(_, v)| *v == torrent.read_ahead)
-        && let ReadAhead::Megabytes(mb) = torrent.read_ahead
-    {
-        ahead.push((format!("{mb} MB"), torrent.read_ahead));
+    if !ahead.iter().any(|(_, v)| *v == torrent.read_ahead) {
+        match torrent.read_ahead {
+            ReadAhead::Seconds(s) => ahead.push((seconds_label(s), torrent.read_ahead)),
+            ReadAhead::Megabytes(mb) => ahead.push((megabytes_label(mb), torrent.read_ahead)),
+            _ => {}
+        }
     }
     rows.push(setting_row(
         "Read ahead",
-        "How much past the playback position keeps downloading, also while paused. Auto is about 2.5% of the file",
+        "Buffered past the playback position, also while paused. Times use the file's average bitrate; Auto is about 2.5% of the file",
         choices(app, ahead, torrent.read_ahead, |s, v| s.torrent.read_ahead = v),
     ));
     rows.push(setting_row(

@@ -164,6 +164,27 @@ pub async fn stream_url(
     Ok(url)
 }
 
+/// Tells the engine how long the file behind a [`stream_url`] URL plays, so
+/// a read-ahead set in seconds can be turned into bytes.
+pub fn set_duration(url: &str, seconds: f64) {
+    let Some(engine) = ENGINE.get() else { return };
+    let Some((hash, file)) = url
+        .strip_prefix(&engine.base)
+        .and_then(|path| path.split('?').next())
+        .and_then(|path| path.trim_start_matches('/').split_once('/'))
+    else {
+        return;
+    };
+    let Ok(file) = file.parse::<usize>() else { return };
+    let torrents = engine.torrents.lock().unwrap();
+    if let Some(watcher) = torrents.get(hash).and_then(|e| e.watchers.get(&file))
+        && seconds.is_finite()
+        && seconds > 0.0
+    {
+        *watcher.readahead.duration.lock().unwrap() = Some(seconds);
+    }
+}
+
 /// Swarm statistics for a URL returned by [`stream_url`].
 pub fn stats(url: &str) -> Option<TorrentStats> {
     let engine = ENGINE.get()?;
@@ -1037,6 +1058,8 @@ struct Readahead {
     readers: Mutex<HashMap<u64, (u64, u64, Instant)>>,
     starved_at: Mutex<Option<Instant>>,
     stop: AtomicBool,
+    /// The file's play time in seconds, once the player knows it.
+    duration: Mutex<Option<f64>>,
 }
 
 impl Readahead {
@@ -1071,10 +1094,18 @@ impl Readahead {
 
 /// How far ahead of playback to fetch, per the Read ahead setting. `Auto`
 /// is about 2.5% of the file, so roughly the same play time for any
-/// quality (a 2 h film: about 3 minutes), but at least 64 MB.
-fn lookahead(len: u64, setting: ReadAhead) -> u64 {
+/// quality (a 2 h film: about 3 minutes), but at least 64 MB. Seconds use
+/// the file's average bitrate, so they are approximate for variable-rate
+/// video; without a known duration they fall back to `Auto`.
+fn lookahead(len: u64, setting: ReadAhead, duration: Option<f64>) -> u64 {
     match setting {
-        ReadAhead::Auto => (len / 40).clamp(64 * 1024 * 1024, 512 * 1024 * 1024),
+        ReadAhead::Seconds(seconds) if duration.is_some_and(|d| d > 0.0) => {
+            let per_second = len as f64 / duration.unwrap_or(1.0);
+            ((per_second * f64::from(seconds)) as u64).min(len)
+        }
+        ReadAhead::Auto | ReadAhead::Seconds(_) => {
+            (len / 40).clamp(64 * 1024 * 1024, 512 * 1024 * 1024)
+        }
         ReadAhead::Megabytes(mb) => u64::from(mb) * 1024 * 1024,
         ReadAhead::WholeFile => len,
     }
@@ -1090,7 +1121,8 @@ async fn run_readahead(readahead: Arc<Readahead>, handle: Handle, file: usize, l
     park(&mut stream);
     while !readahead.stop.load(Ordering::SeqCst) {
         // Read every round, so a changed setting applies at once.
-        let ahead = lookahead(len, config().lock().unwrap().read_ahead);
+        let setting = config().lock().unwrap().read_ahead;
+        let ahead = lookahead(len, setting, *readahead.duration.lock().unwrap());
         // While playback waits for a piece, even background requests take
         // peers' upload slots away from it: park the window.
         match readahead.playhead().filter(|_| !readahead.starving()) {
@@ -1244,6 +1276,16 @@ mod tests {
     fn busy_torrents_are_never_evicted() {
         let all = vec![cached("busy", 100, 30), cached("idle", 10, 0)];
         assert_eq!(victims(all, Some(50), Some(7), &["busy"], &["busy"]), ["idle"]);
+    }
+
+    #[test]
+    fn read_ahead_seconds_use_the_average_bitrate() {
+        const MB: u64 = 1024 * 1024;
+        // 600 MB over 600 s: 1 MB a second.
+        assert_eq!(lookahead(600 * MB, ReadAhead::Seconds(120), Some(600.0)), 120 * MB);
+        assert_eq!(lookahead(600 * MB, ReadAhead::Seconds(9999), Some(600.0)), 600 * MB);
+        // Unknown duration: the Auto size.
+        assert_eq!(lookahead(600 * MB, ReadAhead::Seconds(120), None), 64 * MB);
     }
 
     #[test]

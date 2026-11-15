@@ -752,6 +752,10 @@ impl App {
                 .position(|t| same_language(&t.language, &preferred))
                 .unwrap_or(0)
         };
+        // Lets a read-ahead set in seconds work out how many bytes that is.
+        if let Some(url) = self.player.session.borrow().torrent_url.as_deref() {
+            streaming::set_duration(url, info.duration);
+        }
         self.player.state.write(|s| {
             s.status = Status::Playing;
             s.duration = info.duration;
