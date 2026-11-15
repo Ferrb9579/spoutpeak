@@ -121,7 +121,7 @@ def linux(work, name, app_version):
         {"src": str(launcher), "dst": "/usr/bin/spoutpeak"},
         {"src": str(desktop), "dst": "/usr/share/applications/spoutpeak.desktop"},
         {"src": str(RELEASE / "spoutpeak.png"),
-         "dst": "/usr/share/icons/hicolor/1024x1024/apps/spoutpeak.png"},
+         "dst": "/usr/share/icons/hicolor/512x512/apps/spoutpeak.png"},
     ])
     common = {"name": "spoutpeak", "arch": "amd64", "platform": "linux", "version": app_version,
               "maintainer": "Spoutpeak contributors <noreply@github.com>", "homepage": HOMEPAGE,
@@ -213,7 +213,7 @@ def macos(work, name, app_version):
     for size in (16, 32, 128, 256, 512):
         for scale in (1, 2):
             output = iconset / ("icon_{}x{}{}.png".format(size, size, "@2x" if scale == 2 else ""))
-            run("sips", "-z", size * scale, size * scale, RELEASE / "spoutpeak.png", "--out", output,
+            run("sips", "-z", size * scale, size * scale, RELEASE / "spoutpeak-macos.png", "--out", output,
                 stdout=subprocess.DEVNULL)
     run("iconutil", "-c", "icns", iconset, "-o", resources / "spoutpeak.icns")
     with (contents / "Info.plist").open("wb") as dest:
@@ -224,7 +224,7 @@ def macos(work, name, app_version):
                       "LSMinimumSystemVersion": "15.0", "NSHighResolutionCapable": True}, dest)
     # Ad-hoc signing makes CI bundles runnable without distribution secrets.
     for file in [media / "ffmpeg", media / "ffprobe", binaries / "spoutpeak"]:
-        run("lipo", "-verify_arch", "arm64", file)
+        run("lipo", file, "-verify_arch", "arm64")
         linkage = subprocess.check_output(["otool", "-L", str(file)], text=True)
         if "/opt/homebrew/" in linkage or "/usr/local/" in linkage:
             raise RuntimeError("Unexpected external dependency:\n" + linkage)

@@ -6,10 +6,12 @@ fn main() {
     println!("cargo:rerun-if-changed=src/branding.rs");
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
     let profile = profile_dir(&out);
-    branding::render_pixmap(1024, true)
-        .expect("valid logo.svg")
-        .save_png(profile.join("spoutpeak.png"))
-        .expect("write packaging icon");
+    for (filename, size) in [("spoutpeak.png", 512), ("spoutpeak-macos.png", 1024)] {
+        branding::render_pixmap(size, true)
+            .expect("valid logo.svg")
+            .save_png(profile.join(filename))
+            .expect("write packaging icon");
+    }
     watch_url();
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
