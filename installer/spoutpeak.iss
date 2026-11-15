@@ -1,10 +1,10 @@
-; Inno Setup script for SpoutPeak.
+; Inno Setup script for Spoutpeak.
 ; Build (from the repo root):
 ;   pwsh installer\fetch-ffmpeg.ps1      (once, or to update ffmpeg)
 ;   cargo build --release
 ;   & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\spoutpeak.iss
 
-#define AppName "SpoutPeak"
+#define AppName "Spoutpeak"
 #define AppVersion "0.1.0"
 #define AppExe "spoutpeak.exe"
 
@@ -19,7 +19,7 @@ DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#AppExe}
 OutputDir=..\dist
-OutputBaseFilename=SpoutPeak-Setup-{#AppVersion}
+OutputBaseFilename=Spoutpeak-Setup-{#AppVersion}
 SetupIconFile=..\target\release\spoutpeak.ico
 Compression=lzma2
 SolidCompression=yes

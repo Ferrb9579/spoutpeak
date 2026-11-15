@@ -11,8 +11,8 @@ fn main() {
         let mut res = winresource::WindowsResource::new();
         let icon = windows_icon();
         res.set_icon(icon.to_str().expect("UTF-8 icon path"));
-        res.set("ProductName", "SpoutPeak");
-        res.set("FileDescription", "SpoutPeak");
+        res.set("ProductName", "Spoutpeak");
+        res.set("FileDescription", "Spoutpeak");
         res.compile().expect("failed to embed Windows resources");
     }
 }
