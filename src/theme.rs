@@ -122,6 +122,7 @@ fn button_style(tone: Tone, height: f32) -> ButtonStyle {
         border_radius: Some(height / 2.0),
         padding: Some(EdgeInsets::symmetric(16.0, 0.0)),
         height: Some(height),
+        alignment: Some(Alignment::CENTER),
         text_style: Some(style(13.5, FontWeight::W600, foreground)),
         overlay_color: Some(Color::TRANSPARENT.into()),
         animation_duration: Some(std::time::Duration::ZERO),
@@ -130,10 +131,14 @@ fn button_style(tone: Tone, height: f32) -> ButtonStyle {
 }
 
 pub fn button(label: impl Into<String>, tone: Tone, on_click: impl Fn() + 'static) -> Widget {
+    let label = label.into();
+    let style = button_style(tone, 36.0);
+    let color = style.foreground.unwrap_or(TEXT);
     frosted(
         tone,
         36.0,
-        Button::new(label).style(button_style(tone, 36.0)).on_click(on_click).into(),
+        Widget::from(Button::with_child(button_label(label.clone(), 13.5, color)).style(style).on_click(on_click))
+            .accessibility_label(label),
     )
 }
 
@@ -146,10 +151,14 @@ fn frosted(tone: Tone, height: f32, button: Widget) -> Widget {
 }
 
 pub fn small_button(label: impl Into<String>, tone: Tone, on_click: impl Fn() + 'static) -> Widget {
+    let label = label.into();
     let mut style = button_style(tone, 28.0);
     style.padding = Some(EdgeInsets::symmetric(12.0, 0.0));
     style.text_style = Some(self::style(12.5, FontWeight::W600, style.foreground.unwrap_or(TEXT)));
-    frosted(tone, 28.0, Button::new(label).style(style).on_click(on_click).into())
+    let color = style.foreground.unwrap_or(TEXT);
+    frosted(tone, 28.0,
+        Widget::from(Button::with_child(button_label(label.clone(), 12.5, color)).style(style).on_click(on_click))
+            .accessibility_label(label))
 }
 
 /// A selectable pill, used for filters and segmented choices.
@@ -322,11 +331,22 @@ pub fn icon(glyph: Glyph, size: f32, color: Color) -> Widget {
     CustomPaint::from_painter(Size::new(size, size), LibraryIcon { glyph, color }).into()
 }
 
+/// Centre the visible glyphs, compensating for the system font's line-box
+/// leading. Icons keep their geometrically centred square; labels share this
+/// optical alignment in both text-only and icon-plus-text buttons.
+fn button_label(label: String, size: f32, color: Color) -> Widget {
+    let child: Widget = Transform::translation(
+        Offset::new(0.0, -1.5),
+        text(label.clone(), size, FontWeight::W600, color).max_lines(Some(1)).soft_wrap(false),
+    ).into();
+    child.accessibility_label(label)
+}
+
 fn icon_label(glyph: Glyph, label: Option<String>, size: f32, text_size: f32, color: Color) -> Widget {
     let mut children = vec![icon(glyph, size, color)];
     if let Some(label) = label {
         children.push(hgap(7.0));
-        children.push(text(label, text_size, FontWeight::W600, color).into());
+        children.push(button_label(label, text_size, color));
     }
     row(children).into()
 }

@@ -2,7 +2,7 @@
 
 use super::motion;
 use super::widgets::*;
-use crate::state::{App, LibrarySort, Load, ui};
+use crate::state::{App, LibrarySort, Load, Route, featured_titles, ui};
 use crate::addons::types::{LibraryItem, Meta};
 use crate::theme::*;
 use incular::prelude::*;
@@ -87,7 +87,7 @@ fn continue_watching(app: &App) -> Option<Widget> {
     )
 }
 
-/// A wide banner for the first title on the board.
+/// One featured slide. The carousel clips the completed image and scrim once.
 fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
     const HEIGHT: f32 = 300.0;
     let (app, meta, source) = (app.clone(), meta.clone(), source.to_owned());
@@ -149,25 +149,21 @@ fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
             .into(),
         );
 
-        let rounded = |color: Color| -> Widget {
+        let surface = |color: Color| -> Widget {
             Container::new()
                 .width(width)
                 .height(HEIGHT)
-                .decoration(
-                    BoxDecoration::new()
-                        .color(color)
-                        .border_radius(BorderRadius::all(Radius::circular(20.0))),
-                )
+                .color(color)
                 .into()
         };
         SizedBox::new()
             .width(width)
             .height(HEIGHT)
             .child(layers(vec![
-                rounded(SURFACE),
-                net_image(art, width, HEIGHT, 20.0, 1280, ""),
+                surface(SURFACE),
+                net_image(art, width, HEIGHT, 0.0, 1280, ""),
                 // Scrim so the copy stays readable over any artwork.
-                rounded(Color::rgba(13, 13, 13, 150)),
+                surface(Color::rgba(13, 13, 13, 150)),
                 Positioned::new(col(copy)).left(32.0).bottom(28.0).into(),
             ]))
             .into()
@@ -175,18 +171,107 @@ fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
     .into()
 }
 
+fn carousel_button(glyph: Glyph, label: &str, on_click: impl Fn() + 'static) -> Widget {
+    let child = icon(glyph, 15.0, TEXT).accessibility_label(label);
+    let control = Container::new().radius(14.0).color(Color::rgba(255, 255, 255, 34))
+        .child(icon_button(child, 28.0, on_click));
+    super::tooltip::tooltip(label, frosted_glass(control, 14.0, 12.0))
+}
+
+fn featured_carousel(app: &App, slides: Vec<(Meta, String)>) -> Widget {
+    let app = app.clone();
+    let slides = Rc::new(slides);
+    let carousel = app.board.peek(|board| board.carousel.clone());
+    LayoutBuilder::new(move |_, constraints| {
+        let width = constraints.max_width().clamp(320.0, 2400.0);
+        let (app, slides, carousel) = (app.clone(), slides.clone(), carousel.clone());
+        Builder::new(move |_| {
+            let count = slides.len();
+            let index = carousel.index.get() % count;
+            let paused = carousel.paused.get();
+            let (meta, source) = &slides[index];
+            // Warm the next artwork at the exact crop used by the banner.
+            if count > 1 {
+                let next = &slides[(index + 1) % count].0;
+                if let Some(url) = next.background.as_deref().or(next.poster.as_deref()) {
+                    let _ = crate::images::shaped(url, 1280, Some(crate::images::Shape { width, height: 300.0 }));
+                }
+            }
+            let slide_key = format!("featured:{}:{}", meta.kind, meta.id());
+            let slide = hero(&app, meta, source).with_key(slide_key.as_str());
+            let mut layers = vec![Widget::from(AnimatedSwitcher::new(
+                std::time::Duration::from_millis(if incular::animation::disable_animations() { 0 } else { 280 }),
+                Some(slide),
+            ))];
+            if count > 1 {
+                let previous = carousel.clone();
+                let mut controls = vec![carousel_button(icons::chevron_left(), "Previous featured title",
+                    move || previous.advance(-1, count)), hgap(4.0)];
+                for target in 0..count {
+                    let select = carousel.clone();
+                    controls.push(Widget::from(incular::controls::Button::with_child(
+                        Widget::from(Container::new().width(if target == index { 16.0 } else { 5.0 })
+                            .height(5.0).radius(2.5)
+                            .color(if target == index { TEXT } else { Color::rgba(255, 255, 255, 110) }))
+                            .accessibility_label(format!("Show featured title {} of {count}", target + 1)),
+                    ).style(incular::controls::ButtonStyle {
+                        background: Some(Color::TRANSPARENT),
+                        border: Some(Border::new(0.0, Color::TRANSPARENT)),
+                        padding: Some(EdgeInsets::ZERO),
+                        fixed_size: Some(Size::new(22.0, 28.0)),
+                        alignment: Some(Alignment::CENTER),
+                        overlay_color: Some(Color::TRANSPARENT.into()),
+                        ..Default::default()
+                    }).on_click(move || select.select(target)))
+                        .accessibility_label(format!("Show featured title {} of {count}", target + 1)));
+                }
+                let next = carousel.clone();
+                controls.push(hgap(4.0));
+                controls.push(carousel_button(icons::chevron_right(), "Next featured title",
+                    move || next.advance(1, count)));
+                if !incular::animation::disable_animations() {
+                    let toggle = carousel.clone();
+                    let label = if paused { "Resume featured rotation" } else { "Pause featured rotation" };
+                    controls.push(hgap(6.0));
+                    controls.push(carousel_button(if paused { icons::play() } else { icons::pause() }, label, move || {
+                            toggle.changed.set(std::time::Instant::now());
+                            toggle.paused.set(!toggle.paused.get_untracked());
+                        }));
+                }
+                layers.push(Positioned::new(row(controls)).right(20.0).bottom(16.0).into());
+            }
+            let enter = carousel.clone();
+            let exit = carousel.clone();
+            let swipe = carousel.clone();
+            let distance = Rc::new(std::cell::Cell::new(0.0f32));
+            let start = distance.clone();
+            let update = distance.clone();
+            let gestures = GestureDetector::new(
+                ClipRRect::new(20.0, SizedBox::new().height(300.0).child(
+                    Stack::new(layers).fit(incular::widgets::StackFit::Expand),
+                )),
+            )
+            .on_horizontal_drag_start(move |_| start.set(0.0))
+            .on_horizontal_drag_update(move |event| update.set(update.get() + event.delta.x))
+            .on_horizontal_drag_end(move |_| {
+                if distance.get().abs() >= 48.0 {
+                    swipe.advance(if distance.get() < 0.0 { 1 } else { -1 }, count);
+                }
+            });
+            MouseRegion::new(gestures)
+                .on_enter(move |_| enter.hover(true))
+                .on_exit(move |_| exit.hover(false))
+                .into()
+        }).into()
+    }).into()
+}
+
 pub fn board(app: &App) -> Widget {
     let rows = app.board.read(|board| board.rows.clone());
     let mut sections: Vec<Widget> = Vec::new();
-    let featured = rows.iter().find_map(|row| match &row.items {
-        Load::Ready(items) => items
-            .iter()
-            .find(|m| m.background.is_some() || m.poster.is_some())
-            .map(|m| (m.clone(), row.title.clone())),
-        _ => None,
-    });
-    if let Some((meta, source)) = featured {
-        sections.push(hero(app, &meta, &source));
+    let featured = featured_titles(&rows);
+    if !featured.is_empty() {
+        sections.push(featured_carousel(app, featured));
         sections.push(gap(26.0));
     }
     sections.extend(continue_watching(app));
@@ -200,11 +285,24 @@ pub fn board(app: &App) -> Widget {
     }
     let refresh = {
         let app = app.clone();
-        small_button("Refresh", Tone::Neutral, move || app.load_board())
+        super::tooltip::tooltip("Refresh Home",
+            icon_button(icon(icons::rotate_ccw(), 18.0, TEXT).accessibility_label("Refresh Home"), 36.0, move || app.load_board())
+                .accessibility_label("Refresh Home"))
     };
+    let submit = app.clone();
+    let field = input(&app.controllers.search, "Search movies, series…", 300.0, move |query| {
+        submit.submit_search(query);
+        submit.go(Route::Search);
+    }).size(Size::new(300.0, 36.0));
+    let search = app.clone();
+    let search_button = super::tooltip::tooltip("Search",
+        icon_button(icon(icons::search(), 18.0, TEXT).accessibility_label("Search Home"), 36.0, move || {
+            search.submit_search(search.controllers.search.text());
+            search.go(Route::Search);
+        }).accessibility_label("Search Home"));
     page(
         "Home",
-        vec![refresh],
+        vec![field.into(), hgap(4.0), search_button, hgap(8.0), refresh],
         smooth(
             &app.controllers.board,
             SingleChildScrollView::new(Padding::new(

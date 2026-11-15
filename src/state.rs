@@ -9,8 +9,8 @@ use crate::store::{self, Profile};
 use crate::addons::{self, CatalogRef};
 use crate::addons::types::*;
 use incular::prelude::*;
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
@@ -172,6 +172,62 @@ pub struct CatalogRow {
 pub struct BoardState {
     pub rows: Vec<CatalogRow>,
     pub generation: u64,
+    pub carousel: FeaturedCarousel,
+}
+
+/// Separate signals keep slide changes from rebuilding the catalog rows.
+#[derive(Clone)]
+pub struct FeaturedCarousel {
+    pub index: Signal<usize>,
+    pub paused: Signal<bool>,
+    pub hovered: Rc<Cell<bool>>,
+    pub changed: Rc<Cell<std::time::Instant>>,
+}
+
+impl Default for FeaturedCarousel {
+    fn default() -> Self {
+        Self {
+            index: Signal::new(0),
+            paused: Signal::new(false),
+            hovered: Rc::new(Cell::new(false)),
+            changed: Rc::new(Cell::new(std::time::Instant::now())),
+        }
+    }
+}
+
+impl FeaturedCarousel {
+    pub fn select(&self, index: usize) {
+        self.changed.set(std::time::Instant::now());
+        self.index.set(index);
+    }
+
+    pub fn advance(&self, direction: isize, count: usize) {
+        if count > 1 {
+            self.select((self.index.get_untracked() as isize + direction).rem_euclid(count as isize) as usize);
+        }
+    }
+
+    pub fn hover(&self, hovered: bool) {
+        self.hovered.set(hovered);
+        self.changed.set(std::time::Instant::now());
+    }
+}
+
+/// A small, deduplicated set drawn from the loaded home catalogs.
+pub fn featured_titles(rows: &[CatalogRow]) -> Vec<(Meta, String)> {
+    let mut seen = HashSet::new();
+    rows.iter().flat_map(|row| {
+        let items: &[Meta] = match &row.items {
+            Load::Ready(items) => items,
+            _ => &[],
+        };
+        items.iter().map(move |meta| (meta, &row.title))
+    })
+    .filter(|(meta, _)| meta.background.is_some() || meta.poster.is_some())
+    .filter(|(meta, _)| !meta.id().is_empty() && seen.insert((meta.kind.clone(), meta.id().to_owned())))
+    .take(6)
+    .map(|(meta, source)| (meta.clone(), source.clone()))
+    .collect()
 }
 
 #[derive(Default)]
@@ -587,8 +643,11 @@ impl App {
         let generation = self.board.write(|board| {
             board.generation += 1;
             board.rows = refs.iter().map(Self::row_for).collect();
+            board.carousel.select(0);
+            board.carousel.hover(false);
             board.generation
         });
+        self.schedule_featured_rotation(generation);
         for reference in refs {
             let key = reference.key();
             spawn(
@@ -624,6 +683,29 @@ impl App {
             d.catalog_key.clear();
             d.items.clear();
         });
+    }
+
+    fn schedule_featured_rotation(&self, generation: u64) {
+        spawn(
+            async { tokio::time::sleep(std::time::Duration::from_secs(1)).await },
+            move |app, ()| {
+                let Some(carousel) = app.board.peek(|board| {
+                    (board.generation == generation).then(|| board.carousel.clone())
+                }) else { return };
+                let on_screen = app.current_route() == Route::Board && app.controllers.board.offset() < 300.0;
+                if !on_screen {
+                    carousel.changed.set(std::time::Instant::now());
+                } else if !carousel.hovered.get()
+                    && !carousel.paused.get_untracked()
+                    && !incular::animation::disable_animations()
+                    && carousel.changed.get().elapsed() >= std::time::Duration::from_secs(8)
+                {
+                    let count = app.board.peek(|board| featured_titles(&board.rows).len());
+                    carousel.advance(1, count);
+                }
+                app.schedule_featured_rotation(generation);
+            },
+        );
     }
 
     // ----------------------------------------------------------- discover
