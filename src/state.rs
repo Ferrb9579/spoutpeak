@@ -180,24 +180,30 @@ pub struct BoardState {
 pub struct FeaturedCarousel {
     pub index: Signal<usize>,
     pub paused: Signal<bool>,
+    pub progress: Signal<f32>,
     pub hovered: Rc<Cell<bool>>,
-    pub changed: Rc<Cell<std::time::Instant>>,
+    elapsed: Rc<Cell<std::time::Duration>>,
+    updated: Rc<Cell<std::time::Instant>>,
 }
+
+const FEATURED_INTERVAL: std::time::Duration = std::time::Duration::from_secs(8);
 
 impl Default for FeaturedCarousel {
     fn default() -> Self {
         Self {
             index: Signal::new(0),
             paused: Signal::new(false),
+            progress: Signal::new(0.0),
             hovered: Rc::new(Cell::new(false)),
-            changed: Rc::new(Cell::new(std::time::Instant::now())),
+            elapsed: Rc::new(Cell::new(std::time::Duration::ZERO)),
+            updated: Rc::new(Cell::new(std::time::Instant::now())),
         }
     }
 }
 
 impl FeaturedCarousel {
     pub fn select(&self, index: usize) {
-        self.changed.set(std::time::Instant::now());
+        self.reset_timer();
         self.index.set(index);
     }
 
@@ -209,7 +215,90 @@ impl FeaturedCarousel {
 
     pub fn hover(&self, hovered: bool) {
         self.hovered.set(hovered);
-        self.changed.set(std::time::Instant::now());
+        self.updated.set(std::time::Instant::now());
+    }
+
+    pub fn toggle_pause(&self) {
+        self.updated.set(std::time::Instant::now());
+        self.paused.set(!self.paused.get_untracked());
+    }
+
+    fn reset_timer(&self) {
+        self.updated.set(std::time::Instant::now());
+        self.elapsed.set(std::time::Duration::ZERO);
+        self.progress.set(0.0);
+    }
+
+    /// One clock drives both the indicator and the automatic slide change.
+    fn tick(&self, now: std::time::Instant, on_screen: bool) -> bool {
+        let delta = now.saturating_duration_since(self.updated.replace(now));
+        if !on_screen {
+            self.elapsed.set(std::time::Duration::ZERO);
+            self.progress.set(0.0);
+        } else if !self.hovered.get() && !self.paused.get_untracked()
+            && !incular::animation::disable_animations()
+        {
+            let elapsed = (self.elapsed.get() + delta).min(FEATURED_INTERVAL);
+            self.elapsed.set(elapsed);
+            self.progress.set(elapsed.as_secs_f32() / FEATURED_INTERVAL.as_secs_f32());
+            return elapsed >= FEATURED_INTERVAL;
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod carousel_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn progress_reaches_deadline_and_resets_on_selection_and_wrap() {
+        let carousel = FeaturedCarousel::default();
+        let start = carousel.updated.get();
+        assert!(!carousel.tick(start + Duration::from_secs(4), true));
+        assert_eq!(carousel.progress.get_untracked(), 0.5);
+        assert!(carousel.tick(start + Duration::from_secs(8), true));
+        assert_eq!(carousel.progress.get_untracked(), 1.0);
+        carousel.advance(1, 3);
+        assert_eq!(carousel.index.get_untracked(), 1);
+        assert_eq!(carousel.progress.get_untracked(), 0.0);
+        carousel.select(2);
+        carousel.advance(1, 3);
+        assert_eq!(carousel.index.get_untracked(), 0);
+        assert_eq!(carousel.elapsed.get(), Duration::ZERO);
+    }
+
+    #[test]
+    fn pause_and_hover_hold_progress_and_resume_remaining_time() {
+        let carousel = FeaturedCarousel::default();
+        let start = carousel.updated.get();
+        carousel.tick(start + Duration::from_secs(2), true);
+        carousel.toggle_pause();
+        let paused = carousel.updated.get();
+        assert!(!carousel.tick(paused + Duration::from_secs(20), true));
+        assert_eq!(carousel.progress.get_untracked(), 0.25);
+        carousel.toggle_pause();
+        let resumed = carousel.updated.get();
+        carousel.tick(resumed + Duration::from_secs(2), true);
+        carousel.hover(true);
+        let hovered = carousel.updated.get();
+        assert!(!carousel.tick(hovered + Duration::from_secs(20), true));
+        assert_eq!(carousel.progress.get_untracked(), 0.5);
+        carousel.hover(false);
+        let resumed = carousel.updated.get();
+        assert!(carousel.tick(resumed + Duration::from_secs(4), true));
+    }
+
+    #[test]
+    fn leaving_carousel_restarts_the_visible_timer() {
+        let carousel = FeaturedCarousel::default();
+        let start = carousel.updated.get();
+        carousel.tick(start + Duration::from_secs(7), true);
+        assert!(!carousel.tick(start + Duration::from_secs(8), false));
+        assert_eq!(carousel.progress.get_untracked(), 0.0);
+        assert!(!carousel.tick(start + Duration::from_secs(9), true));
+        assert_eq!(carousel.progress.get_untracked(), 0.125);
     }
 }
 
@@ -686,22 +775,26 @@ impl App {
     }
 
     fn schedule_featured_rotation(&self, generation: u64) {
+        let active = self.current_route() == Route::Board
+            && self.controllers.board.offset() < 300.0
+            && !incular::animation::disable_animations()
+            && self.board.peek(|board| !board.carousel.hovered.get()
+                && !board.carousel.paused.get_untracked());
+        let delay = std::time::Duration::from_millis(if active { 33 } else { 250 });
         spawn(
-            async { tokio::time::sleep(std::time::Duration::from_secs(1)).await },
+            async move { tokio::time::sleep(delay).await },
             move |app, ()| {
                 let Some(carousel) = app.board.peek(|board| {
                     (board.generation == generation).then(|| board.carousel.clone())
                 }) else { return };
                 let on_screen = app.current_route() == Route::Board && app.controllers.board.offset() < 300.0;
-                if !on_screen {
-                    carousel.changed.set(std::time::Instant::now());
-                } else if !carousel.hovered.get()
-                    && !carousel.paused.get_untracked()
-                    && !incular::animation::disable_animations()
-                    && carousel.changed.get().elapsed() >= std::time::Duration::from_secs(8)
-                {
+                if carousel.tick(std::time::Instant::now(), on_screen) {
                     let count = app.board.peek(|board| featured_titles(&board.rows).len());
-                    carousel.advance(1, count);
+                    if count > 1 {
+                        carousel.advance(1, count);
+                    } else {
+                        carousel.reset_timer();
+                    }
                 }
                 app.schedule_featured_rotation(generation);
             },

@@ -47,6 +47,35 @@ fn run(simulation: &Simulation, script: &str, dir: &PathBuf) {
                 eprintln!("[script] shot {} -> {saved:?}", path.display());
             }),
             "click" => simulation.click(argument),
+            "doubleclickat" => {
+                let (x, y) = argument.split_once(',').unwrap_or(("0", "0"));
+                let position = Offset::new(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
+                simulation.click_at(position).and_then(|_| simulation.click_at(position))
+            }
+            "window" => {
+                let action = argument.to_owned();
+                crate::state::with_window(move |app, window| {
+                    if let Some(window) = window {
+                        match action.as_str() {
+                            "restore" => { let _ = window.set_minimized(false); }
+                            _ => {
+                                eprintln!("[script] window {:?}", window.observed_state());
+                                app.board.peek(|b| eprintln!("[script] carousel index={} paused={}",
+                                    b.carousel.index.get_untracked(), b.carousel.paused.get_untracked()));
+                            }
+                        }
+                    }
+                });
+                Ok(())
+            }
+            "resize" => {
+                let (width, height) = argument.split_once(',').unwrap_or(("1320", "820"));
+                let size = incular::prelude::Size::new(width.parse().unwrap_or(1320.0), height.parse().unwrap_or(820.0));
+                crate::state::with_window(move |_, window| {
+                    if let Some(window) = window { let _ = window.request_logical_size(size); }
+                });
+                Ok(())
+            }
             "clickat" => {
                 let (x, y) = argument.split_once(',').unwrap_or(("0", "0"));
                 simulation.click_at(Offset::new(

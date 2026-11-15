@@ -2,7 +2,7 @@
 
 use super::motion;
 use super::widgets::*;
-use crate::state::{App, LibrarySort, Load, Route, featured_titles, ui};
+use crate::state::{App, FeaturedCarousel, LibrarySort, Load, Route, featured_titles, ui};
 use crate::addons::types::{LibraryItem, Meta};
 use crate::theme::*;
 use incular::prelude::*;
@@ -88,11 +88,34 @@ fn continue_watching(app: &App) -> Option<Widget> {
 }
 
 /// One featured slide. The carousel clips the completed image and scrim once.
+fn hero_height(width: f32) -> f32 {
+    (width * 0.34).clamp(340.0, 480.0)
+}
+
+/// Keep the complete landscape image on the right; a blurred extension fills
+/// the remaining space rather than cropping faces to fit an ultrawide strip.
+fn hero_art(url: Option<&str>, width: f32, height: f32) -> Widget {
+    let Some(url) = url else { return SizedBox::new().into(); };
+    let picture = crate::images::picture(url, 1920);
+    let blurred = crate::images::blurred(url);
+    Builder::new(move |_| {
+        let mut art = Vec::new();
+        if let crate::images::Picture::Ready(handle) = blurred.get() {
+            art.push(Image::new(handle).width(width).height(height).fit(BoxFit::Cover).into());
+        }
+        if let crate::images::Picture::Ready(handle) = picture.get() {
+            art.push(Image::new(handle).width(width).height(height)
+                .fit(BoxFit::Contain).alignment(Alignment::CENTER_RIGHT).into());
+        }
+        layers(art).fit(incular::widgets::StackFit::Expand).into()
+    }).into()
+}
+
 fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
-    const HEIGHT: f32 = 300.0;
     let (app, meta, source) = (app.clone(), meta.clone(), source.to_owned());
     LayoutBuilder::new(move |_, constraints| {
         let width = constraints.max_width().clamp(320.0, 2400.0);
+        let height = hero_height(width);
         let art = meta.background.as_deref().or(meta.poster.as_deref());
         let mut facts: Vec<String> = Vec::new();
         facts.extend(meta.release_line());
@@ -152,18 +175,26 @@ fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
         let surface = |color: Color| -> Widget {
             Container::new()
                 .width(width)
-                .height(HEIGHT)
+                .height(height)
                 .color(color)
                 .into()
         };
         SizedBox::new()
             .width(width)
-            .height(HEIGHT)
+            .height(height)
             .child(layers(vec![
                 surface(SURFACE),
-                net_image(art, width, HEIGHT, 0.0, 1280, ""),
-                // Scrim so the copy stays readable over any artwork.
-                surface(Color::rgba(13, 13, 13, 150)),
+                hero_art(art, width, height),
+                // Keep copy legible while leaving the main artwork visible.
+                Container::new().width(width).height(height).decoration(BoxDecoration::new().gradient(LinearGradient::new(
+                    Offset::ZERO, Offset::new(width, 0.0),
+                    GradientStops::new(vec![
+                        GradientStop { offset: 0.0, color: Color::rgba(6, 9, 10, 225) },
+                        GradientStop { offset: 0.42, color: Color::rgba(6, 9, 10, 160) },
+                        GradientStop { offset: 0.75, color: Color::rgba(6, 9, 10, 35) },
+                        GradientStop { offset: 1.0, color: Color::rgba(6, 9, 10, 30) },
+                    ]),
+                ))).into(),
                 Positioned::new(col(copy)).left(32.0).bottom(28.0).into(),
             ]))
             .into()
@@ -178,31 +209,63 @@ fn carousel_button(glyph: Glyph, label: &str, on_click: impl Fn() + 'static) -> 
     super::tooltip::tooltip(label, frosted_glass(control, 14.0, 12.0))
 }
 
+fn carousel_indicator(carousel: &FeaturedCarousel, active: bool) -> Widget {
+    let carousel = carousel.clone();
+    // Only this tiny subtree subscribes to timer updates.
+    Builder::new(move |_| {
+        let width = if active { 30.0 } else { 5.0 };
+        let progress = if active && !incular::animation::disable_animations() {
+            carousel.progress.get()
+        } else if active { 1.0 } else { 0.0 };
+        Container::new().width(width).height(5.0).radius(2.5)
+            .color(Color::rgba(255, 255, 255, 85))
+            .child(Align::new(Alignment::CENTER_LEFT,
+                Container::new().width(width * progress).height(5.0).radius(2.5).color(TEXT),
+            )).into()
+    }).into()
+}
+
 fn featured_carousel(app: &App, slides: Vec<(Meta, String)>) -> Widget {
     let app = app.clone();
     let slides = Rc::new(slides);
     let carousel = app.board.peek(|board| board.carousel.clone());
+    let last_ready = Rc::new(std::cell::RefCell::new(None::<Widget>));
     LayoutBuilder::new(move |_, constraints| {
         let width = constraints.max_width().clamp(320.0, 2400.0);
+        let height = hero_height(width);
         let (app, slides, carousel) = (app.clone(), slides.clone(), carousel.clone());
+        let last_ready = last_ready.clone();
         Builder::new(move |_| {
             let count = slides.len();
             let index = carousel.index.get() % count;
             let paused = carousel.paused.get();
             let (meta, source) = &slides[index];
-            // Warm the next artwork at the exact crop used by the banner.
+            // Warm the original composition and its blurred extension.
             if count > 1 {
                 let next = &slides[(index + 1) % count].0;
                 if let Some(url) = next.background.as_deref().or(next.poster.as_deref()) {
-                    let _ = crate::images::shaped(url, 1280, Some(crate::images::Shape { width, height: 300.0 }));
+                    let _ = crate::images::picture(url, 1920);
+                    let _ = crate::images::blurred(url);
                 }
             }
             let slide_key = format!("featured:{}:{}", meta.kind, meta.id());
             let slide = hero(&app, meta, source).with_key(slide_key.as_str());
+            // A fade must start with the artwork, not finish while it loads.
+            let ready = meta.background.as_deref().or(meta.poster.as_deref()).is_none_or(|url| {
+                let picture = crate::images::picture(url, 1920).get();
+                let blurred = crate::images::blurred(url).get();
+                !matches!(picture, crate::images::Picture::Loading)
+                    && !matches!(blurred, crate::images::Picture::Loading)
+            });
+            if ready || last_ready.borrow().is_none() {
+                *last_ready.borrow_mut() = Some(slide);
+            }
             let mut layers = vec![Widget::from(AnimatedSwitcher::new(
-                std::time::Duration::from_millis(if incular::animation::disable_animations() { 0 } else { 280 }),
-                Some(slide),
-            ))];
+                std::time::Duration::from_millis(if incular::animation::disable_animations() { 0 } else { 700 }),
+                last_ready.borrow().clone(),
+            ).animated_transition_builder(|child, animation| FadeTransition::from_animation(animation, child))
+                .layout_builder(|current, previous| Stack::new(previous.into_iter().chain(current))
+                    .fit(incular::widgets::StackFit::Expand).into()))];
             if count > 1 {
                 let previous = carousel.clone();
                 let mut controls = vec![carousel_button(icons::chevron_left(), "Previous featured title",
@@ -210,15 +273,13 @@ fn featured_carousel(app: &App, slides: Vec<(Meta, String)>) -> Widget {
                 for target in 0..count {
                     let select = carousel.clone();
                     controls.push(Widget::from(incular::controls::Button::with_child(
-                        Widget::from(Container::new().width(if target == index { 16.0 } else { 5.0 })
-                            .height(5.0).radius(2.5)
-                            .color(if target == index { TEXT } else { Color::rgba(255, 255, 255, 110) }))
+                        carousel_indicator(&carousel, target == index)
                             .accessibility_label(format!("Show featured title {} of {count}", target + 1)),
                     ).style(incular::controls::ButtonStyle {
                         background: Some(Color::TRANSPARENT),
                         border: Some(Border::new(0.0, Color::TRANSPARENT)),
                         padding: Some(EdgeInsets::ZERO),
-                        fixed_size: Some(Size::new(22.0, 28.0)),
+                        fixed_size: Some(Size::new(if target == index { 38.0 } else { 22.0 }, 28.0)),
                         alignment: Some(Alignment::CENTER),
                         overlay_color: Some(Color::TRANSPARENT.into()),
                         ..Default::default()
@@ -234,8 +295,7 @@ fn featured_carousel(app: &App, slides: Vec<(Meta, String)>) -> Widget {
                     let label = if paused { "Resume featured rotation" } else { "Pause featured rotation" };
                     controls.push(hgap(6.0));
                     controls.push(carousel_button(if paused { icons::play() } else { icons::pause() }, label, move || {
-                            toggle.changed.set(std::time::Instant::now());
-                            toggle.paused.set(!toggle.paused.get_untracked());
+                            toggle.toggle_pause();
                         }));
                 }
                 layers.push(Positioned::new(row(controls)).right(20.0).bottom(16.0).into());
@@ -247,7 +307,7 @@ fn featured_carousel(app: &App, slides: Vec<(Meta, String)>) -> Widget {
             let start = distance.clone();
             let update = distance.clone();
             let gestures = GestureDetector::new(
-                ClipRRect::new(20.0, SizedBox::new().height(300.0).child(
+                ClipRRect::new(20.0, SizedBox::new().height(height).child(
                     Stack::new(layers).fit(incular::widgets::StackFit::Expand),
                 )),
             )

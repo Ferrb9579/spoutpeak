@@ -3,6 +3,7 @@
 mod addons;
 mod ambient;
 mod browse;
+mod chrome;
 mod detail;
 mod downloads;
 mod motion;
@@ -75,19 +76,7 @@ fn nav_label(label: &str) -> Widget {
 }
 
 fn sidebar(app: &App, current: Route) -> Widget {
-    let mut items: Vec<Widget> = vec![
-        Padding::new(
-            EdgeInsets::only(14.0, 6.0, 0.0, 0.0),
-            row(vec![
-                logo(26.0),
-                hgap(11.0),
-                text("Spoutpeak", 18.0, FontWeight::W700, TEXT).into(),
-            ]),
-        )
-        .into(),
-        gap(28.0),
-        nav_label("BROWSE"),
-    ];
+    let mut items: Vec<Widget> = vec![nav_label("BROWSE")];
     for (label, glyph, route) in [
         ("Home", icons::house(), Route::Board),
         ("Discover", icons::compass(), Route::Discover),
@@ -369,14 +358,14 @@ pub fn root(app: &App) -> Widget {
     };
 
     let mut stacked = vec![
-        IgnorePointer::new(ambient::layer(app)).into(),
         content,
         IgnorePointer::new(toast(app)).into(),
     ];
     if !SPLASH_GONE.with(|gone| gone.get()) && route != Route::Player {
         stacked.push(splash_layer(app));
     }
-    let layered = layers(stacked).fit(StackFit::Expand);
+    let framed = chrome::frame(app, layers(stacked).fit(StackFit::Expand).into());
+    let layered = layers(vec![IgnorePointer::new(ambient::layer(app)).into(), framed]).fit(StackFit::Expand);
     let keys = app.clone();
     let themed = ControlThemeScope::new(
         ControlTheme::dark(),

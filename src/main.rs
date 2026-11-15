@@ -30,6 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             title: "Spoutpeak".into(),
             initial_logical_size: Size::new(1320.0, 820.0),
             minimum_logical_size: Some(Size::new(960.0, 620.0)),
+            decorations: false,
             background_color: theme::BG,
             window_icon: theme::logo_rgba()
                 .and_then(|(w, h, px)| WindowIcon::from_rgba(px, w, h).ok()),

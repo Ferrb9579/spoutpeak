@@ -5,7 +5,7 @@
 //! it shows through. Without artwork the window is plain black.
 
 use crate::images::{self, Picture};
-use crate::state::{App, Load, Route};
+use crate::state::{App, Load, Route, featured_titles};
 use crate::theme::*;
 use incular::prelude::*;
 use incular::widgets::StackFit;
@@ -16,6 +16,8 @@ thread_local! {
     /// The artwork last shown, kept while screens without their own
     /// (Settings, Addons…) are open, so the mood does not flicker.
     static LAST: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Keep the current wash visible while the next thumbnail is loading.
+    static LAST_READY: RefCell<Option<(String, ImageHandle)>> = const { RefCell::new(None) };
 }
 
 /// How strongly the blurred artwork shows through.
@@ -27,10 +29,13 @@ fn artwork(app: &App, route: Route) -> Option<String> {
     let art = |m: &crate::addons::types::Meta| m.background.clone().or_else(|| m.poster.clone());
     match route {
         Route::Board => app.board.read(|board| {
-            board.rows.iter().find_map(|row| match &row.items {
-                Load::Ready(items) => items.iter().find_map(art),
-                _ => None,
-            })
+            let slides = featured_titles(&board.rows);
+            if slides.is_empty() {
+                return None;
+            }
+            // Read the same signal and title pool as the featured banner.
+            let index = board.carousel.index.get() % slides.len();
+            art(&slides[index].0)
         }),
         Route::Detail => app.detail.read(|d| match &d.meta {
             Load::Ready(meta) => art(meta),
@@ -65,24 +70,38 @@ pub fn layer(app: &App) -> Widget {
     .into()
 }
 
-/// The blurred artwork, fading in whenever it changes.
+/// Crossfade between prepared thumbnails, retaining the previous wash until
+/// the new image is ready so slide changes never flash back to the base color.
 fn art_layer(url: &str, size: Size) -> Widget {
     let picture = images::blurred(url);
     let key = url.to_owned();
-    Builder::new(move |_| match picture.get() {
-        Picture::Ready(handle) => KeyedSubtree::new(
-            key.as_str(),
-            Opacity::new(
+    Builder::new(move |_| {
+        let ready = match picture.get() {
+            Picture::Ready(handle) => {
+                let ready = (key.clone(), handle);
+                LAST_READY.with(|last| *last.borrow_mut() = Some(ready.clone()));
+                Some(ready)
+            }
+            Picture::Loading => LAST_READY.with(|last| last.borrow().clone()),
+            Picture::Failed => {
+                LAST_READY.with(|last| *last.borrow_mut() = None);
+                None
+            }
+        };
+        let child = ready.map(|(key, handle)| Widget::from(KeyedSubtree::new(
+            key.as_str(), Opacity::new(
                 ART_OPACITY,
                 Image::new(handle).width(size.width).height(size.height).fit(BoxFit::Cover),
-            )
-            .animate()
-            .duration(CROSSFADE)
-            .curve(Curve::EaseOut)
-            .fade_in(),
+            ),
+        )));
+        AnimatedSwitcher::new(
+            if incular::animation::disable_animations() { Duration::ZERO } else { CROSSFADE },
+            child,
         )
-        .into(),
-        _ => SizedBox::shrink().into(),
+        .animated_transition_builder(|child, animation| FadeTransition::from_animation(animation, child))
+        .layout_builder(|current, previous| layers(previous.into_iter().chain(current).collect())
+            .fit(StackFit::Expand).into())
+        .into()
     })
     .into()
 }
