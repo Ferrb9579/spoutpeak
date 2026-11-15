@@ -30,14 +30,15 @@ pub fn http() -> &'static reqwest::Client {
     })
 }
 
-/// Accepts what users paste: an addon install link (`media://…`, the scheme addon sites use), a bare host, a URL with or
-/// without `manifest.json`.
+/// Accepts addon install links, bare hosts, and HTTP URLs with or without
+/// `manifest.json`. Install-link schemes are normalized to HTTPS.
 pub fn normalize_transport_url(input: &str) -> Option<String> {
     let mut url = input.trim().to_owned();
     if url.is_empty() {
         return None;
     }
-    if let Some((_, rest)) = url.split_once("://").filter(|(scheme, _)| !matches!(*scheme, "http" | "https")) {
+    if let Some((_, rest)) = url.split_once("://")
+        .filter(|(scheme, _)| !matches!(*scheme, "http" | "https")) {
         url = format!("https://{rest}");
     } else if !url.starts_with("http://") && !url.starts_with("https://") {
         url = format!("https://{url}");
@@ -54,6 +55,27 @@ pub fn normalize_transport_url(input: &str) -> Option<String> {
         Some(q) => format!("{path}?{q}"),
         None => path,
     })
+}
+
+#[cfg(test)]
+mod transport_url_tests {
+    use super::normalize_transport_url;
+
+    #[test]
+    fn install_links_and_bare_hosts_use_https_without_losing_configuration() {
+        for input in ["addon://example.test/config?token=abc", "example.test/config?token=abc"] {
+            assert_eq!(normalize_transport_url(input).as_deref(),
+                Some("https://example.test/config/manifest.json?token=abc"));
+        }
+    }
+
+    #[test]
+    fn http_transports_and_existing_manifests_are_preserved() {
+        for input in ["http://localhost:8080/manifest.json", "https://example.test/manifest.json?key=abc"] {
+            assert_eq!(normalize_transport_url(input).as_deref(), Some(input));
+        }
+        assert_eq!(normalize_transport_url("  "), None);
+    }
 }
 
 pub fn base_url(transport_url: &str) -> String {

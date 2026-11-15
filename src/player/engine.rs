@@ -1184,8 +1184,8 @@ impl rodio::Source for QueueSource {
     }
 }
 
-/// Tone-maps HDR (PQ or HLG, BT.2020) to SDR BT.709, as Media's and mpv's
-/// players do. Without it the HDR signal is shown as if it were SDR and looks
+/// Tone-maps HDR (PQ or HLG, BT.2020) to SDR BT.709.
+/// Without it the HDR signal is shown as if it were SDR and looks
 /// grey and washed out. Runs after downscaling, so it works on the output
 /// size rather than the source's (often 4K). `zscale` reads the source
 /// transfer and primaries from the frames. `mobius` keeps colours in the SDR
