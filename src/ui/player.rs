@@ -1509,20 +1509,6 @@ fn status_card(children: Vec<Widget>) -> Widget {
 }
 
 /// A spinning ring.
-fn spinner(size: f32) -> Widget {
-    SizedBox::new()
-        .width(size)
-        .height(size)
-        .child(
-            incular::material::CircularProgressIndicator::new()
-                .indeterminate(true)
-                .size(size)
-                .stroke_width((size / 8.0).max(2.0))
-                .color(ACCENT),
-        )
-        .into()
-}
-
 /// Seconds of video downloaded without a gap from the playhead on.
 fn buffered_ahead(ranges: &[(f32, f32)], position: f64, duration: f64) -> Option<f64> {
     if duration <= 0.0 {
@@ -1531,6 +1517,20 @@ fn buffered_ahead(ranges: &[(f32, f32)], position: f64, duration: f64) -> Option
     let at = (position / duration) as f32;
     let range = ranges.iter().find(|(start, end)| *start <= at + 0.0005 && at < *end);
     Some(range.map_or(0.0, |(_, end)| ((*end - at) as f64 * duration).max(0.0)))
+}
+
+fn connection_details(stats: &crate::streaming::TorrentStats) -> Widget {
+    let mut transports = format!("TCP {}  ·  uTP {}", stats.tcp_peers, stats.utp_peers);
+    if stats.proxy_peers > 0 {
+        transports.push_str(&format!("  ·  SOCKS {}", stats.proxy_peers));
+    }
+    col(vec![
+        text(transports, 12.0, FontWeight::W600, TEXT).into(),
+        gap(5.0),
+        text(format!("{} discovered  ·  {} connecting  ·  {} seeders",
+            stats.discovered, stats.connecting, stats.seeders),
+            11.5, FontWeight::W400, MUTED).into(),
+    ]).cross_axis_alignment(CrossAxisAlignment::Center).into()
 }
 
 /// Shown while playback waits for data: what it is waiting on and how
@@ -1559,7 +1559,7 @@ fn buffering_card(app: &App, torrent: Option<&crate::streaming::TorrentStats>) -
                 .map_or_else(|| "–".to_owned(), |s| format!("{s:.0}s"));
             lines.push(
                 row(vec![
-                    stat("Peers", stats.peers.to_string()),
+                    stat("Connected peers", stats.peers.to_string()),
                     hgap(26.0),
                     stat("Download", format_speed(stats.download_speed)),
                     hgap(26.0),
@@ -1569,6 +1569,8 @@ fn buffering_card(app: &App, torrent: Option<&crate::streaming::TorrentStats>) -
                 ])
                 .into(),
             );
+            lines.push(gap(12.0));
+            lines.push(connection_details(stats));
             if duration > 0.0 {
                 lines.push(gap(16.0));
                 lines.push(
@@ -1742,12 +1744,18 @@ pub fn screen(app: &App) -> Widget {
                 lines.push(gap(12.0));
                 lines.push(
                     row(vec![
-                        stat("Peers", stats.peers.to_string()),
+                        stat("Connected peers", stats.peers.to_string()),
                         hgap(26.0),
                         stat("Download", format_speed(stats.download_speed)),
                     ])
                     .into(),
                 );
+                lines.push(gap(12.0));
+                lines.push(connection_details(stats));
+            } else if stage == "Joining the swarm…" {
+                lines.push(gap(10.0));
+                lines.push(text("Discovering peers · TCP + uTP enabled", 12.0,
+                    FontWeight::W400, MUTED).into());
             }
             layers.push(status_card(lines));
         }

@@ -401,6 +401,9 @@ impl App {
                     self.notify("Preparing torrent…");
                     None
                 };
+                if let Some(ticket) = ticket {
+                    self.poll_opening_stats(ticket, info_hash.clone());
+                }
                 let stream = stream.clone();
                 spawn(
                     async move { streaming::stream_url(&info_hash, file_idx, &trackers).await },
@@ -584,14 +587,14 @@ impl App {
 
     /// Keeps swarm statistics fresh while a torrent is still opening (the
     /// regular tick only starts once the media has been read).
-    fn poll_opening_stats(&self, session_id: u64, url: String) {
+    fn poll_opening_stats(&self, session_id: u64, source: String) {
         spawn(
             async move {
                 tokio::time::sleep(std::time::Duration::from_millis(900)).await;
-                let stats = streaming::stats(&url);
-                (url, stats)
+                let stats = streaming::stats(&source);
+                (source, stats)
             },
-            move |app, (url, stats)| {
+            move |app, (source, stats)| {
                 let opening = app.player.session_id.get() == session_id
                     && app.player.state.peek(|s| s.status == Status::Opening);
                 if !opening {
@@ -600,7 +603,7 @@ impl App {
                 if stats.is_some() {
                     app.player.state.write(|s| s.torrent = stats);
                 }
-                app.poll_opening_stats(session_id, url);
+                app.poll_opening_stats(session_id, source);
             },
         );
     }

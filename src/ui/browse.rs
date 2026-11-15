@@ -2,7 +2,7 @@
 
 use super::motion;
 use super::widgets::*;
-use crate::state::{App, FeaturedCarousel, LibrarySort, Load, featured_titles, ui};
+use crate::state::{App, FeaturedCarousel, LibrarySort, Load, ui};
 use crate::addons::types::{LibraryItem, Meta};
 use crate::theme::*;
 use incular::prelude::*;
@@ -335,7 +335,10 @@ fn featured_carousel(app: &App, slides: Vec<(Meta, String)>) -> Widget {
                 let previous = carousel.clone();
                 let mut controls = vec![carousel_button(icons::chevron_left(), "Previous featured title",
                     move || previous.advance(-1, count)), hgap(4.0)];
-                for target in 0..count {
+                // Keep all slides accessible without letting the dots cover the artwork.
+                let visible = count.min(7);
+                let start = index.saturating_sub(visible / 2).min(count - visible);
+                for target in start..start + visible {
                     let select = carousel.clone();
                     controls.push(Widget::from(incular::controls::Button::with_child(
                         carousel_indicator(&carousel, target == index)
@@ -398,9 +401,8 @@ fn featured_carousel(app: &App, slides: Vec<(Meta, String)>) -> Widget {
 }
 
 pub fn board(app: &App) -> Widget {
-    let rows = app.board.read(|board| board.rows.clone());
+    let (rows, featured) = app.board.read(|board| (board.rows.clone(), board.featured.clone()));
     let mut sections: Vec<Widget> = Vec::new();
-    let featured = featured_titles(&rows);
     if !featured.is_empty() {
         sections.push(featured_carousel(app, featured));
         sections.push(gap(26.0));

@@ -5,7 +5,7 @@
 //! it shows through. Without artwork the window is plain black.
 
 use crate::images::{self, Picture};
-use crate::state::{App, Load, Route, featured_titles};
+use crate::state::{App, Load, Route};
 use crate::theme::*;
 use incular::prelude::*;
 use incular::widgets::StackFit;
@@ -29,7 +29,7 @@ fn artwork(app: &App, route: Route) -> Option<String> {
     let art = |m: &crate::addons::types::Meta| m.background.clone().or_else(|| m.poster.clone());
     match route {
         Route::Board => app.board.read(|board| {
-            let slides = featured_titles(&board.rows);
+            let slides = &board.featured;
             if slides.is_empty() {
                 return None;
             }

@@ -236,50 +236,89 @@ fn downloads_card(app: &App, format: DownloadFormat) -> Widget {
     .into()
 }
 
+fn shortcut_keys(keys: &[&str]) -> Widget {
+    let mut children = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        if index > 0 { children.push(hgap(4.0)); }
+        children.push(if *key == "+" {
+            text("+", 14.0, FontWeight::W500, TEXT).into()
+        } else if matches!(*key, "or" | "/") {
+            text(*key, 10.5, FontWeight::W400, FAINT).into()
+        } else {
+            Container::new().height(26.0).padding(EdgeInsets::symmetric(8.0, 0.0))
+                .constraints(Constraints::new(26.0, f32::INFINITY, 26.0, 26.0))
+                .alignment(Alignment::CENTER)
+                .decoration(BoxDecoration::new().color(SURFACE_HI)
+                    .border_radius(BorderRadius::all(Radius::circular(7.0))))
+                .child(Widget::from(text(if *key == "Shift" { "⇧" } else { *key },
+                    12.0, FontWeight::W600, Color::rgba(188, 188, 188, 255)))
+                    .accessibility_label(*key)).into()
+        });
+    }
+    row(children).into()
+}
+
+fn shortcut_group(title: &str, shortcuts: &[(&str, &[&str])]) -> Widget {
+    let mut children = vec![text(title, 13.0, FontWeight::W600, TEXT).into(), gap(10.0)];
+    for (index, (label, keys)) in shortcuts.iter().enumerate() {
+        if index > 0 {
+            children.push(Container::new().height(1.0)
+                .color(Color::rgba(255, 255, 255, 12)).into());
+        }
+        children.push(Padding::new(EdgeInsets::symmetric(0.0, 7.0), Row::new(vec![
+            Expanded::new(text(*label, 12.5, FontWeight::W400, MUTED).max_lines(Some(2))).into(),
+            hgap(12.0), shortcut_keys(keys),
+        ]).cross_axis_alignment(CrossAxisAlignment::Center)).into());
+    }
+    Container::new().radius(12.0).color(GLASS).padding(EdgeInsets::all(16.0))
+        .child(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
+}
+
 fn shortcuts_card() -> Widget {
-    let keys: &[(&str, &str)] = &[
-        ("Space / K", "Play or pause"),
-        ("← → / J L", "Seek (Shift: longer step)"),
-        ("↑ ↓", "Volume"),
-        ("M", "Mute"),
-        ("F / F11", "Fullscreen"),
-        ("C", "Subtitles on / off"),
-        ("G / H", "Subtitle delay −/+"),
-        ("[ / ]", "Audio delay −/+"),
-        ("Shift + , / .", "Slower / faster"),
-        ("B / Shift + B", "Brighter / darker"),
-        ("0 / Home", "Back to the start"),
-        ("N", "Next episode"),
-        ("Esc", "Leave fullscreen or the player"),
-    ];
-    let rows: Vec<Widget> = keys
-        .iter()
-        .map(|(key, action)| {
-            Padding::new(
-                EdgeInsets::symmetric(0.0, 5.0),
-                row(vec![
-                    SizedBox::new()
-                        .width(160.0)
-                        .child(
-                            Container::new()
-                                .padding(EdgeInsets::symmetric(8.0, 3.0))
-                                .decoration(
-                                    BoxDecoration::new()
-                                        .color(SURFACE_HI)
-                                        .border_radius(BorderRadius::all(Radius::circular(6.0))),
-                                )
-                                .child(text(*key, 12.0, FontWeight::W600, TEXT)),
-                        )
-                        .into(),
-                    text(*action, 13.0, FontWeight::W400, MUTED).into(),
-                ]),
-            )
-            .into()
-        })
-        .collect();
-    let mut children = vec![titled(icons::type_(), "Keyboard shortcuts"), gap(10.0)];
-    children.extend(rows);
-    card(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
+    card(LayoutBuilder::new(move |_, constraints| {
+        let playback = shortcut_group("Playback", &[
+            ("Play or pause", &["Space", "or", "K"]),
+            ("Seek backward", &["←", "or", "J"]),
+            ("Seek forward", &["→", "or", "L"]),
+            ("Longer seek", &["Shift", "+", "←", "/", "→"]),
+            ("Playback speed − / +", &["Shift", "+", ",", "/", "."]),
+            ("Back to start", &["0", "or", "Home"]),
+            ("Next episode", &["N"]),
+        ]);
+        let audio = shortcut_group("Audio & picture", &[
+            ("Volume + / −", &["↑", "/", "↓"]),
+            ("Mute", &["M"]),
+            ("Fullscreen", &["F", "or", "F11"]),
+            ("Brightness + / −", &["B", "/", "Shift", "+", "B"]),
+        ]);
+        let subtitles = shortcut_group("Subtitles & sync", &[
+            ("Subtitles on / off", &["C"]),
+            ("Subtitle delay − / +", &["G", "/", "H"]),
+            ("Audio delay − / +", &["[", "/", "]"]),
+        ]);
+        let groups: Widget = if constraints.max_width() >= 1080.0 {
+            Row::new(vec![Expanded::new(playback).into(), hgap(16.0),
+                Expanded::new(audio).into(), hgap(16.0), Expanded::new(subtitles).into()])
+                .cross_axis_alignment(CrossAxisAlignment::Start).into()
+        } else if constraints.max_width() >= 740.0 {
+            Row::new(vec![Expanded::new(playback).into(), hgap(16.0),
+                Expanded::new(col(vec![audio, gap(16.0), subtitles])
+                    .cross_axis_alignment(CrossAxisAlignment::Stretch)).into()])
+                .cross_axis_alignment(CrossAxisAlignment::Start).into()
+        } else {
+            col(vec![playback, gap(16.0), audio, gap(16.0), subtitles])
+                .cross_axis_alignment(CrossAxisAlignment::Stretch).into()
+        };
+        col(vec![
+            titled(icons::type_(), "Keyboard shortcuts"), gap(6.0),
+            text("For the built-in player. Seek and volume steps follow your Controls settings.",
+                12.0, FontWeight::W400, MUTED).into(),
+            gap(20.0), groups, gap(18.0),
+            Row::new(vec![shortcut_keys(&["Esc"]), hgap(10.0),
+                Expanded::new(text("Leave fullscreen or return from the player", 12.0,
+                    FontWeight::W400, MUTED)).into()]).into(),
+        ]).cross_axis_alignment(CrossAxisAlignment::Stretch).into()
+    })).into()
 }
 
 fn playback_card(app: &App, settings: &Settings) -> Widget {

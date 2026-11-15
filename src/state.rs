@@ -174,6 +174,7 @@ pub struct CatalogRow {
 #[derive(Default)]
 pub struct BoardState {
     pub rows: Vec<CatalogRow>,
+    pub featured: Vec<(Meta, String)>,
     pub generation: u64,
     pub carousel: FeaturedCarousel,
 }
@@ -305,21 +306,87 @@ mod carousel_tests {
     }
 }
 
-/// A small, deduplicated set drawn from the loaded home catalogs.
-pub fn featured_titles(rows: &[CatalogRow]) -> Vec<(Meta, String)> {
-    let mut seen = HashSet::new();
-    rows.iter().flat_map(|row| {
-        let items: &[Meta] = match &row.items {
-            Load::Ready(items) => items,
-            _ => &[],
-        };
-        items.iter().map(move |meta| (meta, &row.title))
-    })
-    .filter(|(meta, _)| meta.background.is_some() || meta.poster.is_some())
-    .filter(|(meta, _)| !meta.id().is_empty() && seen.insert((meta.kind.clone(), meta.id().to_owned())))
-    .take(6)
-    .map(|(meta, source)| (meta.clone(), source.clone()))
-    .collect()
+/// Append a small selection from each completed catalog, regardless of provider.
+/// Existing slides retain their positions as slower catalogs arrive.
+fn append_featured_titles(featured: &mut Vec<(Meta, String)>, row: &CatalogRow) {
+    let Load::Ready(items) = &row.items else { return };
+    let mut seen: HashSet<_> = featured.iter()
+        .map(|(meta, _)| (meta.kind.clone(), meta.id().to_owned())).collect();
+    featured.extend(items.iter()
+        .filter(|meta| [meta.background.as_ref(), meta.poster.as_ref()].into_iter()
+            .flatten().any(|url| !url.trim().is_empty()))
+        .filter(|meta| !meta.id().trim().is_empty()
+            && seen.insert((meta.kind.clone(), meta.id().to_owned())))
+        .take(2)
+        .map(|meta| (meta.clone(), row.title.clone())));
+}
+
+#[cfg(test)]
+mod featured_catalog_tests {
+    use super::*;
+
+    fn row(key: &str, ids: &[&str]) -> CatalogRow {
+        CatalogRow {
+            key: key.into(),
+            title: format!("{key} catalog"),
+            addon_name: key.into(),
+            items: Load::Ready(ids.iter().map(|id| Meta {
+                id: Some((*id).into()), kind: "movie".into(),
+                background: Some(format!("https://example.test/{id}.jpg")),
+                ..Meta::default()
+            }).collect()),
+        }
+    }
+
+    #[test]
+    fn late_catalogs_append_without_replacing_existing_slides() {
+        let rows = [row("alpha", &["a1", "a2", "a3"]),
+            row("beta", &["b1", "b2", "b3"]), row("custom-addon", &["c1"])];
+        for order in [[1, 0, 2], [0, 2, 1]] {
+            let mut featured = Vec::new();
+            for index in order {
+                let before: Vec<_> = featured.iter().map(|(m, _): &(Meta, String)| m.id().to_owned()).collect();
+                append_featured_titles(&mut featured, &rows[index]);
+                assert_eq!(featured[..before.len()].iter().map(|(m, _)| m.id()).collect::<Vec<_>>(), before);
+            }
+            assert_eq!(featured.len(), 5);
+            for source in &rows {
+                assert!(featured.iter().any(|(_, title)| title == &source.title));
+            }
+        }
+    }
+
+    #[test]
+    fn duplicates_do_not_use_another_catalogs_selection() {
+        let mut featured = Vec::new();
+        append_featured_titles(&mut featured, &row("first", &["same", "a"]));
+        append_featured_titles(&mut featured, &row("other", &["same", "same", "b", "c"]));
+        assert_eq!(featured.iter().map(|(m, _)| m.id()).collect::<Vec<_>>(), ["same", "a", "b", "c"]);
+        // A different media type with the same ID remains a separate title.
+        let mut series = row("series", &["same"]);
+        if let Load::Ready(items) = &mut series.items { items[0].kind = "series".into(); }
+        append_featured_titles(&mut featured, &series);
+        assert_eq!(featured.len(), 5);
+    }
+
+    #[test]
+    fn only_valid_titles_with_artwork_are_featured() {
+        let mut catalog = row("any-provider", &["", "no-art", "blank-art", "poster", "background"]);
+        if let Load::Ready(items) = &mut catalog.items {
+            items[1].background = None;
+            items[2].background = Some("  ".into());
+            items[3].background = None;
+            items[3].poster = Some("https://example.test/poster.jpg".into());
+        }
+        let mut featured = Vec::new();
+        append_featured_titles(&mut featured, &catalog);
+        assert_eq!(featured.iter().map(|(m, _)| m.id()).collect::<Vec<_>>(), ["poster", "background"]);
+        catalog.items = Load::Loading;
+        append_featured_titles(&mut featured, &catalog);
+        catalog.items = Load::Failed("unavailable".into());
+        append_featured_titles(&mut featured, &catalog);
+        assert_eq!(featured.len(), 2);
+    }
 }
 
 #[derive(Default)]
@@ -704,6 +771,7 @@ impl App {
         let generation = self.board.write(|board| {
             board.generation += 1;
             board.rows = refs.iter().map(Self::row_for).collect();
+            board.featured.clear();
             board.carousel.select(0);
             board.carousel.hover(false);
             board.generation
@@ -731,6 +799,7 @@ impl App {
                                 Ok(items) => Load::Ready(items),
                                 Err(error) => Load::Failed(error),
                             };
+                            append_featured_titles(&mut board.featured, row);
                         }
                     });
                 },
@@ -759,7 +828,7 @@ impl App {
                 }) else { return };
                 let on_screen = app.current_route() == Route::Board && app.controllers.board.offset() < 300.0;
                 if carousel.tick(std::time::Instant::now(), on_screen) {
-                    let count = app.board.peek(|board| featured_titles(&board.rows).len());
+                    let count = app.board.peek(|board| board.featured.len());
                     if count > 1 {
                         carousel.advance(1, count);
                     } else {

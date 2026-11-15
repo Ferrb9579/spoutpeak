@@ -68,6 +68,12 @@ type Handle = Arc<ManagedTorrent>;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TorrentStats {
     pub peers: u64,
+    pub connecting: u64,
+    pub discovered: u64,
+    pub seeders: u64,
+    pub tcp_peers: u64,
+    pub utp_peers: u64,
+    pub proxy_peers: u64,
     /// Bytes per second.
     pub download_speed: f64,
     /// Share of the streamed file downloaded so far, 0 to 1.
@@ -185,22 +191,35 @@ pub fn set_duration(url: &str, seconds: f64) {
     }
 }
 
-/// Swarm statistics for a URL returned by [`stream_url`].
-pub fn stats(url: &str) -> Option<TorrentStats> {
+/// Statistics for a local stream URL, or an info hash while preparing a stream.
+/// Metadata discovery has no managed torrent yet, so it returns `None`.
+pub fn stats(source: &str) -> Option<TorrentStats> {
     let engine = ENGINE.get()?;
-    let path = url.strip_prefix(&engine.base)?.split('?').next()?;
-    let (hash, file) = path.trim_start_matches('/').split_once('/')?;
-    let file: usize = file.parse().ok()?;
-    let handle = engine.lookup(hash)?;
+    let (hash, file) = if let Some(path) = source.strip_prefix(&engine.base) {
+        let (hash, file) = path.split('?').next()?.trim_start_matches('/').split_once('/')?;
+        (hash.to_owned(), Some(file.parse::<usize>().ok()?))
+    } else {
+        (parse_hash(source).ok()?.0, None)
+    };
+    let handle = engine.lookup(&hash).or_else(|| {
+        let (_, id) = parse_hash(&hash).ok()?;
+        engine.session.get(TorrentIdOrHash::Hash(id))
+    })?;
     let stats = handle.stats();
     let live = stats.live.as_ref();
-    let file_len = file_list(&handle).get(file).map_or(0, |f| f.1);
-    let done = stats.file_progress.get(file).copied().unwrap_or(0);
+    let file_len = file.and_then(|file| file_list(&handle).get(file).map(|f| f.1)).unwrap_or(0);
+    let done = file.and_then(|file| stats.file_progress.get(file).copied()).unwrap_or(0);
     Some(TorrentStats {
         peers: live.map_or(0, |l| u64::from(l.snapshot.peer_stats.live)),
+        connecting: live.map_or(0, |l| u64::from(l.snapshot.peer_stats.connecting)),
+        discovered: live.map_or(0, |l| u64::from(l.snapshot.peer_stats.seen)),
+        seeders: live.map_or(0, |l| u64::from(l.snapshot.peer_stats.live_seeders)),
+        tcp_peers: live.map_or(0, |l| u64::from(l.snapshot.peer_stats.live_tcp)),
+        utp_peers: live.map_or(0, |l| u64::from(l.snapshot.peer_stats.live_utp)),
+        proxy_peers: live.map_or(0, |l| u64::from(l.snapshot.peer_stats.live_socks)),
         download_speed: live.map_or(0.0, |l| l.download_speed.as_bytes() as f64),
         progress: if file_len > 0 { (done as f64 / file_len as f64).clamp(0.0, 1.0) } else { 0.0 },
-        ranges: have_ranges(engine, &handle, file),
+        ranges: file.map_or_else(Vec::new, |file| have_ranges(engine, &handle, file)),
     })
 }
 

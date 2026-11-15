@@ -40,10 +40,7 @@ fn home_refresh(app: &App) -> Widget {
             board.generation == 0 || board.rows.iter().any(|row| matches!(row.items, Load::Loading))
         });
         let glyph: Widget = if loading {
-            SizedBox::new().width(18.0).height(18.0).child(
-                incular::material::CircularProgressIndicator::new()
-                    .indeterminate(true).size(18.0).stroke_width(2.0).color(TEXT),
-            ).into()
+            spinner(18.0)
         } else {
             icon(icons::rotate_ccw(), 18.0, TEXT)
         };
@@ -103,7 +100,9 @@ fn titlebar(app: &App, window: &WindowHandle) -> Widget {
     }
     // Native caption actions should not steal the player's shortcut focus.
     children.extend([ExcludeFocus::new(controls).into(), hgap(10.0)]);
-    SizedBox::new().height(44.0).child(row(children)).into()
+    SizedBox::new().height(44.0).child(Container::new()
+        .color(if app.current_route() == Route::Player { Color::BLACK } else { Color::TRANSPARENT })
+        .child(row(children))).into()
 }
 
 /// The ambient layer sits behind this frame, so the caption has the same

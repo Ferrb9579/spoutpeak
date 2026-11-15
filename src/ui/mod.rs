@@ -15,7 +15,7 @@ mod widgets;
 
 use crate::state::{App, Route};
 use crate::theme::*;
-use incular::controls::{Button, ButtonStyle, ControlTheme, ControlThemeScope, StateColor};
+use incular::controls::{Button, ButtonStyle, ControlThemeScope, StateColor};
 use incular::prelude::*;
 use incular::widgets::StackFit;
 use std::cell::Cell;
@@ -339,7 +339,7 @@ pub fn root(app: &App) -> Widget {
     let layered = layers(vec![IgnorePointer::new(ambient::layer(app)).into(), framed]).fit(StackFit::Expand);
     let keys = app.clone();
     let themed = ControlThemeScope::new(
-        ControlTheme::dark(),
+        control_theme(),
         DefaultTextStyle::new(
             style(14.0, FontWeight::W400, TEXT),
             // BG only shows before the ambient layer's first frame.

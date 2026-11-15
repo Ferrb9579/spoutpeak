@@ -37,6 +37,15 @@ pub const GLASS_TINT: Color = Color::rgba(0, 0, 0, 110);
 pub const SELECTED: Color = Color::rgba(243, 243, 243, 255);
 pub const ON_SELECTED: Color = Color::rgba(21, 21, 21, 255);
 
+pub fn control_theme() -> incular::controls::ControlTheme {
+    let mut theme = incular::controls::ControlTheme::dark();
+    theme.colors.accent = ACCENT;
+    theme.colors.accent_hover = TEXT;
+    theme.colors.accent_active = SELECTED;
+    theme.colors.accent_foreground = ON_SELECTED;
+    theme
+}
+
 pub fn style(size: f32, weight: FontWeight, color: Color) -> TextStyle {
     TextStyle::new()
         .font_size(size)
@@ -75,6 +84,49 @@ pub fn section(value: impl Into<String>) -> Widget {
 
 pub fn gap(height: f32) -> Widget {
     SizedBox::new().height(height).into()
+}
+
+/// A single rounded arc: its centre rotates while its length eases in and out.
+pub fn spinner(size: f32) -> Widget {
+    let paint = move |phase: f32| {
+        use std::f32::consts::{FRAC_PI_2, TAU};
+        let stroke = (size / 10.0).max(2.0);
+        let radius = (size - stroke) * 0.5;
+        let centre = size * 0.5;
+        let growth = (1.0 - (phase * TAU).cos()) * 0.5;
+        let sweep = TAU * (0.12 + 0.68 * growth);
+        let start = phase * TAU * 2.0 - FRAC_PI_2 - sweep * 0.5;
+        let point = |angle: f32| Offset::new(centre + radius * angle.cos(), centre + radius * angle.sin());
+        let segments = (sweep / FRAC_PI_2).ceil() as usize;
+        let step = sweep / segments as f32;
+        let tangent = radius * (4.0 / 3.0) * (step * 0.25).tan();
+        let mut path = Path::builder();
+        path.move_to(point(start));
+        for segment in 0..segments {
+            let a = start + step * segment as f32;
+            let b = a + step;
+            let (from, to) = (point(a), point(b));
+            path.cubic_to(
+                Offset::new(from.x - tangent * a.sin(), from.y + tangent * a.cos()),
+                Offset::new(to.x + tangent * b.sin(), to.y - tangent * b.cos()), to,
+            );
+        }
+        let mut canvas = Canvas::default();
+        canvas.stroke_path(Arc::new(path.build()), TEXT,
+            Stroke { width: stroke, cap: LineCap::Round, join: LineJoin::Round, ..Default::default() });
+        CustomPaint::new(Size::new(size, size), canvas.finish())
+    };
+    let visual: Widget = if incular::animation::disable_animations() {
+        paint(0.25).into()
+    } else {
+        RepeatingAnimationBuilder::new(
+            incular::animation::TweenValue::new(0.0f32, 1.0),
+            std::time::Duration::from_millis(1800),
+            move |_, phase, _| paint(phase),
+        ).into()
+    };
+    Widget::from(SizedBox::new().width(size).height(size).child(visual))
+        .accessibility_label("Loading")
 }
 
 pub fn hgap(width: f32) -> Widget {
