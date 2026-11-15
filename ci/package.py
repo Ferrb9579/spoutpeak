@@ -204,9 +204,12 @@ def macos(work, name, app_version):
     binaries.mkdir(parents=True)
     resources.mkdir()
     shutil.copy2(RELEASE / "spoutpeak", binaries)
-    media = binaries / "ffmpeg"
+    media = work / "media"
     media.mkdir()
     fetch_macos_media(media)
+    for tool in ("ffmpeg", "ffprobe"):
+        shutil.copy2(media / tool, binaries / tool)
+    shutil.copytree(media / "licenses", resources / "licenses" / "ffmpeg")
     copy_notices(resources)
     iconset = work / "spoutpeak.iconset"
     iconset.mkdir()
@@ -223,18 +226,22 @@ def macos(work, name, app_version):
                       "CFBundleShortVersionString": app_version, "CFBundleVersion": app_version,
                       "LSMinimumSystemVersion": "15.0", "NSHighResolutionCapable": True}, dest)
     # Ad-hoc signing makes CI bundles runnable without distribution secrets.
-    for file in [media / "ffmpeg", media / "ffprobe", binaries / "spoutpeak"]:
+    for file in [binaries / "ffmpeg", binaries / "ffprobe", binaries / "spoutpeak"]:
         run("lipo", file, "-verify_arch", "arm64")
         linkage = subprocess.check_output(["otool", "-L", str(file)], text=True)
         if "/opt/homebrew/" in linkage or "/usr/local/" in linkage:
             raise RuntimeError("Unexpected external dependency:\n" + linkage)
-        run("codesign", "--force", "--sign", "-", file)
+        if file.name != "spoutpeak":
+            run("codesign", "--force", "--sign", "-", file)
+    # Signing the bundle signs its main executable in the bundle's context.
     run("codesign", "--force", "--sign", "-", app)
     run("codesign", "--verify", "--deep", "--strict", app)
     # Move the helpers to a path with spaces and no custom loader variables.
     with tempfile.TemporaryDirectory(prefix="Spoutpeak relocated ") as temp:
         relocated = Path(temp) / "ffmpeg"
-        shutil.copytree(media, relocated)
+        relocated.mkdir()
+        for tool in ("ffmpeg", "ffprobe"):
+            shutil.copy2(binaries / tool, relocated / tool)
         verify_media(relocated)
     run("ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app, DIST / (name + ".zip"))
     image = work / "dmg"
