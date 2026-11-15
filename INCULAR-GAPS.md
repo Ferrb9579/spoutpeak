@@ -1,6 +1,6 @@
 # Incular gaps
 
-Problems in Incular 0.1.2 that Spoutpeak works around. Each entry says what
+Problems in Incular 0.1.3 that Spoutpeak works around. Each entry says what
 goes wrong, what Flutter does, and what Spoutpeak does about it (and
 where). When Incular fixes one, remove the workaround and the entry.
 
@@ -11,6 +11,10 @@ the `TextField` focus border, growing buttons, `Ticker`, post-frame
 callbacks, public transition controllers, tooltips over later siblings,
 transparent layers, infinite constraints, blur clipping, button centring,
 signal writes during a build, panics in `Simulation`).
+
+Re-checked against 0.1.3: none of the entries below is fixed. `Tooltip`,
+the controls `Button` and `Simulation` are unchanged, and 0.1.3 still has no
+video widget (its new `ImageStream` is the loading state of one image).
 
 ## Overlays and gestures
 

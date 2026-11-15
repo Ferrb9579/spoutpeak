@@ -5,7 +5,8 @@
 //! librqbit downloads the pieces around the read position first. The HTTP
 //! listener only binds to 127.0.0.1 on a random port, and every URL carries
 //! a random per-run token, so nothing else on the machine or network can use
-//! it. Downloaded pieces stay in a size-limited cache for faster replays.
+//! it. Downloaded pieces stay in a cache for faster replays, limited by size
+//! and by how long ago each torrent was last played.
 
 use crate::store::TorrentSettings;
 use axum::Router;
@@ -18,7 +19,8 @@ use librqbit::api::TorrentIdOrHash;
 use librqbit::dht::{DhtPersistenceConfig, Id20};
 use librqbit::limits::LimitsConfig;
 use librqbit::{
-    AddTorrent, AddTorrentOptions, DhtSessionConfig, ManagedTorrent, Session, SessionOptions,
+    AddTorrent, AddTorrentOptions, DhtSessionConfig, FileStream, ManagedTorrent, Session,
+    SessionOptions, StreamPriority,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
@@ -30,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 
 /// A torrent nobody has streamed for this long stops downloading.
 const IDLE_AFTER: Duration = Duration::from_secs(5 * 60);
@@ -46,6 +48,10 @@ const PLAYING_AFTER: Duration = Duration::from_secs(3);
 const STARVING_AFTER: Duration = Duration::from_millis(250);
 const STARVED_COOLDOWN: Duration = Duration::from_secs(3);
 const HOUSEKEEPING_EVERY: Duration = Duration::from_secs(30);
+/// Touched in a cached torrent's folder while it is in use, so its age is
+/// the time since it was last played, not since a piece was last written.
+const USED_MARKER: &str = ".spoutpeak-used";
+const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 /// How long to wait for the torrent's metadata from peers.
 const METADATA_TIMEOUT: Duration = Duration::from_secs(50);
 const VIDEO_EXTENSIONS: &[&str] = &[
@@ -116,7 +122,7 @@ pub async fn start() -> Result<(), String> {
 }
 
 /// Applies changed settings. The speed cap applies at once, the peer limit
-/// to torrents opened from now on, the cache size at the next cleanup.
+/// to torrents opened from now on, the cache limits at the next cleanup.
 pub fn configure(settings: &TorrentSettings) {
     *config().lock().unwrap() = settings.clone();
     if let Some(engine) = ENGINE.get() {
@@ -207,6 +213,32 @@ fn have_ranges(engine: &Engine, handle: &Handle, file: usize) -> Vec<(f32, f32)>
 /// Where torrent data is cached.
 pub fn cache_folder() -> PathBuf {
     crate::util::cache_dir().join("torrents")
+}
+
+/// Deletes every cached torrent that is not being streamed or downloaded
+/// right now, and returns the disk space freed.
+pub async fn clear_cache() -> Result<u64, String> {
+    match ENGINE.get() {
+        Some(engine) => {
+            let busy = engine.busy();
+            let root = engine.root.clone();
+            let victims = tokio::task::spawn_blocking(move || {
+                scan_cache(&root).into_iter().filter(|f| !busy.contains(&f.hash)).collect()
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(engine.evict(victims).await)
+        }
+        None => tokio::task::spawn_blocking(|| {
+            scan_cache(&cache_folder())
+                .into_iter()
+                .filter(|f| remove_folder(&f.path))
+                .map(|f| f.size)
+                .sum()
+        })
+        .await
+        .map_err(|e| e.to_string()),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -533,6 +565,9 @@ impl Engine {
     }
 
     fn remember(&self, hash: &str, handle: Handle, staging: Option<PathBuf>) -> Handle {
+        if staging.is_none() {
+            mark_used(&self.root.join(hash));
+        }
         self.torrents.lock().unwrap().insert(
             hash.to_owned(),
             Entry {
@@ -628,45 +663,101 @@ impl Engine {
                 let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(folder)).await;
             }
         }
-        let Some(limit) = config().lock().unwrap().cache_size else { return };
-        // Only torrents being read or downloaded right now are protected. A
-        // torrent that is merely still open (closed less than `IDLE_AFTER`
-        // ago) is shut first if its folder has to go.
-        let busy: HashSet<String> = self
-            .torrents
+        // Torrents being read or downloaded right now are protected, and
+        // count as just used. A torrent that is merely still open (closed
+        // less than `IDLE_AFTER` ago) is shut first if its folder has to go.
+        let busy = self.busy();
+        for hash in &busy {
+            mark_used(&self.root.join(hash));
+        }
+        let (limit, max_age) = {
+            let config = config().lock().unwrap();
+            (config.cache_size, config.cache_max_age_days)
+        };
+        if limit.is_none() && max_age.is_none() {
+            return;
+        }
+        let open: HashSet<String> = self.torrents.lock().unwrap().keys().cloned().collect();
+        let root = self.root.clone();
+        let victims = tokio::task::spawn_blocking(move || {
+            cache_victims(scan_cache(&root), limit, max_age, &busy, &open)
+        })
+        .await
+        .unwrap_or_default();
+        self.evict(victims).await;
+    }
+
+    /// Hashes of the torrents being read or downloaded right now.
+    fn busy(&self) -> HashSet<String> {
+        self.torrents
             .lock()
             .unwrap()
             .iter()
             .filter(|(_, e)| e.active.load(Ordering::SeqCst) > 0)
             .map(|(hash, _)| hash.clone())
-            .collect();
-        let root = self.root.clone();
-        let victims = tokio::task::spawn_blocking(move || cache_victims(&root, limit, &busy))
-            .await
-            .unwrap_or_default();
-        for (hash, folder) in victims {
+            .collect()
+    }
+
+    /// Closes and deletes cached torrents, skipping any that started being
+    /// read since they were chosen, and returns the disk space freed. A
+    /// folder that cannot be deleted yet (a file still open) is chosen
+    /// again, and retried, at the next cleanup.
+    async fn evict(&self, victims: Vec<CachedTorrent>) -> u64 {
+        let mut freed = 0;
+        for victim in victims {
             let open = {
                 let mut torrents = self.torrents.lock().unwrap();
-                match torrents.get(&hash) {
-                    // Started reading again since the scan: keep it.
+                match torrents.get(&victim.hash) {
                     Some(e) if e.active.load(Ordering::SeqCst) > 0 => continue,
-                    Some(_) => torrents.remove(&hash),
+                    Some(_) => torrents.remove(&victim.hash),
                     None => None,
                 }
             };
             if let Some(entry) = open {
                 self.close(entry).await;
             }
-            let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(folder)).await;
+            let path = victim.path.clone();
+            if tokio::task::spawn_blocking(move || remove_folder(&path)).await.unwrap_or(false) {
+                freed += victim.size;
+            }
         }
+        freed
     }
 }
 
-/// The torrent folders (info hash, path) to delete, least recently written
-/// first, so the cache fits in `limit` bytes. Folders of `busy` torrents are
-/// never chosen. A busy torrent bigger than the limit can only shrink once
-/// it is closed: its data is in use.
-fn cache_victims(root: &FsPath, limit: u64, busy: &HashSet<String>) -> Vec<(String, PathBuf)> {
+/// Deletes a torrent folder. Windows refuses while a just-closed file is
+/// still being released, so a failed attempt is retried briefly.
+fn remove_folder(path: &FsPath) -> bool {
+    for attempt in 0..3 {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(_) if attempt < 2 => std::thread::sleep(Duration::from_millis(500)),
+            Err(_) => {}
+        }
+    }
+    false
+}
+
+/// Records that a cached torrent was just used (see `USED_MARKER`).
+fn mark_used(folder: &FsPath) {
+    if std::fs::create_dir_all(folder).is_ok() {
+        let _ = std::fs::File::create(folder.join(USED_MARKER));
+    }
+}
+
+/// One torrent folder in the cache.
+struct CachedTorrent {
+    hash: String,
+    path: PathBuf,
+    /// Space it takes on disk.
+    size: u64,
+    /// When it was last played (without a marker: last written).
+    last_used: SystemTime,
+}
+
+/// Every torrent folder in the cache.
+fn scan_cache(root: &FsPath) -> Vec<CachedTorrent> {
     fn walk(path: &FsPath, size: &mut u64, newest: &mut SystemTime) {
         let Ok(entries) = std::fs::read_dir(path) else { return };
         for entry in entries.flatten() {
@@ -682,26 +773,48 @@ fn cache_victims(root: &FsPath, limit: u64, busy: &HashSet<String>) -> Vec<(Stri
         }
     }
     let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
-    let mut folders: Vec<(String, PathBuf, u64, SystemTime)> = entries
+    entries
         .flatten()
         .filter(|e| e.path().is_dir())
         .map(|e| {
-            let (mut size, mut newest) = (0, SystemTime::UNIX_EPOCH);
-            walk(&e.path(), &mut size, &mut newest);
+            let (mut size, mut last_used) = (0, SystemTime::UNIX_EPOCH);
+            walk(&e.path(), &mut size, &mut last_used);
             let hash = e.file_name().to_string_lossy().to_ascii_lowercase();
-            (hash, e.path(), size, newest)
+            CachedTorrent { hash, path: e.path(), size, last_used }
         })
-        .collect();
-    let mut total: u64 = folders.iter().map(|f| f.2).sum();
-    folders.sort_by_key(|f| f.3);
+        .collect()
+}
+
+/// The cached torrents to delete:
+/// - with a maximum age of 0 days, every one that is no longer open;
+/// - otherwise every one not played for longer than the maximum age;
+/// - then the least recently used ones until the rest fits in `limit`.
+///
+/// `busy` torrents are never chosen, so a busy torrent bigger than the limit
+/// can only go once it is closed: its data is in use.
+fn cache_victims(
+    mut cached: Vec<CachedTorrent>,
+    limit: Option<u64>,
+    max_age_days: Option<u32>,
+    busy: &HashSet<String>,
+    open: &HashSet<String>,
+) -> Vec<CachedTorrent> {
+    let now = SystemTime::now();
+    let expired = |t: &CachedTorrent| match max_age_days {
+        None => false,
+        Some(0) => !open.contains(&t.hash),
+        Some(days) => now.duration_since(t.last_used).is_ok_and(|age| age > DAY * days),
+    };
+    let mut total: u64 = cached.iter().map(|t| t.size).sum();
+    cached.sort_by_key(|t| t.last_used);
     let mut victims = Vec::new();
-    for (hash, path, size, _) in folders {
-        if total <= limit {
-            break;
+    for torrent in cached {
+        if busy.contains(&torrent.hash) {
+            continue;
         }
-        if !busy.contains(&hash) {
-            total = total.saturating_sub(size);
-            victims.push((hash, path));
+        if expired(&torrent) || limit.is_some_and(|limit| total > limit) {
+            total = total.saturating_sub(torrent.size);
+            victims.push(torrent);
         }
     }
     victims
@@ -891,12 +1004,17 @@ impl Drop for Tracked {
 ///
 /// The file is not selected for download (see [`Engine::torrent`]), so
 /// librqbit fetches only `STREAM_WINDOW` past each open stream. That is a
-/// few seconds of a 4K remux. This keeps one more stream of its own reading
-/// further ahead of the playback position, up to a size based on the file
-/// (`lookahead`), and keeps a second one open at the file's last byte so the
-/// torrent always has a stream. With none, librqbit treats a torrent with
-/// nothing selected as finished: peers pause for five seconds and seeds are
-/// dropped, which happens in the gap between the probe and the decoders.
+/// few seconds of a 4K remux. Player responses are `Playback` streams; this
+/// keeps one `Background` stream of its own whose window covers the stretch
+/// after theirs, up to a size based on the file (`lookahead`). Background
+/// pieces are only requested once no playback piece is missing (our patched
+/// librqbit, `patches/librqbit`), so read-ahead never delays playback.
+///
+/// The stream stays open the whole time, so the torrent always has one.
+/// With none, librqbit treats a torrent with nothing selected as finished:
+/// peers pause for five seconds and seeds are dropped, which happens in the
+/// gap between the probe and the decoders. While nothing plays its window is
+/// the file's last piece, which MKV and MP4 seeking usually need.
 #[derive(Default)]
 struct Readahead {
     /// Open responses: id -> (position, bytes sent, opened at).
@@ -940,72 +1058,29 @@ fn lookahead(len: u64) -> u64 {
 }
 
 async fn run_readahead(readahead: Arc<Readahead>, handle: Handle, file: usize, len: u64) {
-    // Keeps a stream on the torrent at all times (see `Readahead`). Its
-    // window is the last piece, which MKV and MP4 seeking usually need.
-    let _anchor = match handle.clone().stream(file).await {
-        Ok(mut stream) => {
-            let _ = stream.seek(SeekFrom::Start(len.saturating_sub(1))).await;
-            Some(stream)
-        }
-        Err(_) => None,
-    };
+    let Ok(mut stream) = handle.clone().stream(file).await else { return };
+    stream.set_priority(StreamPriority::Background);
     let ahead = lookahead(len);
-    // librqbit does not export its stream type; only its traits are needed.
-    let mut stream: Option<Box<dyn SeekRead>> = None;
-    let mut position = 0u64;
-    let mut buffer = vec![0u8; 256 * 1024];
-    let pause = || tokio::time::sleep(Duration::from_millis(300));
+    let park = |stream: &mut FileStream| {
+        stream.set_window(1);
+        stream.set_position_now(len.saturating_sub(1));
+    };
+    park(&mut stream);
     while !readahead.stop.load(Ordering::SeqCst) {
-        // While playback waits for a piece, the read-ahead's own window
-        // would take every other peer request away from it: close it.
-        let Some(playhead) = readahead.playhead().filter(|_| !readahead.starving()) else {
-            stream = None;
-            pause().await;
-            continue;
-        };
-        // librqbit already fetches the first window past the playhead.
-        let from = (playhead + STREAM_WINDOW).min(len);
-        let to = (playhead + ahead).min(len);
-        if from >= to {
-            stream = None;
-            pause().await;
-            continue;
-        }
-        if stream.is_none() {
-            // A new stream starts at the beginning of the file.
-            stream = handle.clone().stream(file).await.ok().map(|s| Box::new(s) as Box<dyn SeekRead>);
-            position = 0;
-        }
-        let Some(reader) = stream.as_mut() else {
-            pause().await;
-            continue;
-        };
-        if position < from || position > to {
-            match reader.seek(SeekFrom::Start(from)).await {
-                Ok(at) => position = at,
-                Err(_) => {
-                    stream = None;
-                    continue;
-                }
+        // While playback waits for a piece, even background requests take
+        // peers' upload slots away from it: park the window.
+        match readahead.playhead().filter(|_| !readahead.starving()) {
+            // librqbit already fetches the first window past the playhead.
+            Some(playhead) if playhead + STREAM_WINDOW < len => {
+                let from = playhead + STREAM_WINDOW;
+                stream.set_position_now(from);
+                stream.set_window((playhead + ahead).min(len) - from);
             }
+            _ => park(&mut stream),
         }
-        // Its own window covers the rest up to `to`.
-        if position + STREAM_WINDOW >= to {
-            pause().await;
-            continue;
-        }
-        // Reading moves the window on; a missing piece keeps it in place.
-        match tokio::time::timeout(Duration::from_millis(400), reader.read(&mut buffer)).await {
-            Ok(Ok(0)) => pause().await,
-            Ok(Ok(read)) => position += read as u64,
-            Err(_) => {}
-            Ok(Err(_)) => stream = None,
-        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 }
-
-trait SeekRead: AsyncRead + AsyncSeek + Send + Unpin {}
-impl<T: AsyncRead + AsyncSeek + Send + Unpin> SeekRead for T {}
 
 fn next_reader_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -1044,6 +1119,9 @@ async fn serve_file(
         Ok(reader) => reader,
         Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     };
+    // A player is waiting on this response: its pieces come before any
+    // read-ahead.
+    reader.set_priority(StreamPriority::Playback);
     let len = reader.len();
 
     let mut out = HeaderMap::new();
@@ -1091,4 +1169,62 @@ async fn serve_file(
     };
     let chunks = tokio_util::io::ReaderStream::with_capacity(tracked, 64 * 1024);
     (status, out, Body::from_stream(chunks)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cached(hash: &str, size: u64, days_ago: u32) -> CachedTorrent {
+        CachedTorrent {
+            hash: hash.to_owned(),
+            path: PathBuf::from(hash),
+            size,
+            last_used: SystemTime::now() - DAY * days_ago,
+        }
+    }
+
+    fn victims(
+        torrents: Vec<CachedTorrent>,
+        limit: Option<u64>,
+        max_age: Option<u32>,
+        busy: &[&str],
+        open: &[&str],
+    ) -> Vec<String> {
+        let set = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<HashSet<_>>();
+        cache_victims(torrents, limit, max_age, &set(busy), &set(open))
+            .into_iter()
+            .map(|t| t.hash)
+            .collect()
+    }
+
+    #[test]
+    fn size_limit_evicts_least_recently_used() {
+        let all = vec![cached("new", 40, 0), cached("old", 40, 2), cached("mid", 40, 1)];
+        assert_eq!(victims(all, Some(80), None, &[], &[]), ["old"]);
+    }
+
+    #[test]
+    fn max_age_evicts_stale_torrents_under_the_size_limit() {
+        let all = vec![cached("fresh", 1, 1), cached("stale", 1, 8)];
+        assert_eq!(victims(all, Some(1000), Some(7), &[], &[]), ["stale"]);
+    }
+
+    #[test]
+    fn zero_days_keeps_only_open_torrents() {
+        let all = vec![cached("open", 1, 0), cached("closed", 1, 0)];
+        assert_eq!(victims(all, None, Some(0), &[], &["open"]), ["closed"]);
+    }
+
+    #[test]
+    fn busy_torrents_are_never_evicted() {
+        let all = vec![cached("busy", 100, 30), cached("idle", 10, 0)];
+        assert_eq!(victims(all, Some(50), Some(7), &["busy"], &["busy"]), ["idle"]);
+    }
+
+    #[test]
+    fn no_limits_keep_everything() {
+        let all = vec![cached("a", 1 << 40, 365)];
+        assert!(victims(all, None, None, &[], &[]).is_empty());
+    }
 }

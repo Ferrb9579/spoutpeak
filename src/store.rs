@@ -193,6 +193,9 @@ impl DownloadFormat {
 pub struct TorrentSettings {
     /// Bytes of torrent data kept on disk for replays; `None` = unlimited.
     pub cache_size: Option<u64>,
+    /// Days a cached torrent is kept after it was last streamed; `Some(0)`
+    /// = only while it is open, `None` = until the size limit needs room.
+    pub cache_max_age_days: Option<u32>,
     /// Peer connections per torrent.
     pub max_connections: u32,
     /// Download cap in bytes per second; `None` = unlimited.
@@ -203,6 +206,7 @@ impl Default for TorrentSettings {
     fn default() -> Self {
         Self {
             cache_size: Some(2 * 1024 * 1024 * 1024),
+            cache_max_age_days: Some(7),
             max_connections: 200,
             speed_limit: Some(39_321_600),
         }

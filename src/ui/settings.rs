@@ -407,6 +407,37 @@ fn streaming_card(app: &App, settings: &Settings) -> Widget {
         "Torrent data kept on disk for faster replays",
         choices(app, sizes, torrent.cache_size, |s, v| s.torrent.cache_size = v),
     ));
+    let mut ages: Vec<(String, Option<u32>)> = vec![
+        ("While open".to_owned(), Some(0)),
+        ("1 day".to_owned(), Some(1)),
+        ("3 days".to_owned(), Some(3)),
+        ("7 days".to_owned(), Some(7)),
+        ("30 days".to_owned(), Some(30)),
+        ("Until full".to_owned(), None),
+    ];
+    if !ages.iter().any(|(_, v)| *v == torrent.cache_max_age_days)
+        && let Some(days) = torrent.cache_max_age_days
+    {
+        ages.push((format!("{days} days"), Some(days)));
+    }
+    rows.push(setting_row(
+        "Keep cached torrents",
+        "Deleted this long after they were last played",
+        choices(app, ages, torrent.cache_max_age_days, |s, v| s.torrent.cache_max_age_days = v),
+    ));
+    rows.push(setting_row(
+        "Clear cache",
+        "Delete every cached torrent that is not playing now",
+        small_button("Clear now", Tone::Neutral, move || {
+            crate::state::spawn(crate::streaming::clear_cache(), |app, freed| {
+                app.notify(match freed {
+                    Ok(0) => "The torrent cache is already empty".to_owned(),
+                    Ok(bytes) => format!("Freed {}", crate::util::format_bytes(bytes)),
+                    Err(error) => format!("Could not clear the cache: {error}"),
+                });
+            });
+        }),
+    ));
     rows.push(
         text(
             format!("Stored in {}", crate::streaming::cache_folder().display()),
