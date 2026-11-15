@@ -124,7 +124,7 @@ fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
                     .width((width - 72.0).min(560.0))
                     .child(
                         Text::new(description.to_owned())
-                            .style(style(13.5, FontWeight::W400, Color::rgba(214, 219, 232, 255)))
+                            .style(style(13.5, FontWeight::W400, Color::rgba(222, 222, 222, 255)))
                             .max_lines(Some(2))
                             .overflow(TextOverflow::Ellipsis),
                     )
@@ -167,7 +167,7 @@ fn hero(app: &App, meta: &Meta, source: &str) -> Widget {
                 rounded(SURFACE),
                 net_image(art, width, HEIGHT, 20.0, 1280, ""),
                 // Scrim so the copy stays readable over any artwork.
-                rounded(Color::rgba(9, 11, 18, 150)),
+                rounded(Color::rgba(13, 13, 13, 150)),
                 Positioned::new(col(copy)).left(32.0).bottom(28.0).into(),
             ]))
             .into()

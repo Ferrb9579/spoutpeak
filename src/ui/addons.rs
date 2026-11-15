@@ -86,8 +86,8 @@ fn addon_card(app: &App, addon: &Descriptor, installed: bool, manage: bool) -> W
             .alignment(Alignment::CENTER_LEFT)
             .decoration(
                 BoxDecoration::new()
-                    .color(SURFACE)
-                    .border_radius(BorderRadius::all(Radius::circular(14.0))),
+                    .color(GLASS_TINT)
+                    .border_radius(BorderRadius::all(Radius::circular(16.0))),
             )
             .child(
                 hrow(vec![

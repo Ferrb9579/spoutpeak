@@ -85,7 +85,7 @@ pub fn tooltip(text: impl Into<String>, child: impl Into<Widget>) -> Widget {
             .padding(EdgeInsets::symmetric(11.0, 8.0))
             .decoration(
                 BoxDecoration::new()
-                    .color(Color::rgba(236, 239, 247, 248))
+                    .color(Color::rgba(241, 241, 241, 248))
                     .border_radius(BorderRadius::all(Radius::circular(9.0)))
                     .box_shadow(vec![BoxShadow::new(
                         Color::rgba(0, 0, 0, 120),
@@ -96,7 +96,7 @@ pub fn tooltip(text: impl Into<String>, child: impl Into<Widget>) -> Widget {
             )
             .child(
                 Text::new(text.clone())
-                    .style(style(12.5, FontWeight::W500, Color::rgba(18, 20, 30, 255))),
+                    .style(style(12.5, FontWeight::W500, Color::rgba(23, 23, 23, 255))),
             );
         let bubble = ConstrainedBox::new(
             Constraints::at_most(MAX_WIDTH, f32::INFINITY),

@@ -19,7 +19,7 @@ fn progress_bar(fraction: Option<f32>, color: Color) -> Widget {
             .width(width)
             .height(5.0)
             .radius(2.5)
-            .color(SURFACE_HOVER)
+            .color(GLASS_HI)
             .alignment(Alignment::CENTER_LEFT)
             .child(Container::new().width(filled.max(0.0)).height(5.0).radius(2.5).color(color))
             .into()
@@ -121,8 +121,8 @@ fn download_row(app: &App, item: &Download) -> Widget {
             .alignment(Alignment::CENTER_LEFT)
             .decoration(
                 BoxDecoration::new()
-                    .color(SURFACE)
-                    .border_radius(BorderRadius::all(Radius::circular(14.0))),
+                    .color(GLASS_TINT)
+                    .border_radius(BorderRadius::all(Radius::circular(16.0))),
             )
             .child(
                 hrow(vec![

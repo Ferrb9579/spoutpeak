@@ -36,6 +36,30 @@ pub fn picture(url: &str, max_width: u32) -> Signal<Picture> {
     shaped(url, max_width, None)
 }
 
+/// `url` shrunk to a thumbnail and Gaussian-blurred on the CPU, for the
+/// window's ambient backdrop. Blurring once here is far cheaper than a
+/// full-window blur filter every frame, and the GPU's upscaling of an
+/// already soft image adds no visible blockiness.
+pub fn blurred(url: &str) -> Signal<Picture> {
+    load_signal(format!("blur|{url}"), url, AMBIENT_WIDTH, None, true)
+}
+
+/// Width of the ambient thumbnail, and the blur on it (in its pixels).
+const AMBIENT_WIDTH: u32 = 240;
+const AMBIENT_SIGMA: f32 = 9.0;
+
+/// Richer colour for the ambient wash: blurring averages hues towards grey,
+/// so saturation is pushed back up (about 1.6x around each pixel's luma).
+fn vivid(image: &mut image::RgbaImage) {
+    for pixel in image.pixels_mut() {
+        let [r, g, b, a] = pixel.0;
+        let (r, g, b) = (f32::from(r), f32::from(g), f32::from(b));
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let push = |c: f32| (luma + (c - luma) * 1.6).clamp(0.0, 255.0) as u8;
+        pixel.0 = [push(r), push(g), push(b), a];
+    }
+}
+
 /// How an image is cropped before upload: the box it will be shown in
 /// (logical units).
 #[derive(Clone, Copy, Debug)]
@@ -51,6 +75,16 @@ pub fn shaped(url: &str, max_width: u32, shape: Option<Shape>) -> Signal<Picture
         Some(s) => format!("{max_width}|{}x{}|{url}", s.width, s.height),
         None => format!("{max_width}|{url}"),
     };
+    load_signal(key, url, max_width, shape, false)
+}
+
+fn load_signal(
+    key: String,
+    url: &str,
+    max_width: u32,
+    shape: Option<Shape>,
+    blur: bool,
+) -> Signal<Picture> {
     if let Some(existing) = CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
         return existing;
     }
@@ -67,7 +101,7 @@ pub fn shaped(url: &str, max_width: u32, shape: Option<Shape>) -> Signal<Picture
     let url = url.to_owned();
     spawn(
         async move {
-            let handle = load(&url, max_width, shape).await;
+            let handle = load(&url, max_width, shape, blur).await;
             if handle.is_none() && std::env::var_os("SPOUTPEAK_DEBUG").is_some() {
                 eprintln!("[image] failed: {url}");
             }
@@ -116,7 +150,7 @@ fn record_host(host: &str, reachable: bool) {
     }
 }
 
-async fn load(url: &str, max_width: u32, shape: Option<Shape>) -> Option<ImageHandle> {
+async fn load(url: &str, max_width: u32, shape: Option<Shape>, blur: bool) -> Option<ImageHandle> {
     let dir = cache_dir().join("images");
     let path = dir.join(hash_hex(url));
     let bytes = match tokio::fs::read(&path).await {
@@ -149,12 +183,12 @@ async fn load(url: &str, max_width: u32, shape: Option<Shape>) -> Option<ImageHa
             bytes
         }
     };
-    tokio::task::spawn_blocking(move || decode(&bytes, max_width, shape))
+    tokio::task::spawn_blocking(move || decode(&bytes, max_width, shape, blur))
         .await
         .ok()?
 }
 
-fn decode(bytes: &[u8], max_width: u32, shape: Option<Shape>) -> Option<ImageHandle> {
+fn decode(bytes: &[u8], max_width: u32, shape: Option<Shape>, blur: bool) -> Option<ImageHandle> {
     let mut decoded = image::load_from_memory(bytes).ok()?;
     if let Some(shape) = shape.filter(|s| s.width > 0.0 && s.height > 0.0) {
         // Cover-crop to the display box's aspect ratio, centred.
@@ -177,7 +211,13 @@ fn decode(bytes: &[u8], max_width: u32, shape: Option<Shape>) -> Option<ImageHan
             image::imageops::FilterType::Triangle,
         );
     }
-    let rgba = decoded.into_rgba8();
+    let rgba = if blur {
+        let mut soft = image::imageops::blur(&decoded.into_rgba8(), AMBIENT_SIGMA);
+        vivid(&mut soft);
+        soft
+    } else {
+        decoded.into_rgba8()
+    };
     let (width, height) = (rgba.width(), rgba.height());
     ImageHandle::from_rgba8(width, height, rgba.into_raw()).ok()
 }

@@ -22,7 +22,7 @@ fn placeholder(width: f32, height: f32, radius: f32, label: &str) -> Widget {
         .alignment(Alignment::CENTER)
         .decoration(
             BoxDecoration::new()
-                .color(SURFACE_HI)
+                .color(GLASS_HI)
                 .border_radius(BorderRadius::all(Radius::circular(radius))),
         )
         .child(text(
@@ -92,7 +92,7 @@ pub fn logo_image(url: Option<&str>, size: f32, label: &str) -> Widget {
             .padding(EdgeInsets::all(8.0))
             .decoration(
                 BoxDecoration::new()
-                    .color(SURFACE_HI)
+                    .color(GLASS_HI)
                     .border_radius(BorderRadius::all(Radius::circular(14.0))),
             )
             .child(
@@ -138,7 +138,7 @@ fn card_button(child: Widget, size: Size, on_click: impl Fn() + 'static) -> Widg
     Button::with_child(child)
         .style(ButtonStyle {
             background: Some(Color::TRANSPARENT),
-            background_states: Some(StateColor::new(Color::TRANSPARENT).hovered(SURFACE_HI)),
+            background_states: Some(StateColor::new(Color::TRANSPARENT).hovered(GLASS_HI)),
             foreground: Some(TEXT),
             border: Some(Border::new(0.0, Color::TRANSPARENT)),
             border_radius: Some(12.0),
@@ -339,7 +339,7 @@ pub fn catalog_section(app: &App, row: &CatalogRow) -> Option<Widget> {
                     .width(POSTER_HEIGHT * 2.0 / 3.0 - 8.0)
                     .height(POSTER_HEIGHT - 8.0)
                     .radius(10.0)
-                    .color(SURFACE),
+                    .color(GLASS),
             )
         }))
         .main_axis_size(MainAxisSize::Min)

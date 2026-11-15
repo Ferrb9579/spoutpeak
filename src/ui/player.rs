@@ -14,7 +14,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-const OVERLAY: Color = Color::rgba(8, 9, 14, 205);
+const OVERLAY: Color = Color::rgba(10, 10, 10, 205);
 
 /// A horizontal track; `change(fraction, committed)` fires on click and
 /// while dragging, with `committed` true on click and on release.
@@ -643,7 +643,7 @@ fn subtitle_style_panel(app: &App) -> Panel {
             .alignment(Alignment::CENTER)
             .decoration(
                 BoxDecoration::new()
-                    .color(Color::rgba(58, 66, 92, 255))
+                    .color(Color::rgba(72, 72, 72, 255))
                     .border_radius(BorderRadius::all(Radius::circular(10.0))),
             )
             .child(caption_block(&["Subtitles look like this"], size.min(22.0), &style)),
@@ -812,7 +812,7 @@ fn menu_panel(app: &App, menu: Menu) -> Option<Widget> {
             .padding(EdgeInsets::all(12.0))
             .decoration(
                 BoxDecoration::new()
-                    .color(Color::rgba(18, 21, 32, 245))
+                    .color(Color::rgba(24, 24, 24, 245))
                     .border_radius(BorderRadius::all(Radius::circular(14.0))),
             )
             .child(ConstrainedBox::new(
@@ -1017,7 +1017,7 @@ fn sync_panel(app: &App) -> Widget {
         .padding(EdgeInsets::all(12.0))
         .decoration(
             BoxDecoration::new()
-                .color(Color::rgba(18, 21, 32, 245))
+                .color(Color::rgba(24, 24, 24, 245))
                 .border_radius(BorderRadius::all(Radius::circular(16.0))),
         )
         .child(
@@ -1296,7 +1296,7 @@ fn up_next_card(app: &App, next: &crate::addons::types::Video, left: u32, lifted
         .padding(EdgeInsets::all(16.0))
         .decoration(
             BoxDecoration::new()
-                .color(Color::rgba(18, 21, 32, 240))
+                .color(Color::rgba(24, 24, 24, 240))
                 .border_radius(BorderRadius::all(Radius::circular(14.0))),
         )
         .child(col(vec![

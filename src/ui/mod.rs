@@ -1,6 +1,7 @@
 //! The window: navigation shell, routing and global keyboard handling.
 
 mod addons;
+mod ambient;
 mod browse;
 mod detail;
 mod downloads;
@@ -30,19 +31,13 @@ fn island(app: &App, build: fn(&App) -> Widget) -> Widget {
 const NAV_WIDTH: f32 = 196.0;
 
 fn nav_button(app: &App, label: &str, glyph: Arc<Path>, route: Route, active: bool) -> Widget {
-    let background = if active { ACCENT_DIM } else { Color::TRANSPARENT };
+    // The open screen is a lit glass pill, as in a segmented control.
+    let background = if active { GLASS_HOVER } else { Color::TRANSPARENT };
     let foreground = if active { TEXT } else { MUTED };
     let app = app.clone();
     let content = row(vec![
-        // Active marker.
-        Container::new()
-            .width(3.0)
-            .height(18.0)
-            .radius(2.0)
-            .color(if active { ACCENT } else { Color::TRANSPARENT })
-            .into(),
-        hgap(13.0),
-        icon(glyph, 18.0, if active { ACCENT } else { MUTED }),
+        hgap(14.0),
+        solid_icon(glyph, 19.0, if active { TEXT } else { MUTED }),
         hgap(13.0),
         text(
             label,
@@ -56,7 +51,7 @@ fn nav_button(app: &App, label: &str, glyph: Arc<Path>, route: Route, active: bo
         .style(ButtonStyle {
             background: Some(background),
             background_states: Some(
-                StateColor::new(background).hovered(if active { ACCENT_DIM } else { SURFACE_HI }),
+                StateColor::new(background).hovered(if active { GLASS_HOVER } else { GLASS }),
             ),
             foreground: Some(foreground),
             border: Some(Border::new(0.0, Color::TRANSPARENT)),
@@ -134,7 +129,7 @@ fn sidebar(app: &App, current: Route) -> Widget {
                     .padding(EdgeInsets::all(12.0))
                     .decoration(
                         BoxDecoration::new()
-                            .color(if hovered.get() { SURFACE_HI } else { SURFACE })
+                            .color(if hovered.get() { GLASS_HI } else { GLASS })
                             .border_radius(BorderRadius::all(Radius::circular(14.0))),
                     )
                     .child(col(vec![
@@ -168,22 +163,21 @@ fn sidebar(app: &App, current: Route) -> Widget {
     };
     items.push(footer.into());
 
-    // A floating rounded panel rather than a full-height strip.
+    // A floating pane of frosted glass rather than a full-height strip.
     Padding::new(
         EdgeInsets::only(12.0, 12.0, 0.0, 12.0),
-        Container::new()
-            .width(NAV_WIDTH + 24.0)
-            .padding(EdgeInsets::only(12.0, 16.0, 12.0, 12.0))
-            .decoration(
-                BoxDecoration::new()
-                    .color(PANEL)
-                    .border_radius(BorderRadius::all(Radius::circular(20.0))),
-            )
-            .child(
-                Column::new(items)
-                    .cross_axis_alignment(CrossAxisAlignment::Start)
-                    .main_axis_size(MainAxisSize::Max),
-            ),
+        frosted_glass(
+            glass(22.0)
+                .width(NAV_WIDTH + 24.0)
+                .padding(EdgeInsets::only(12.0, 16.0, 12.0, 12.0))
+                .child(
+                    Column::new(items)
+                        .cross_axis_alignment(CrossAxisAlignment::Start)
+                        .main_axis_size(MainAxisSize::Max),
+                ),
+            22.0,
+            30.0,
+        ),
     )
     .into()
 }
@@ -200,10 +194,10 @@ fn toast(app: &App) -> Widget {
                         .padding(EdgeInsets::symmetric(18.0, 11.0))
                         .decoration(
                             BoxDecoration::new()
-                                .color(Color::rgba(238, 240, 247, 255))
+                                .color(Color::rgba(242, 242, 242, 255))
                                 .border_radius(BorderRadius::all(Radius::circular(12.0))),
                         )
-                        .child(text(message, 13.5, FontWeight::W500, Color::rgba(18, 20, 30, 255))),
+                        .child(text(message, 13.5, FontWeight::W500, Color::rgba(23, 23, 23, 255))),
                     14.0,
                 )),
             ),
@@ -375,7 +369,11 @@ pub fn root(app: &App) -> Widget {
         }
     };
 
-    let mut stacked = vec![content, IgnorePointer::new(toast(app)).into()];
+    let mut stacked = vec![
+        IgnorePointer::new(ambient::layer(app)).into(),
+        content,
+        IgnorePointer::new(toast(app)).into(),
+    ];
     if !SPLASH_GONE.with(|gone| gone.get()) && route != Route::Player {
         stacked.push(splash_layer(app));
     }
@@ -385,6 +383,7 @@ pub fn root(app: &App) -> Widget {
         ControlTheme::dark(),
         DefaultTextStyle::new(
             style(14.0, FontWeight::W400, TEXT),
+            // BG only shows before the ambient layer's first frame.
             Container::new().color(BG).child(layered),
         ),
     );

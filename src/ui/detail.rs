@@ -16,9 +16,9 @@ const PANEL_INNER: f32 = PANEL_WIDTH - 40.0;
 /// Frosted-glass fills (over the blurred panel).
 const GLASS: Color = Color::rgba(255, 255, 255, 12);
 const GLASS_HOVER: Color = Color::rgba(255, 255, 255, 26);
-/// Selected / "continue" tiles: the accent, see-through.
-const GLASS_ACCENT: Color = Color::rgba(255, 138, 76, 52);
-const GLASS_ACCENT_HOVER: Color = Color::rgba(255, 138, 76, 84);
+/// Selected / "continue" tiles: brighter glass.
+const GLASS_ACCENT: Color = Color::rgba(255, 255, 255, 40);
+const GLASS_ACCENT_HOVER: Color = Color::rgba(255, 255, 255, 56);
 
 /// Acrylic: what lies behind `child` is blurred, then `child` (a translucent
 /// tint) is drawn over it, inside the rounded corners.
@@ -141,7 +141,7 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
         children.push(
             TextStyle::new()
                 .font_size(15.0)
-                .color(Color::rgba(214, 219, 232, 255))
+                .color(Color::rgba(222, 222, 222, 255))
                 .line_height_absolute(23.0)
                 .pipe(|style| Text::new(description.clone()).style(style))
                 .into(),
@@ -673,7 +673,7 @@ fn season_trigger(app: &App, entries: Rc<Vec<SeasonEntry>>, current: Option<u32>
 fn season_overlay(app: &App, entries: Rc<Vec<SeasonEntry>>, current: Option<u32>) -> Widget {
     let close = app.clone();
     layers(vec![
-        GestureDetector::new(Container::new().color(Color::rgba(9, 11, 17, 120)))
+        GestureDetector::new(Container::new().color(Color::rgba(12, 12, 12, 120)))
             .behavior(HitTestBehavior::Opaque)
             .on_tap(move || close.close_season_picker())
             .into(),
@@ -742,7 +742,7 @@ fn season_dropdown(app: &App, entries: Rc<Vec<SeasonEntry>>, current: Option<u32
         .padding(EdgeInsets::all(10.0))
         .decoration(
             BoxDecoration::new()
-                .color(Color::rgba(30, 33, 44, 170))
+                .color(Color::rgba(36, 36, 36, 170))
                 .border_radius(BorderRadius::all(Radius::circular(14.0)))
                 .box_shadow(vec![BoxShadow::new(
                     Color::rgba(0, 0, 0, 140),
@@ -823,17 +823,6 @@ pub fn screen(app: &App) -> Widget {
         (None, false) => Padding::all(20.0, muted(if loading { "Loading…" } else { "Nothing to play." })).into(),
     };
 
-    let background = {
-        let url = meta.background.clone().or_else(|| meta.poster.clone());
-        LayoutBuilder::new(move |_, constraints| {
-            let size = constraints.biggest();
-            match &url {
-                Some(url) => net_image(Some(url), size.width, size.height, 0.0, 1280, ""),
-                None => SizedBox::shrink().into(),
-            }
-        })
-    };
-
     let back = {
         let app = app.clone();
         icon_button(icon(icons::arrow_left(), 20.0, TEXT), 40.0, move || app.back())
@@ -851,7 +840,7 @@ pub fn screen(app: &App) -> Widget {
                             .width(PANEL_WIDTH)
                             .decoration(
                                 BoxDecoration::new()
-                                    .color(Color::rgba(14, 16, 26, 105))
+                                    .color(Color::rgba(19, 19, 19, 105))
                                     .border_radius(BorderRadius::all(Radius::circular(18.0))),
                             )
                             .child(panel),
@@ -867,11 +856,7 @@ pub fn screen(app: &App) -> Widget {
     ])
     .cross_axis_alignment(CrossAxisAlignment::Stretch);
 
-    layers(vec![
-        background.into(),
-        Container::new().color(Color::rgba(9, 11, 17, 165)).into(),
-        content.into(),
-    ])
-    .fit(StackFit::Expand)
-    .into()
+    // The title's artwork shows as the window's blurred ambient backdrop
+    // (`ui::ambient`), so the page itself is transparent.
+    content.into()
 }

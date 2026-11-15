@@ -5,24 +5,40 @@ use incular::controls::{Button, ButtonStyle, StateColor, TextField, TextFieldSty
 use incular::prelude::*;
 use std::sync::Arc;
 
-pub const PANEL: Color = Color::rgba(17, 20, 31, 255);
+pub const PANEL: Color = Color::rgba(23, 23, 23, 255);
 
-pub const BG: Color = Color::rgba(11, 13, 20, 255);
-pub const SIDEBAR: Color = Color::rgba(15, 18, 28, 255);
-pub const SURFACE: Color = Color::rgba(23, 27, 40, 255);
-pub const SURFACE_HI: Color = Color::rgba(33, 38, 56, 255);
-pub const SURFACE_HOVER: Color = Color::rgba(42, 48, 70, 255);
-pub const LINE: Color = Color::rgba(40, 46, 66, 255);
-pub const TEXT: Color = Color::rgba(236, 239, 247, 255);
-pub const MUTED: Color = Color::rgba(146, 154, 178, 255);
-pub const FAINT: Color = Color::rgba(96, 104, 128, 255);
-pub const ACCENT: Color = Color::rgba(255, 138, 76, 255);
-pub const ACCENT_HI: Color = Color::rgba(255, 160, 108, 255);
-pub const ACCENT_DIM: Color = Color::rgba(62, 40, 30, 255);
-pub const ON_ACCENT: Color = Color::rgba(26, 14, 6, 255);
+pub const BG: Color = Color::rgba(8, 8, 8, 255);
+pub const SIDEBAR: Color = Color::rgba(20, 20, 20, 255);
+pub const SURFACE: Color = Color::rgba(30, 30, 30, 255);
+pub const SURFACE_HI: Color = Color::rgba(42, 42, 42, 255);
+pub const SURFACE_HOVER: Color = Color::rgba(53, 53, 53, 255);
+pub const LINE: Color = Color::rgba(51, 51, 51, 255);
+pub const TEXT: Color = Color::rgba(241, 241, 241, 255);
+pub const MUTED: Color = Color::rgba(159, 159, 159, 255);
+pub const FAINT: Color = Color::rgba(109, 109, 109, 255);
+// Monochrome: the interface is black and white; colour comes only from the
+// artwork on screen (the ambient backdrop, posters, the video itself).
+/// Primary actions and highlights: near-white, with black text on it.
+pub const ACCENT: Color = Color::rgba(245, 245, 245, 255);
+pub const ACCENT_HI: Color = Color::rgba(255, 255, 255, 255);
+/// Selected rows and toggles: lit glass.
+pub const ACCENT_DIM: Color = Color::rgba(255, 255, 255, 38);
+pub const ON_ACCENT: Color = Color::rgba(10, 10, 10, 255);
 pub const DANGER: Color = Color::rgba(240, 96, 104, 255);
 pub const GOOD: Color = Color::rgba(92, 204, 150, 255);
-pub const SCRIM: Color = Color::rgba(5, 6, 10, 190);
+pub const SCRIM: Color = Color::rgba(7, 7, 7, 190);
+
+// Glass: translucent fills over the ambient backdrop (`ui::ambient`).
+/// A faint lift for tiles and inactive controls.
+pub const GLASS: Color = Color::rgba(255, 255, 255, 12);
+/// Neutral buttons, fields.
+pub const GLASS_HI: Color = Color::rgba(255, 255, 255, 20);
+pub const GLASS_HOVER: Color = Color::rgba(255, 255, 255, 30);
+/// The dark tint inside panels, so text stays readable over bright art.
+pub const GLASS_TINT: Color = Color::rgba(0, 0, 0, 110);
+/// Selected pills: near-white with dark text.
+pub const SELECTED: Color = Color::rgba(243, 243, 243, 255);
+pub const ON_SELECTED: Color = Color::rgba(21, 21, 21, 255);
 
 pub fn style(size: f32, weight: FontWeight, color: Color) -> TextStyle {
     TextStyle::new()
@@ -93,9 +109,9 @@ pub enum Tone {
 fn button_style(tone: Tone, height: f32) -> ButtonStyle {
     let (background, hover, foreground) = match tone {
         Tone::Primary => (ACCENT, ACCENT_HI, ON_ACCENT),
-        Tone::Neutral => (SURFACE_HI, SURFACE_HOVER, TEXT),
-        Tone::Ghost => (Color::TRANSPARENT, SURFACE_HI, MUTED),
-        Tone::Danger => (Color::rgba(70, 30, 36, 255), Color::rgba(98, 38, 46, 255), DANGER),
+        Tone::Neutral => (GLASS_HI, GLASS_HOVER, TEXT),
+        Tone::Ghost => (Color::TRANSPARENT, GLASS_HI, MUTED),
+        Tone::Danger => (Color::rgba(240, 96, 104, 34), Color::rgba(240, 96, 104, 60), DANGER),
         Tone::Glass => (Color::rgba(255, 255, 255, 34), Color::rgba(255, 255, 255, 60), TEXT),
     };
     ButtonStyle {
@@ -139,9 +155,9 @@ pub fn small_button(label: impl Into<String>, tone: Tone, on_click: impl Fn() + 
 /// A selectable pill, used for filters and segmented choices.
 pub fn chip(label: impl Into<String>, selected: bool, on_click: impl Fn() + 'static) -> Widget {
     let (background, hover, foreground) = if selected {
-        (ACCENT_DIM, ACCENT_DIM, ACCENT)
+        (SELECTED, SELECTED, ON_SELECTED)
     } else {
-        (SURFACE, SURFACE_HOVER, MUTED)
+        (GLASS, GLASS_HOVER, MUTED)
     };
     Button::new(label)
         .style(ButtonStyle {
@@ -152,7 +168,11 @@ pub fn chip(label: impl Into<String>, selected: bool, on_click: impl Fn() + 'sta
             border_radius: Some(15.0),
             padding: Some(EdgeInsets::symmetric(13.0, 0.0)),
             height: Some(30.0),
-            text_style: Some(style(12.5, FontWeight::W500, foreground)),
+            text_style: Some(style(
+                12.5,
+                if selected { FontWeight::W600 } else { FontWeight::W500 },
+                foreground,
+            )),
             overlay_color: Some(Color::TRANSPARENT.into()),
             animation_duration: Some(std::time::Duration::ZERO),
             ..ButtonStyle::default()
@@ -167,7 +187,7 @@ pub fn icon_button(child: impl Into<Widget>, size: f32, on_click: impl Fn() + 's
         .style(ButtonStyle {
             background: Some(Color::TRANSPARENT),
             background_states: Some(
-                StateColor::new(Color::TRANSPARENT).hovered(Color::rgba(255, 255, 255, 28)),
+                StateColor::new(Color::TRANSPARENT).hovered(GLASS_HOVER),
             ),
             foreground: Some(TEXT),
             border: Some(Border::new(0.0, Color::TRANSPARENT)),
@@ -184,11 +204,13 @@ pub fn icon_button(child: impl Into<Widget>, size: f32, on_click: impl Fn() + 's
 
 pub fn field_style() -> TextFieldStyle {
     TextFieldStyle {
-        background: Some(SURFACE_HI),
+        // Mid-grey glass reads on dark panels and over bright artwork alike.
+        background: Some(Color::rgba(128, 128, 128, 46)),
         foreground: Some(TEXT),
-        placeholder_color: Some(FAINT),
+        placeholder_color: Some(MUTED),
         border: Some(Border::new(0.0, Color::TRANSPARENT)),
-        border_focused: Some(Border::new(1.5, ACCENT)),
+        // The one outline left: shows which field has keyboard focus.
+        border_focused: Some(Border::new(1.0, Color::rgba(255, 255, 255, 80))),
         border_radius: Some(10.0),
         padding: Some(EdgeInsets::symmetric(12.0, 0.0)),
     }
@@ -207,16 +229,25 @@ pub fn input(
         .on_submit(on_submit)
 }
 
-/// A rounded panel.
+/// A rounded glass panel: a dark translucent tint over the ambient
+/// backdrop. No outline; the fill alone sets it apart.
 pub fn card(child: impl Into<Widget>) -> Container {
-    Container::new()
-        .padding(EdgeInsets::all(18.0))
-        .decoration(
-            BoxDecoration::new()
-                .color(SURFACE)
-                .border_radius(BorderRadius::all(Radius::circular(14.0))),
-        )
-        .child(child)
+    glass(18.0).padding(EdgeInsets::all(20.0)).child(child)
+}
+
+/// An empty glass panel with corner `radius`, to add padding and a child to.
+pub fn glass(radius: f32) -> Container {
+    Container::new().decoration(
+        BoxDecoration::new()
+            .color(GLASS_TINT)
+            .border_radius(BorderRadius::all(Radius::circular(radius))),
+    )
+}
+
+/// Frosted glass: what lies behind `child` is blurred (by `sigma`), then
+/// `child`, normally a [`glass`] panel, is drawn over it.
+pub fn frosted_glass(child: impl Into<Widget>, radius: f32, sigma: f32) -> Widget {
+    ClipRRect::new(radius, incular::widgets::BackdropFilter::blur(sigma, child)).into()
 }
 
 pub fn divider() -> Widget {
@@ -414,6 +445,41 @@ pub fn icon_with(path: Arc<Path>, size: f32, color: Color, stroke: f32, filled: 
         })
         .fill(filled)
         .into()
+}
+
+/// A Lucide icon drawn solid, the way Liner draws its navigation: every
+/// closed shape is filled (even-odd, so inner shapes such as a house's door,
+/// a compass needle or the hole in a gear stay cut out) and the outline is
+/// still stroked so open strokes (a magnifier's handle) keep showing.
+pub fn solid_icon(path: Arc<Path>, size: f32, color: Color) -> Widget {
+    struct Solid {
+        path: Arc<Path>,
+        color: Color,
+    }
+    impl CustomPainter for Solid {
+        fn paint(&self, size: Size) -> DisplayList {
+            let mut list = Canvas::default();
+            list.save_transform(AffineTransform::scale(size.width / 24.0));
+            list.draw_path(self.path.clone(), &Paint::new().color(self.color).fill(), FillRule::EvenOdd);
+            let outline = Stroke {
+                width: 1.6,
+                cap: LineCap::Round,
+                join: LineJoin::Round,
+                ..Stroke::default()
+            };
+            list.draw_path(
+                self.path.clone(),
+                &Paint::new().color(self.color).stroke().stroke_settings(outline),
+                FillRule::NonZero,
+            );
+            list.restore();
+            list.finish()
+        }
+        fn should_repaint(&self, old: &Self) -> bool {
+            !Arc::ptr_eq(&self.path, &old.path) || self.color != old.color
+        }
+    }
+    CustomPaint::from_painter(Size::new(size, size), Solid { path, color }).into()
 }
 
 fn icon_label(glyph: Arc<Path>, label: Option<String>, size: f32, text_size: f32, color: Color) -> Widget {

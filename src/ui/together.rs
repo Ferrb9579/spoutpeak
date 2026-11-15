@@ -12,7 +12,7 @@ use std::time::Duration;
 fn role_color(role: Role) -> Color {
     match role {
         Role::Host => ACCENT,
-        Role::Cohost => Color::rgba(110, 190, 255, 255),
+        Role::Cohost => Color::rgba(200, 200, 200, 255),
         Role::Viewer => FAINT,
     }
 }
@@ -254,7 +254,7 @@ pub fn bubbles(app: &App) -> Option<Widget> {
                     .padding(EdgeInsets::symmetric(12.0, 7.0))
                     .decoration(
                         BoxDecoration::new()
-                            .color(Color::rgba(12, 14, 22, 215))
+                            .color(Color::rgba(16, 16, 16, 215))
                             .border_radius(BorderRadius::all(Radius::circular(12.0))),
                     )
                     .child(chat_row(line, 320.0)),
@@ -286,7 +286,7 @@ pub fn player_panel(app: &App) -> Widget {
         .padding(EdgeInsets::all(14.0))
         .decoration(
             BoxDecoration::new()
-                .color(Color::rgba(18, 21, 32, 245))
+                .color(Color::rgba(24, 24, 24, 245))
                 .border_radius(BorderRadius::all(Radius::circular(16.0))),
         )
         .child(room_view(app, WIDTH - 28.0, 220.0))
