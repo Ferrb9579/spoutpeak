@@ -1348,26 +1348,28 @@ fn peers_dialog(app: &App) -> Widget {
             }
         }).unwrap_or_default();
         let close = app.clone();
-        let header = row(vec![
+        let header = Row::new(vec![
             text("Peers", 20.0, FontWeight::W700, TEXT).into(),
             Spacer::new().into(),
             player_tip("Close", icon_button(icon(icons::x(), 18.0, TEXT), 30.0,
                 move || close.set_player_menu(Menu::None))),
-        ]);
+        ]).cross_axis_alignment(CrossAxisAlignment::Center);
         let summary = Row::new(vec![
             stat("Connected", stats.peers.to_string()),
             stat("Seeders", stats.seeders.to_string()),
             stat("Connecting", stats.connecting.to_string()),
             stat("Discovered", stats.discovered.to_string()),
         ]).main_axis_alignment(MainAxisAlignment::SpaceBetween);
+        let list_height = (peers.len().max(1) as f32 * 90.0)
+            .min((constraints.max_height() - 278.0).clamp(80.0, 340.0));
         let mut items: Vec<Widget> = Vec::new();
         for peer in peers {
             items.push(Container::new().padding(EdgeInsets::all(12.0)).radius(8.0)
                 .color(Color::rgba(255, 255, 255, 9)).child(col(vec![
-                    row(vec![
+                    Row::new(vec![
                         Expanded::new(line(peer.address, 13.0, FontWeight::W600, TEXT)).into(),
                         hgap(8.0), text(peer.transport, 11.5, FontWeight::W600, MUTED).into(),
-                    ]).into(),
+                    ]).cross_axis_alignment(CrossAxisAlignment::Center).into(),
                     gap(4.0),
                     line(peer.client, 12.0, FontWeight::W400, MUTED),
                     gap(6.0),
@@ -1381,18 +1383,18 @@ fn peers_dialog(app: &App) -> Widget {
                 text("No connected peers yet. Discovered peers will appear here when they connect.",
                     13.0, FontWeight::W400, MUTED)).into());
         }
-        let list_height = (constraints.max_height() - 278.0).clamp(80.0, 340.0);
         let dialog = Container::new().width((constraints.max_width() - 40.0).clamp(0.0, 560.0))
             .padding(EdgeInsets::all(22.0)).radius(16.0).color(Color::rgba(24, 24, 24, 250))
             .child(col(vec![
                 header.into(), gap(18.0), summary.into(), gap(16.0),
-                connection_details(&stats), gap(14.0),
+                text(format!("TCP {}  ·  uTP {}  ·  SOCKS {}", stats.tcp_peers, stats.utp_peers, stats.proxy_peers),
+                    12.0, FontWeight::W500, MUTED).into(), gap(14.0),
                 text(format!("{} download  ·  {:.1}% of video buffered", format_speed(stats.download_speed), stats.progress * 100.0),
                     12.0, FontWeight::W500, MUTED).into(), gap(16.0),
                 SizedBox::new().height(list_height).child(motion::wheel(&app.controllers.player_menu,
-                    WheelAxis::Vertical, SingleChildScrollView::new(col(items))
+                    WheelAxis::Vertical, SingleChildScrollView::new(col(items).cross_axis_alignment(CrossAxisAlignment::Stretch))
                         .physics(motion::APP_SCROLLED).controller(app.controllers.player_menu.clone()))).into(),
-            ]));
+            ]).cross_axis_alignment(CrossAxisAlignment::Stretch));
         let dismiss = app.clone();
         Stack::new(vec![
             GestureDetector::new(Container::new().color(Color::rgba(0, 0, 0, 100)).child(SizedBox::expand()))
