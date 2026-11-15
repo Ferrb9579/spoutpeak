@@ -3,7 +3,7 @@
 use super::motion;
 use super::widgets::*;
 use crate::state::App;
-use crate::store::{DownloadFormat, PlayerKind, Settings};
+use crate::store::{DownloadFormat, PlayerKind, ReadAhead, Settings};
 use crate::streaming::TorrentProfile;
 use crate::theme::*;
 use crate::util::language_name;
@@ -424,6 +424,22 @@ fn streaming_card(app: &App, settings: &Settings) -> Widget {
         "Keep cached torrents",
         "Deleted this long after they were last played",
         choices(app, ages, torrent.cache_max_age_days, |s, v| s.torrent.cache_max_age_days = v),
+    ));
+    let mut ahead: Vec<(String, ReadAhead)> = vec![("Auto".to_owned(), ReadAhead::Auto)];
+    ahead.extend([128u32, 256, 512, 1024, 2048].map(|mb| {
+        let label = if mb >= 1024 { format!("{} GB", mb / 1024) } else { format!("{mb} MB") };
+        (label, ReadAhead::Megabytes(mb))
+    }));
+    ahead.push(("Whole file".to_owned(), ReadAhead::WholeFile));
+    if !ahead.iter().any(|(_, v)| *v == torrent.read_ahead)
+        && let ReadAhead::Megabytes(mb) = torrent.read_ahead
+    {
+        ahead.push((format!("{mb} MB"), torrent.read_ahead));
+    }
+    rows.push(setting_row(
+        "Read ahead",
+        "How much past the playback position keeps downloading, also while paused. Auto is about 2.5% of the file",
+        choices(app, ahead, torrent.read_ahead, |s, v| s.torrent.read_ahead = v),
     ));
     rows.push(setting_row(
         "Clear cache",

@@ -8,7 +8,7 @@
 //! it. Downloaded pieces stay in a cache for faster replays, limited by size
 //! and by how long ago each torrent was last played.
 
-use crate::store::TorrentSettings;
+use crate::store::{ReadAhead, TorrentSettings};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, RawQuery, State};
@@ -19,8 +19,8 @@ use librqbit::api::TorrentIdOrHash;
 use librqbit::dht::{DhtPersistenceConfig, Id20};
 use librqbit::limits::LimitsConfig;
 use librqbit::{
-    AddTorrent, AddTorrentOptions, DhtSessionConfig, FileStream, ManagedTorrent, Session,
-    SessionOptions, StreamPriority,
+    AddTorrent, AddTorrentOptions, DhtSessionConfig, FileStream, ListenerMode, ListenerOptions,
+    ManagedTorrent, Session, SessionOptions, StreamPriority,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
@@ -40,14 +40,17 @@ const IDLE_AFTER: Duration = Duration::from_secs(5 * 60);
 /// `PER_STREAM_BUF_DEFAULT`), in file order.
 const STREAM_WINDOW: u64 = 32 * 1024 * 1024;
 /// A response counts as playback (rather than a probe) once it has sent this
-/// much and stayed open this long; only then does read-ahead start.
-const PLAYING_BYTES: u64 = 8 * 1024 * 1024;
+/// much and stayed open this long; only then does read-ahead start. Kept low
+/// so a paused player, which stops reading soon after a seek, still counts.
+const PLAYING_BYTES: u64 = 1024 * 1024;
 const PLAYING_AFTER: Duration = Duration::from_secs(3);
 /// A reader that waited this long for a piece is starving: read-ahead backs
 /// off so every peer works on the pieces it needs next.
 const STARVING_AFTER: Duration = Duration::from_millis(250);
 const STARVED_COOLDOWN: Duration = Duration::from_secs(3);
 const HOUSEKEEPING_EVERY: Duration = Duration::from_secs(30);
+/// TCP and uTP port other peers connect to (forwarded by UPnP).
+const PEER_PORT: u16 = 49_473;
 /// Touched in a cached torrent's folder while it is in use, so its age is
 /// the time since it was last played, not since a piece was last written.
 const USED_MARKER: &str = ".spoutpeak-used";
@@ -435,7 +438,19 @@ async fn launch() -> Result<Arc<Engine>, String> {
     let root = cache_folder();
     std::fs::create_dir_all(&root).map_err(|e| format!("cannot create the torrent cache: {e}"))?;
     let settings = config().lock().unwrap().clone();
-    let options = |persist: bool| SessionOptions {
+    // Listening matters as much as dialling out: most of a swarm is behind
+    // NAT and only reachable when it connects to us, and many clients
+    // prefer uTP, which librqbit only speaks (both ways) with a uTP socket.
+    // A fixed port lets UPnP mappings and other peers' memory of us carry
+    // over between runs.
+    let listen = |port: u16| ListenerOptions {
+        mode: ListenerMode::TcpAndUtp,
+        listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, port).into(),
+        enable_upnp_port_forwarding: true,
+        ..Default::default()
+    };
+    let options = |persist: bool, port: u16| SessionOptions {
+        listen: Some(listen(port)),
         dht: Some(DhtSessionConfig {
             persistence: persist.then(|| DhtPersistenceConfig {
                 config_filename: Some(crate::util::cache_dir().join("dht.json")),
@@ -454,11 +469,12 @@ async fn launch() -> Result<Arc<Engine>, String> {
         runtime_worker_threads: Some(32),
         ..Default::default()
     };
-    // The saved DHT state pins its UDP port; a second running instance
-    // cannot bind it, so that one starts a fresh, unsaved DHT instead.
-    let session = match Session::new_with_opts(root.clone(), options(true)).await {
+    // The saved DHT state and the peer port are fixed; a second running
+    // instance cannot bind them, so that one starts a fresh, unsaved DHT on
+    // a random port instead.
+    let session = match Session::new_with_opts(root.clone(), options(true, PEER_PORT)).await {
         Ok(session) => session,
-        Err(_) => Session::new_with_opts(root.clone(), options(false))
+        Err(_) => Session::new_with_opts(root.clone(), options(false, 0))
             .await
             .map_err(|e| format!("could not start the torrent engine: {e:#}"))?,
     };
@@ -1032,15 +1048,17 @@ impl Readahead {
         *self.starved_at.lock().unwrap() = Some(Instant::now());
     }
 
-    /// The furthest position of a response that is playing (not a probe).
+    /// The position of the response that is playing: of those past the
+    /// probe stage, the one that sent the most (a probe of the file's end
+    /// can stay open, but it reads little).
     fn playhead(&self) -> Option<u64> {
         self.readers
             .lock()
             .unwrap()
             .values()
             .filter(|(_, sent, opened)| *sent >= PLAYING_BYTES && opened.elapsed() >= PLAYING_AFTER)
+            .max_by_key(|(_, sent, _)| *sent)
             .map(|(position, _, _)| *position)
-            .max()
     }
 
     fn starving(&self) -> bool {
@@ -1051,27 +1069,33 @@ impl Readahead {
     }
 }
 
-/// How far ahead of playback to fetch: about 2% of the file, so roughly the
-/// same play time for any quality (a 2 h film: about 2.5 minutes).
-fn lookahead(len: u64) -> u64 {
-    (len / 40).clamp(64 * 1024 * 1024, 512 * 1024 * 1024)
+/// How far ahead of playback to fetch, per the Read ahead setting. `Auto`
+/// is about 2.5% of the file, so roughly the same play time for any
+/// quality (a 2 h film: about 3 minutes), but at least 64 MB.
+fn lookahead(len: u64, setting: ReadAhead) -> u64 {
+    match setting {
+        ReadAhead::Auto => (len / 40).clamp(64 * 1024 * 1024, 512 * 1024 * 1024),
+        ReadAhead::Megabytes(mb) => u64::from(mb) * 1024 * 1024,
+        ReadAhead::WholeFile => len,
+    }
 }
 
 async fn run_readahead(readahead: Arc<Readahead>, handle: Handle, file: usize, len: u64) {
     let Ok(mut stream) = handle.clone().stream(file).await else { return };
     stream.set_priority(StreamPriority::Background);
-    let ahead = lookahead(len);
     let park = |stream: &mut FileStream| {
         stream.set_window(1);
         stream.set_position_now(len.saturating_sub(1));
     };
     park(&mut stream);
     while !readahead.stop.load(Ordering::SeqCst) {
+        // Read every round, so a changed setting applies at once.
+        let ahead = lookahead(len, config().lock().unwrap().read_ahead);
         // While playback waits for a piece, even background requests take
         // peers' upload slots away from it: park the window.
         match readahead.playhead().filter(|_| !readahead.starving()) {
             // librqbit already fetches the first window past the playhead.
-            Some(playhead) if playhead + STREAM_WINDOW < len => {
+            Some(playhead) if playhead + STREAM_WINDOW < len && ahead > STREAM_WINDOW => {
                 let from = playhead + STREAM_WINDOW;
                 stream.set_position_now(from);
                 stream.set_window((playhead + ahead).min(len) - from);

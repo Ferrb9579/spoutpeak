@@ -187,6 +187,17 @@ impl DownloadFormat {
     }
 }
 
+/// How far past the playback position torrent streaming fetches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReadAhead {
+    /// About 2.5% of the file (at least 64 MB, at most 512 MB).
+    #[default]
+    Auto,
+    Megabytes(u32),
+    /// Keep going to the end of the file.
+    WholeFile,
+}
+
 /// The built-in torrent engine (see `crate::streaming`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -196,6 +207,8 @@ pub struct TorrentSettings {
     /// Days a cached torrent is kept after it was last streamed; `Some(0)`
     /// = only while it is open, `None` = until the size limit needs room.
     pub cache_max_age_days: Option<u32>,
+    /// How much of the file past the playback position is fetched.
+    pub read_ahead: ReadAhead,
     /// Peer connections per torrent.
     pub max_connections: u32,
     /// Download cap in bytes per second; `None` = unlimited.
@@ -207,6 +220,7 @@ impl Default for TorrentSettings {
         Self {
             cache_size: Some(2 * 1024 * 1024 * 1024),
             cache_max_age_days: Some(7),
+            read_ahead: ReadAhead::Auto,
             max_connections: 200,
             speed_limit: Some(39_321_600),
         }
