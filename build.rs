@@ -5,7 +5,7 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/logo.svg");
     println!("cargo:rerun-if-changed=src/branding.rs");
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
-    let profile = out.ancestors().nth(3).expect("Cargo profile directory");
+    let profile = profile_dir(&out);
     branding::render_pixmap(1024, true)
         .expect("valid logo.svg")
         .save_png(profile.join("spoutpeak.png"))
@@ -20,6 +20,15 @@ fn main() {
         res.set("FileDescription", "Spoutpeak");
         res.compile().expect("failed to embed Windows resources");
     }
+}
+
+/// Cargo 1.100 nests package names beneath `build/`; older Cargo puts the
+/// package and hash in one directory. Find the profile without counting levels.
+fn profile_dir(out: &std::path::Path) -> &std::path::Path {
+    out.ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == "build"))
+        .and_then(std::path::Path::parent)
+        .expect("Cargo profile directory above build/")
 }
 
 /// Build both the PE resource and installer icon from the same SVG. ICO uses
@@ -76,7 +85,7 @@ fn windows_icon() -> std::path::PathBuf {
     std::fs::write(&icon, &ico).expect("write Windows icon");
     // The installer already consumes target/release/spoutpeak.exe; keep its
     // generated icon beside that executable for either Cargo build profile.
-    let profile = out.ancestors().nth(3).expect("Cargo profile directory");
+    let profile = profile_dir(&out);
     std::fs::write(profile.join("spoutpeak.ico"), ico).expect("write installer icon");
     icon
 }
