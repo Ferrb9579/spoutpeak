@@ -101,6 +101,8 @@ struct Session {
     stream: Option<Stream>,
     torrent_url: Option<String>,
     preferred_sub: String,
+    /// Which text track of the chosen language to keep across episodes.
+    preferred_sub_ordinal: usize,
     auto_sub_done: bool,
     last_position: f64,
     unsaved_ms: f64,
@@ -244,6 +246,7 @@ impl PlayerUi {
                 stream: None,
                 torrent_url: None,
                 preferred_sub: String::new(),
+                preferred_sub_ordinal: 0,
                 auto_sub_done: false,
                 last_position: 0.0,
                 unsaved_ms: 0.0,
@@ -451,7 +454,7 @@ impl App {
                 let builtin = self.profile.peek(|p| p.settings.player == PlayerKind::Builtin);
                 let ticket = if builtin {
                     // Show the player straight away, with progress.
-                    let preferred_sub = self.opening_subtitle_preference(meta.as_ref(), video.as_ref());
+                    let (preferred_sub, preferred_sub_ordinal) = self.opening_subtitle_preference(meta.as_ref(), video.as_ref());
                     self.finish_playback(true);
                     let (title, subtitle) = titles(stream, meta.as_ref(), video.as_ref());
                     self.player.frame.set(None);
@@ -475,6 +478,7 @@ impl App {
                         session.meta = meta.clone();
                         session.video = video.clone();
                         session.preferred_sub = preferred_sub;
+                        session.preferred_sub_ordinal = preferred_sub_ordinal;
                         session.auto_sub_done = false;
                     }
                     self.push(Route::Player);
@@ -580,7 +584,7 @@ impl App {
             return;
         }
 
-        let preferred_sub = self.opening_subtitle_preference(meta.as_ref(), video.as_ref());
+        let (preferred_sub, preferred_sub_ordinal) = self.opening_subtitle_preference(meta.as_ref(), video.as_ref());
         self.finish_playback(true);
         let session_id = self.player.session_id.get() + 1;
         self.player.session_id.set(session_id);
@@ -600,6 +604,7 @@ impl App {
             stream: Some(stream.clone()),
             torrent_url: torrent.then(|| url.clone()),
             preferred_sub,
+            preferred_sub_ordinal,
             auto_sub_done: false,
             last_position: start,
             unsaved_ms: 0.0,
@@ -749,20 +754,25 @@ impl App {
 
     /// Turns on the preferred-language subtitle once, when one shows up.
     fn auto_select_subtitle(&self) {
-        let (done, preferred) = {
+        let (done, preferred, ordinal) = {
             let session = self.player.session.borrow();
-            (session.auto_sub_done, session.preferred_sub.clone())
+            (session.auto_sub_done, session.preferred_sub.clone(), session.preferred_sub_ordinal)
         };
         if done || preferred.is_empty() || preferred == "off" {
             return;
         }
         let choice = self.player.state.peek(|s| {
-            if s.sub_choice != SubChoice::Off {
+            // Addons may answer before FFprobe. Give embedded tracks the
+            // first choice once their language metadata is available.
+            if s.status == Status::Opening || s.sub_choice != SubChoice::Off {
                 return None;
             }
-            s.embedded_subs
+            let matching: Vec<usize> = s.embedded_subs
                 .iter()
-                .position(|t| t.is_text_subtitle() && same_language(&t.language, &preferred))
+                .enumerate()
+                .filter(|(_, t)| t.is_text_subtitle() && same_language(&t.language, &preferred))
+                .map(|(index, _)| index).collect();
+            matching.get(ordinal).or_else(|| matching.first()).copied()
                 .map(SubChoice::Embedded)
                 .or_else(|| {
                     s.addon_subs
@@ -1001,13 +1011,13 @@ impl App {
         if self.together_blocks_control() || self.player.pending_binge.borrow().is_some() {
             return;
         }
-        let (meta, group, preferred_sub) = {
+        let (meta, group, preferred_sub, preferred_sub_ordinal) = {
             let session = self.player.session.borrow();
             if session.video.as_ref().map(Video::id) == Some(next.id()) {
                 return;
             }
             (session.meta.clone(), session.stream.as_ref().and_then(|s| s.behavior_hints.binge_group.clone()),
-                session.preferred_sub.clone())
+                session.preferred_sub.clone(), session.preferred_sub_ordinal)
         };
         let Some(meta) = meta else { return };
         self.finish_playback(true);
@@ -1019,6 +1029,7 @@ impl App {
             session.stream = None;
             session.torrent_url = None;
             session.preferred_sub = preferred_sub;
+            session.preferred_sub_ordinal = preferred_sub_ordinal;
             session.auto_sub_done = false;
             session.last_position = 0.0;
         }
@@ -1074,15 +1085,15 @@ impl App {
         self.finish_playback(false);
     }
 
-    fn opening_subtitle_preference(&self, meta: Option<&Meta>, video: Option<&Video>) -> String {
+    fn opening_subtitle_preference(&self, meta: Option<&Meta>, video: Option<&Video>) -> (String, usize) {
         let session = self.player.session.borrow();
         if self.player.state.peek(|s| s.status == Status::Opening)
             && session.meta.as_ref().map(Meta::id) == meta.map(Meta::id)
             && session.video.as_ref().map(Video::id) == video.map(Video::id)
         {
-            session.preferred_sub.clone()
+            (session.preferred_sub.clone(), session.preferred_sub_ordinal)
         } else {
-            self.profile.peek(|p| p.settings.subtitle_lang.clone())
+            self.profile.peek(|p| (p.settings.subtitle_lang.clone(), 0))
         }
     }
 
@@ -1278,6 +1289,7 @@ impl App {
                 let mut session = self.player.session.borrow_mut();
                 session.auto_sub_done = true;
                 session.preferred_sub = "off".into();
+                session.preferred_sub_ordinal = 0;
             }
             self.player.state.write(|s| s.menu = Menu::None);
             return;
@@ -1289,7 +1301,14 @@ impl App {
             SubChoice::Addon(index) => s.addon_subs.get(*index).and_then(|t| t.lang.clone()),
         });
         if let Some(language) = language.filter(|language| !language.is_empty()) {
-            self.player.session.borrow_mut().preferred_sub = language;
+            let ordinal = self.player.state.peek(|s| match &choice {
+                SubChoice::Embedded(index) => s.embedded_subs.iter().take(index + 1)
+                    .filter(|track| track.is_text_subtitle() && same_language(&track.language, &language)).count().saturating_sub(1),
+                _ => 0,
+            });
+            let mut session = self.player.session.borrow_mut();
+            session.preferred_sub = language;
+            session.preferred_sub_ordinal = ordinal;
         }
         let revision = self.player.subtitle_revision.get() + 1;
         self.player.subtitle_revision.set(revision);
@@ -1608,6 +1627,57 @@ mod episode_transition_tests {
     }
 
     #[test]
+    fn external_subtitles_wait_for_embedded_language_metadata_before_auto_selection() {
+        let app = app();
+        app.player.session.borrow_mut().preferred_sub = "eng".into();
+        app.player.state.write(|s| {
+            s.status = Status::Opening;
+            s.addon_subs.push(Subtitle { url: "https://example.test/hdtv.srt".into(), lang: Some("eng".into()), ..Default::default() });
+        });
+        app.auto_select_subtitle();
+        assert_eq!(app.player.state.peek(|s| s.sub_choice.clone()), SubChoice::Off);
+        assert!(!app.player.session.borrow().auto_sub_done);
+        app.player_info(MediaInfo {
+            has_video: true, subtitles: vec![Track {
+                language: "eng".into(), title: String::new(), codec: "ass".into(), stream_index: 4,
+            }], ..Default::default()
+        });
+        assert_eq!(app.player.state.peek(|s| s.sub_choice.clone()), SubChoice::Embedded(0));
+    }
+
+    #[test]
+    fn alternate_english_track_choice_survives_the_next_episode_transition() {
+        let app = app();
+        app.profile.write(|p| p.addons.clear());
+        app.player.session.borrow_mut().meta = Some(Meta { id: Some("series".into()), kind: "series".into(), ..Default::default() });
+        app.player.session.borrow_mut().video = Some(episode(1));
+        app.route.set(vec![Route::Board, Route::Detail, Route::Player]);
+        let tracks = vec![
+            Track { language: "ara".into(), title: String::new(), codec: "ass".into(), stream_index: 2 },
+            Track { language: "eng".into(), title: String::new(), codec: "ass".into(), stream_index: 4 },
+            Track { language: "eng".into(), title: String::new(), codec: "ass".into(), stream_index: 5 },
+        ];
+        app.player.state.write(|s| s.embedded_subs = tracks.clone());
+        app.select_subtitle(SubChoice::Embedded(2));
+        assert_eq!(app.player.session.borrow().preferred_sub_ordinal, 1);
+        app.play_next(episode(2));
+        app.player_info(MediaInfo { has_video: true, subtitles: tracks, ..Default::default() });
+        assert_eq!(app.player.state.peek(|s| s.sub_choice.clone()), SubChoice::Embedded(2));
+    }
+
+    #[test]
+    fn subtitle_release_and_frame_rate_metadata_is_preserved() {
+        let subtitle: Subtitle = serde_json::from_value(serde_json::json!({
+            "id": "6081377", "url": "https://example.test/english.srt", "lang": "eng",
+            "movieReleaseName": "Show.S05E14.HDTV.x264-KILLERS", "releaseFormat": "HDTV",
+            "releaseGroup": "KILLERS", "fpsMilli": 23976, "m": "i"
+        })).unwrap();
+        assert_eq!(subtitle.release_name(), Some("Show.S05E14.HDTV.x264-KILLERS"));
+        assert_eq!(subtitle.release_summary(), "HDTV · KILLERS · 23.976 fps");
+        assert_eq!(subtitle.other["m"], "i");
+    }
+
+    #[test]
     fn old_playback_events_cannot_end_or_rewind_a_new_seek() {
         let app = app();
         *app.player.engine.borrow_mut() = Some(Engine::test_stub(2));
@@ -1681,7 +1751,7 @@ mod episode_transition_tests {
         let app = app();
         app.player.state.write(|s| {
             s.sub_choice = SubChoice::Addon(0);
-            s.addon_subs.push(Subtitle { id: None, url: "http://127.0.0.1:0/subtitle.srt".into(), lang: Some("eng".into()) });
+            s.addon_subs.push(Subtitle { id: None, url: "http://127.0.0.1:0/subtitle.srt".into(), lang: Some("eng".into()), ..Default::default() });
         });
         let session = app.player.session_id.get();
         let first = app.player.subtitle_revision.get();
@@ -1767,7 +1837,7 @@ mod episode_transition_tests {
         app.player.state.write(|s| {
             s.status = Status::Playing;
             s.sub_choice = SubChoice::Addon(0);
-            s.addon_subs.push(Subtitle { id: None, url: "https://example.test/old.srt".into(), lang: Some("eng".into()) });
+            s.addon_subs.push(Subtitle { id: None, url: "https://example.test/old.srt".into(), lang: Some("eng".into()), ..Default::default() });
             s.sub_loaded_until = 99.0;
             s.sub_loaded = true;
             s.up_next = Some(5);
@@ -1801,7 +1871,8 @@ mod episode_transition_tests {
             });
         });
         let meta = app.player.session.borrow().meta.clone();
-        assert_eq!(app.opening_subtitle_preference(meta.as_ref(), Some(&next)), "eng");
+        assert_eq!(app.opening_subtitle_preference(meta.as_ref(), Some(&next)), ("eng".into(), 0));
+        app.player.state.write(|s| s.status = Status::Playing);
         app.auto_select_subtitle();
         assert_eq!(app.player.state.peek(|s| s.sub_choice.clone()), SubChoice::Embedded(0));
         app.player_event(previous_session, Event::Cues {

@@ -614,7 +614,11 @@ fn subtitle_entries(app: &App) -> Vec<(SubChoice, String)> {
         if track.is_text_subtitle() {
             entries.push((
                 SubChoice::Embedded(index),
-                format!("{}  (embedded)", track_label(&track.language, &track.title, index)),
+                if track.language.is_empty() && track.title.is_empty() {
+                    format!("Track {} (embedded)", index + 1)
+                } else {
+                    format!("{} · Track {} (embedded)", track_label(&track.language, &track.title, index), index + 1)
+                },
             ));
         }
     }
@@ -628,7 +632,10 @@ fn subtitle_entries(app: &App) -> Vec<(SubChoice, String)> {
     for (index, language) in ordered {
         let number = seen.entry(language.clone()).or_insert(0);
         *number += 1;
-        entries.push((SubChoice::Addon(index), format!("{language}  #{number}")));
+        let details = addon[index].release_summary();
+        let label = if details.is_empty() { format!("{language}  #{number}") }
+            else { format!("{language} #{number} · {details}") };
+        entries.push((SubChoice::Addon(index), label));
     }
     entries
 }
@@ -818,6 +825,18 @@ fn subtitles_panel(app: &App) -> Panel {
         18.0,
     );
     panel.gap(6.0);
+    if let SubChoice::Addon(index) = &choice {
+        if let Some(release) = app.player.state.peek(|s| s.addon_subs.get(*index).and_then(|subtitle| subtitle.release_name()).map(str::to_owned)) {
+            panel.push(Padding::new(
+                EdgeInsets::only(4.0, 0.0, 4.0, 0.0),
+                SizedBox::new().width(PANEL_INNER - 8.0).child(
+                    text(release, 11.0, FontWeight::W400, MUTED)
+                        .max_lines(Some(2)).overflow(TextOverflow::Ellipsis),
+                ),
+            ), 32.0);
+            panel.gap(4.0);
+        }
+    }
     if let Some((label, done)) = subtitle_progress(app) {
         panel.push(
             Padding::new(

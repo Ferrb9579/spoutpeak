@@ -680,6 +680,31 @@ pub struct Subtitle {
     pub url: String,
     #[serde(default, deserialize_with = "lenient_string")]
     pub lang: Option<String>,
+    /// Keep provider release/matching metadata instead of discarding it.
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
+}
+
+impl Subtitle {
+    pub fn release_name(&self) -> Option<&str> {
+        ["movieReleaseName", "subtitleFileName", "label"].iter()
+            .find_map(|key| self.other.get(*key).and_then(Value::as_str).filter(|value| !value.is_empty()))
+    }
+
+    pub fn release_summary(&self) -> String {
+        let mut details: Vec<String> = ["releaseFormat", "releaseGroup"].iter()
+            .filter_map(|key| self.other.get(*key).and_then(Value::as_str).filter(|value| !value.is_empty()))
+            .map(str::to_owned).collect();
+        if details.is_empty() {
+            if let Some(label) = self.other.get("label").and_then(Value::as_str).or_else(|| self.release_name()) {
+                details.push(label.to_owned());
+            }
+        }
+        if let Some(fps) = self.other.get("fpsMilli").and_then(Value::as_f64).filter(|fps| *fps > 0.0) {
+            details.push(format!("{:.3} fps", fps / 1000.0));
+        }
+        details.join(" · ")
+    }
 }
 
 // --------------------------------------------------------------- responses

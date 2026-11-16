@@ -1340,6 +1340,25 @@ mod seek_tests {
     }
 
     #[test]
+    fn probe_recognizes_matroska_language_tags_regardless_of_case() {
+        let json = serde_json::json!({
+            "format": { "duration": "2577.597" },
+            "streams": [
+                { "index": 0, "codec_type": "video", "codec_name": "hevc", "width": 1920, "height": 1080, "avg_frame_rate": "24000/1001" },
+                { "index": 1, "codec_type": "audio", "codec_name": "aac", "tags": { "LANGUAGE": "eng", "TITLE": "Surround" } },
+                { "index": 2, "codec_type": "subtitle", "codec_name": "ass", "tags": { "LANGUAGE": "ara" } },
+                { "index": 4, "codec_type": "subtitle", "codec_name": "ass", "tags": { "LANGUAGE": "eng" } },
+                { "index": 5, "codec_type": "subtitle", "codec_name": "ass", "tags": { "Language": "eng", "Title": "Alternate" } }
+            ]
+        });
+        let info = parse_probe(&serde_json::to_vec(&json).unwrap(), 1080, false).unwrap();
+        assert_eq!(info.audio[0].language, "eng");
+        assert_eq!(info.audio[0].title, "Surround");
+        assert_eq!(info.subtitles.iter().map(|track| track.language.as_str()).collect::<Vec<_>>(), ["ara", "eng", "eng"]);
+        assert_eq!(info.subtitles[2].title, "Alternate");
+    }
+
+    #[test]
     fn changing_settings_during_a_seek_keeps_the_requested_destination() {
         let engine = engine(String::new());
         *engine.inner.info.lock().unwrap() = Some(MediaInfo { duration: 120.0, ..Default::default() });
@@ -1807,7 +1826,9 @@ fn parse_probe(json: &[u8], max_height: u32, remote: bool) -> Option<MediaInfo> 
         };
         let tag = |key: &str| {
             stream
-                .pointer(&format!("/tags/{key}"))
+                .get("tags")
+                .and_then(Value::as_object)
+                .and_then(|tags| tags.iter().find(|(name, _)| name.eq_ignore_ascii_case(key)).map(|(_, value)| value))
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned()
