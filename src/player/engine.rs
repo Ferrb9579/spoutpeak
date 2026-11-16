@@ -70,11 +70,11 @@ pub enum Event {
     /// A new frame is waiting in [`Engine::take_frame`].
     Frame,
     Position { seconds: f64, stalled: bool },
-    /// Cues from the embedded subtitle track; `reset` clears earlier ones.
-    Cues { cues: Vec<Cue>, reset: bool },
+    /// Cues from the selected subtitle revision; `reset` clears earlier ones.
+    Cues { revision: u64, cues: Vec<Cue>, reset: bool },
     /// The whole-file subtitle pass has read up to `until` seconds;
     /// `done` once it reached the end.
-    SubtitleProgress { until: f64, done: bool },
+    SubtitleProgress { revision: u64, until: f64, done: bool },
     Ended,
     Error(String),
 }
@@ -94,6 +94,7 @@ pub struct OpenRequest {
 struct Config {
     audio_track: usize,
     subtitle_track: Option<usize>,
+    subtitle_revision: u64,
     speed: f64,
     /// Seconds the sound is held back against the picture (negative plays
     /// it earlier).
@@ -257,17 +258,19 @@ impl Engine {
     }
 
     /// Selects an embedded subtitle track to extract, or none.
-    pub fn set_subtitle_track(&self, index: Option<usize>) {
-        self.inner.config.lock().unwrap().subtitle_track = index;
+    pub fn set_subtitle_track(&self, index: Option<usize>, revision: u64) {
+        {
+            let mut config = self.inner.config.lock().unwrap();
+            config.subtitle_track = index;
+            config.subtitle_revision = revision;
+        }
         self.seek(self.position());
-        let inner = self.inner.clone();
-        std::thread::spawn(move || inner.full_subtitles(false));
+        self.inner.queue_full_subtitles(false);
     }
 
     /// Reads the whole subtitle track again, as fast as the source allows.
     pub fn load_all_subtitles(&self) {
-        let inner = self.inner.clone();
-        std::thread::spawn(move || inner.full_subtitles(true));
+        self.inner.queue_full_subtitles(true);
     }
 
     pub fn stop(&self) {
@@ -317,6 +320,7 @@ impl Inner {
             config: Mutex::new(Config {
                 audio_track: 0,
                 subtitle_track: None,
+                subtitle_revision: 0,
                 speed: 1.0,
                 audio_delay: 0.0,
             }),
@@ -345,6 +349,11 @@ impl Inner {
 
     fn now(&self) -> f64 {
         let clock = self.clock.lock().unwrap();
+        self.clock_position(&clock)
+    }
+
+    /// The caller holds the clock lock across reading and changing its anchor.
+    fn clock_position(&self, clock: &ClockState) -> f64 {
         if clock.audio {
             clock.base
                 + self.consumed_frames.load(Ordering::Acquire) as f64 / SAMPLE_RATE as f64
@@ -357,10 +366,9 @@ impl Inner {
     }
 
     fn set_paused(&self, paused: bool) {
-        let position = self.now();
         let mut clock = self.clock.lock().unwrap();
         if !clock.audio {
-            clock.anchor_position = position;
+            clock.anchor_position = self.clock_position(&clock);
             clock.anchor = Instant::now();
         }
         self.paused.store(paused, Ordering::Release);
@@ -378,11 +386,11 @@ impl Inner {
 
     /// Audio ran out before the picture did: keep time by wall clock.
     fn fall_back_to_wall_clock(&self, generation: u64) {
-        let position = self.now();
         let mut clock = self.clock.lock().unwrap();
         if !self.current(generation) {
             return;
         }
+        let position = self.clock_position(&clock);
         clock.audio = false;
         clock.anchor_position = position;
         clock.anchor = Instant::now();
@@ -792,7 +800,7 @@ impl Inner {
                     }
                     if let Some(stdout) = stdout {
                         let keep = |inner: &Inner| inner.current(generation);
-                        inner.subtitle_loop(&keep, stdout, from, false);
+                        inner.subtitle_loop(&keep, stdout, from, false, config.subtitle_revision);
                     }
                 }
             });
@@ -994,19 +1002,20 @@ impl Inner {
         stdout: ChildStdout,
         offset: f64,
         report: bool,
+        revision: u64,
     ) {
         let mut block = String::new();
         let mut batch: Vec<Cue> = Vec::new();
         let mut last_flush = Instant::now();
         let mut until = 0.0f64;
         let flush = |batch: &mut Vec<Cue>, until: &mut f64| {
-            if batch.is_empty() {
+            if batch.is_empty() || !keep(self) {
                 return;
             }
             *until = batch.iter().fold(*until, |m, c| m.max(c.end));
-            self.emit(Event::Cues { cues: std::mem::take(batch), reset: false });
+            self.emit(Event::Cues { revision, cues: std::mem::take(batch), reset: false });
             if report {
-                self.emit(Event::SubtitleProgress { until: *until, done: false });
+                self.emit(Event::SubtitleProgress { revision, until: *until, done: false });
             }
         };
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -1035,22 +1044,60 @@ impl Inner {
         }
         flush(&mut batch, &mut until);
         if report {
-            self.emit(Event::SubtitleProgress { until, done: true });
+            self.emit(Event::SubtitleProgress { revision, until, done: true });
         }
     }
 
-    /// Reads the selected embedded subtitle track from the start of the
-    /// file to the end, independent of seeks, so every line is available
-    /// (the sync list needs them all). `fast` lifts the read-rate cap.
-    fn full_subtitles(self: Arc<Self>, fast: bool) {
-        let pass = self.sub_pass.fetch_add(1, Ordering::AcqRel) + 1;
-        if let Some(mut child) = self.sub_child.lock().unwrap().take() {
+    fn subtitle_pass_current(&self, pass: u64) -> bool {
+        self.alive.load(Ordering::Acquire) && self.sub_pass.load(Ordering::Acquire) == pass
+    }
+
+    fn register_subtitle_child(&self, pass: u64, mut child: Child) -> bool {
+        let mut slot = self.sub_child.lock().unwrap();
+        if !self.subtitle_pass_current(pass) {
+            drop(slot);
             let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        let previous = slot.replace(child);
+        drop(slot);
+        if let Some(mut previous) = previous {
+            let _ = previous.kill();
+            let _ = previous.wait();
+        }
+        true
+    }
+
+    fn queue_full_subtitles(self: &Arc<Self>, fast: bool) {
+        let config = self.config.lock().unwrap();
+        let (track, revision) = (config.subtitle_track, config.subtitle_revision);
+        // Allocate in request order and detach only the old owned process.
+        // A delayed worker can never take or replace a newer pass's child.
+        let (pass, previous) = {
+            let mut slot = self.sub_child.lock().unwrap();
+            (self.sub_pass.fetch_add(1, Ordering::AcqRel) + 1, slot.take())
+        };
+        drop(config);
+        let inner = self.clone();
+        std::thread::spawn(move || {
+            if let Some(mut previous) = previous {
+                let _ = previous.kill();
+                let _ = previous.wait();
+            }
+            if let Some(track) = track {
+                inner.full_subtitles(pass, track, revision, fast);
+            }
+        });
+    }
+
+    /// Read the captured track from start to end, independently of seeks.
+    fn full_subtitles(self: Arc<Self>, pass: u64, track: usize, revision: u64, fast: bool) {
+        if !self.subtitle_pass_current(pass) {
+            return;
         }
         let Some((ffmpeg, _)) = tools() else { return };
-        let keep = move |inner: &Inner| {
-            inner.alive.load(Ordering::Acquire) && inner.sub_pass.load(Ordering::Acquire) == pass
-        };
+        let keep = move |inner: &Inner| inner.subtitle_pass_current(pass);
         // Wait for the media info and the first picture, so opening gets
         // every peer first.
         let waited = Instant::now();
@@ -1060,12 +1107,11 @@ impl Inner {
         {
             std::thread::sleep(Duration::from_millis(50));
         }
-        let Some(track) = self.config.lock().unwrap().subtitle_track else { return };
         let Some(info) = self.info.lock().unwrap().clone() else { return };
         if !keep(&self) || info.live {
             return;
         }
-        self.emit(Event::SubtitleProgress { until: 0.0, done: false });
+        self.emit(Event::SubtitleProgress { revision, until: 0.0, done: false });
         let mut command = self.ffmpeg(&ffmpeg);
         // Throttled, a torrent keeps bandwidth for playback; at 4x a
         // two-hour film is read in half an hour.
@@ -1089,15 +1135,11 @@ impl Inner {
             .args(["-f", "srt", "pipe:1"]);
         let Ok(mut child) = command.spawn() else { return };
         let stdout = child.stdout.take();
-        *self.sub_child.lock().unwrap() = Some(child);
-        if !keep(&self) {
-            if let Some(mut child) = self.sub_child.lock().unwrap().take() {
-                let _ = child.kill();
-            }
+        if !self.register_subtitle_child(pass, child) {
             return;
         }
         if let Some(stdout) = stdout {
-            self.subtitle_loop(&keep, stdout, 0.0, true);
+            self.subtitle_loop(&keep, stdout, 0.0, true, revision);
         }
     }
 
@@ -1238,6 +1280,156 @@ mod seek_tests {
         assert_eq!(config.speed, 1.5);
         assert_eq!(config.audio_track, 1);
         assert_eq!(config.audio_delay, 0.25);
+    }
+
+    #[test]
+    fn pause_and_resume_cannot_restore_a_position_from_before_a_seek() {
+        let engine = engine(String::new());
+        let inner = engine.inner.clone();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let writer_barrier = barrier.clone();
+        let writer = std::thread::spawn(move || {
+            writer_barrier.wait();
+            for position in 1..20_000 {
+                {
+                    // This is the wall-clock reset performed by restart.
+                    let mut clock = inner.clock.lock().unwrap();
+                    clock.base = position as f64;
+                    clock.anchor_position = position as f64;
+                    clock.anchor = Instant::now();
+                }
+                std::thread::yield_now();
+            }
+        });
+        barrier.wait();
+        // No first frame yet: neither pause nor resume may advance the
+        // clock or copy a position sampled before the latest reset.
+        for turn in 0..20_000 {
+            engine.set_paused(turn % 2 == 0);
+            let clock = engine.inner.clock.lock().unwrap();
+            assert_eq!(clock.anchor_position, clock.base, "pause restored a stale seek position");
+        }
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn paused_wall_clock_keeps_its_position_when_resumed() {
+        let engine = engine(String::new());
+        let inner = &engine.inner;
+        inner.started.store(true, Ordering::Release);
+        {
+            let mut clock = inner.clock.lock().unwrap();
+            clock.anchor_position = 20.0;
+            clock.anchor = Instant::now() - Duration::from_secs(5);
+        }
+        engine.set_paused(true);
+        let paused_position = engine.position();
+        inner.clock.lock().unwrap().anchor = Instant::now() - Duration::from_secs(60);
+        assert_eq!(engine.position(), paused_position);
+        engine.set_paused(false);
+        assert_eq!(inner.clock.lock().unwrap().anchor_position, paused_position);
+        assert!(engine.position() >= paused_position);
+    }
+
+    #[test]
+    fn subtitle_requests_cancel_previous_passes_in_request_order() {
+        let engine = engine(String::new());
+        engine.set_subtitle_track(Some(0), 10);
+        let first = engine.inner.sub_pass.load(Ordering::Acquire);
+        engine.set_subtitle_track(Some(1), 11);
+        let second = engine.inner.sub_pass.load(Ordering::Acquire);
+        assert!(second > first);
+        assert!(!engine.inner.subtitle_pass_current(first));
+        engine.load_all_subtitles();
+        let third = engine.inner.sub_pass.load(Ordering::Acquire);
+        assert!(third > second);
+        engine.set_subtitle_track(None, 12);
+        assert!(!engine.inner.subtitle_pass_current(third));
+        let config = engine.inner.config.lock().unwrap();
+        assert_eq!(config.subtitle_track, None);
+        assert_eq!(config.subtitle_revision, 12);
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg on PATH; exercises subtitle process ownership and shutdown"]
+    fn cancelled_subtitle_spawn_cannot_replace_or_kill_the_new_reader() {
+        let (ffmpeg, _) = tools().expect("FFmpeg and FFprobe on PATH");
+        let spawn = || {
+            let mut command = Command::new(&ffmpeg);
+            command.args(["-nostdin", "-re", "-f", "lavfi", "-i", "color=s=16x16:d=20",
+                "-f", "null", "-"]).stdout(Stdio::null()).stderr(Stdio::null());
+            hide_console(&mut command);
+            command.spawn().unwrap()
+        };
+        let engine = engine(String::new());
+        let inner = &engine.inner;
+        inner.sub_pass.store(1, Ordering::Release);
+        assert!(inner.register_subtitle_child(1, spawn()));
+        // Detach the old reader and cancel its pass before a delayed spawn
+        // completes, then register the new reader ahead of the old worker.
+        inner.queue_full_subtitles(false);
+        let pass = inner.sub_pass.load(Ordering::Acquire);
+        let latest = spawn();
+        let latest_id = latest.id();
+        assert!(inner.register_subtitle_child(pass, latest));
+        assert!(!inner.register_subtitle_child(1, spawn()));
+        {
+            let mut slot = inner.sub_child.lock().unwrap();
+            let child = slot.as_mut().expect("current reader was removed");
+            assert_eq!(child.id(), latest_id);
+            assert!(child.try_wait().unwrap().is_none(), "current reader was killed");
+        }
+        engine.stop();
+        assert!(inner.sub_child.lock().unwrap().is_none());
+        assert!(!inner.register_subtitle_child(pass, spawn()), "shutdown accepted a late reader");
+        assert!(inner.sub_child.lock().unwrap().is_none());
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg on PATH; extracts real tracks after rapid subtitle changes"]
+    fn rapid_subtitle_changes_extract_the_latest_track_and_revision() {
+        let (ffmpeg, _) = tools().expect("FFmpeg and FFprobe on PATH");
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/subtitle-switch-test");
+        std::fs::create_dir_all(&directory).unwrap();
+        for (name, text) in [("first", "First track"), ("second", "Second track")] {
+            std::fs::write(directory.join(format!("{name}.srt")),
+                format!("1\n00:00:00,000 --> 00:00:10,000\n{text}\n")).unwrap();
+        }
+        let media = directory.join("tracks.mks");
+        let mut command = Command::new(ffmpeg);
+        command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+            .arg(directory.join("first.srt")).arg("-i").arg(directory.join("second.srt"))
+            .args(["-map", "0", "-map", "1", "-c:s", "srt", "-f", "matroska"]).arg(&media);
+        hide_console(&mut command);
+        assert!(command.status().unwrap().success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut engine = engine(media.to_string_lossy().into_owned());
+        Arc::get_mut(&mut engine.inner).unwrap().emit = Box::new(move |event| { let _ = tx.send(event); });
+        *engine.inner.info.lock().unwrap() = Some(MediaInfo {
+            duration: 10.0,
+            subtitles: (0..2).map(|stream_index| Track {
+                language: String::new(), title: String::new(), codec: "srt".into(), stream_index,
+            }).collect(),
+            ..Default::default()
+        });
+        engine.inner.started.store(true, Ordering::Release);
+        for revision in 1..20 {
+            engine.set_subtitle_track(Some(revision as usize % 2), revision);
+        }
+        engine.set_subtitle_track(Some(1), 1000);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut latest = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(remaining).expect("latest subtitle reader did not finish") {
+                Event::Cues { revision: 1000, cues, .. } => latest.extend(cues),
+                Event::SubtitleProgress { revision: 1000, done: true, .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].text, "Second track");
+        engine.stop();
     }
 
     #[test]

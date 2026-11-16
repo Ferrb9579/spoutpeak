@@ -638,6 +638,10 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let profile = store::load_profile();
+        Self::with_profile(profile)
+    }
+
+    pub(crate) fn with_profile(profile: Profile) -> Self {
         let controllers = Controllers::new(&profile);
         crate::downloads::set_custom_folder(&profile.settings.download_dir);
         Self {
@@ -1263,7 +1267,6 @@ impl App {
                     if app.detail.peek(|d| d.generation) != generation {
                         return;
                     }
-                    let found = result.as_ref().ok().cloned().unwrap_or_default();
                     app.detail.write(|d| {
                         if let Some(group) = d
                             .streams
@@ -1276,10 +1279,11 @@ impl App {
                             };
                         }
                     });
-                    app.try_binge(&found);
+                    app.try_binge();
                 },
             );
         }
+        self.try_binge();
     }
 
     // ------------------------------------------------------------ library

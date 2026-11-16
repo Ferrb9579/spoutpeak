@@ -6,7 +6,7 @@ pub mod subtitles;
 pub mod source;
 pub mod preview;
 
-use crate::state::{App, Route, Shared, spawn, ui};
+use crate::state::{App, Load, Route, Shared, StreamGroup, spawn, ui};
 use crate::store::{PlayerKind, Settings, SubtitleStyle};
 use crate::addons::{self, http};
 use crate::streaming::{self, TorrentStats};
@@ -110,6 +110,32 @@ struct Session {
 }
 
 #[derive(Clone)]
+pub(crate) struct PendingEpisode {
+    session_id: u64,
+    meta: Meta,
+    video: Video,
+    group: Option<String>,
+}
+
+/// Prefer the same release across episodes; wait for providers before
+/// falling back to another source that the built-in player can open.
+fn next_stream(groups: &[StreamGroup], wanted: Option<&str>) -> Option<Stream> {
+    let playable = groups.iter().filter_map(|group| match &group.items {
+        Load::Ready(streams) => Some(streams),
+        _ => None,
+    }).flatten().filter(|stream| matches!(stream.source(), StreamSource::Url(_) | StreamSource::Torrent { .. }));
+    if let Some(wanted) = wanted {
+        if let Some(stream) = playable.clone().find(|stream| stream.behavior_hints.binge_group.as_deref() == Some(wanted)) {
+            return Some(stream.clone());
+        }
+        if groups.iter().any(|group| matches!(group.items, Load::Loading)) {
+            return None;
+        }
+    }
+    playable.into_iter().next().cloned()
+}
+
+#[derive(Clone)]
 /// Playback following is independent of scroll activity driven by the user.
 pub struct SubtitleFollow {
     enabled: Rc<Cell<bool>>,
@@ -159,7 +185,8 @@ pub struct PlayerUi {
     cues: Rc<RefCell<Vec<Cue>>>,
     session_id: Rc<Cell<u64>>,
     session: Rc<RefCell<Session>>,
-    pub pending_binge: Rc<RefCell<Option<String>>>,
+    pub(crate) pending_binge: Rc<RefCell<Option<PendingEpisode>>>,
+    subtitle_revision: Rc<Cell<u64>>,
     pub window: Rc<RefCell<Option<WindowHandle>>>,
 }
 
@@ -224,6 +251,7 @@ impl PlayerUi {
                 last_stats: Instant::now(),
             })),
             pending_binge: Rc::new(RefCell::new(None)),
+            subtitle_revision: Rc::new(Cell::new(0)),
             window: Rc::new(RefCell::new(None)),
         }
     }
@@ -421,7 +449,8 @@ impl App {
                 let builtin = self.profile.peek(|p| p.settings.player == PlayerKind::Builtin);
                 let ticket = if builtin {
                     // Show the player straight away, with progress.
-                    self.stop_playback();
+                    let preferred_sub = self.opening_subtitle_preference(meta.as_ref(), video.as_ref());
+                    self.finish_playback(true);
                     let (title, subtitle) = titles(stream, meta.as_ref(), video.as_ref());
                     self.player.frame.set(None);
                     self.player.state.write(|s| {
@@ -443,6 +472,8 @@ impl App {
                         session.stream = Some(stream.clone());
                         session.meta = meta.clone();
                         session.video = video.clone();
+                        session.preferred_sub = preferred_sub;
+                        session.auto_sub_done = false;
                     }
                     self.push(Route::Player);
                     Some(self.player.session_id.get())
@@ -547,7 +578,8 @@ impl App {
             return;
         }
 
-        self.stop_playback();
+        let preferred_sub = self.opening_subtitle_preference(meta.as_ref(), video.as_ref());
+        self.finish_playback(true);
         let session_id = self.player.session_id.get() + 1;
         self.player.session_id.set(session_id);
         let next = match (&meta, &video_id) {
@@ -565,7 +597,7 @@ impl App {
             video: video.clone(),
             stream: Some(stream.clone()),
             torrent_url: torrent.then(|| url.clone()),
-            preferred_sub: settings.subtitle_lang.clone(),
+            preferred_sub,
             auto_sub_done: false,
             last_position: start,
             unsaved_ms: 0.0,
@@ -600,6 +632,8 @@ impl App {
             s.addon_subs = stream.subtitles.clone();
             s.sub_choice = SubChoice::Off;
             s.sub_delay = 0.0;
+            s.sub_loaded_until = 0.0;
+            s.sub_loaded = false;
             s.sub_size = settings.subtitle_size;
             s.controls_visible = true;
             s.menu = Menu::None;
@@ -757,8 +791,8 @@ impl App {
                 }
             }
             Event::Position { seconds, stalled } => self.player_tick(seconds, stalled),
-            Event::Cues { cues, reset } => {
-                if !matches!(
+            Event::Cues { revision, cues, reset } => {
+                if revision != self.player.subtitle_revision.get() || !matches!(
                     self.player.state.peek(|s| s.sub_choice.clone()),
                     SubChoice::Embedded(_)
                 ) {
@@ -778,8 +812,8 @@ impl App {
                     }
                 }
             }
-            Event::SubtitleProgress { until, done } => {
-                if !matches!(
+            Event::SubtitleProgress { revision, until, done } => {
+                if revision != self.player.subtitle_revision.get() || !matches!(
                     self.player.state.peek(|s| s.sub_choice.clone()),
                     SubChoice::Embedded(_)
                 ) {
@@ -950,71 +984,147 @@ impl App {
         }
     }
 
-    /// Goes back to the detail view on the next episode and, when the
-    /// current stream has a binge group, auto-plays the matching stream.
+    /// Resolve the next episode inside the player, retaining window mode.
     pub fn play_next(&self, next: Video) {
-        let group = self
-            .player
-            .session
-            .borrow()
-            .stream
-            .as_ref()
-            .and_then(|s| s.behavior_hints.binge_group.clone());
-        self.back();
+        if self.together_blocks_control() || self.player.pending_binge.borrow().is_some() {
+            return;
+        }
+        let (meta, group, preferred_sub) = {
+            let session = self.player.session.borrow();
+            if session.video.as_ref().map(Video::id) == Some(next.id()) {
+                return;
+            }
+            (session.meta.clone(), session.stream.as_ref().and_then(|s| s.behavior_hints.binge_group.clone()),
+                session.preferred_sub.clone())
+        };
+        let Some(meta) = meta else { return };
+        self.finish_playback(true);
+        let (title, subtitle) = titles(&Stream::default(), Some(&meta), Some(&next));
+        {
+            let mut session = self.player.session.borrow_mut();
+            session.meta = Some(meta.clone());
+            session.video = Some(next.clone());
+            session.stream = None;
+            session.torrent_url = None;
+            session.preferred_sub = preferred_sub;
+            session.auto_sub_done = false;
+            session.last_position = 0.0;
+        }
+        self.player.state.write(|s| {
+            s.status = Status::Opening;
+            s.stage = "Finding streams for the next episode…".into();
+            s.title = title;
+            s.subtitle = subtitle;
+        });
+        // Keep the detail selection current for Back without navigating to it.
+        self.detail.write(|d| {
+            d.kind = meta.kind.clone();
+            d.id = meta.id().to_owned();
+            d.preview = Some(meta.clone());
+            d.meta = Load::Ready(meta.clone());
+        });
         if let Some(season) = next.season {
             self.select_season(season);
         }
-        *self.player.pending_binge.borrow_mut() = group;
+        *self.player.pending_binge.borrow_mut() = Some(PendingEpisode {
+            session_id: self.player.session_id.get(), meta, video: next.clone(), group,
+        });
         self.select_video(next);
     }
 
     /// Called as stream lists arrive for the selected video.
-    pub fn try_binge(&self, streams: &[Stream]) {
-        let wanted = self.player.pending_binge.borrow().clone();
-        let Some(wanted) = wanted else { return };
-        if let Some(stream) = streams
-            .iter()
-            .find(|s| s.behavior_hints.binge_group.as_deref() == Some(wanted.as_str()))
-        {
+    pub fn try_binge(&self) {
+        let pending = self.player.pending_binge.borrow().clone();
+        let Some(pending) = pending else { return };
+        if self.player.session_id.get() != pending.session_id || self.current_route() != Route::Player {
             self.player.pending_binge.borrow_mut().take();
-            self.play_stream(stream);
+            return;
+        }
+        let (stream, loading) = self.detail.peek(|d| {
+            if d.video.as_ref().map(Video::id) != Some(pending.video.id()) {
+                return (None, true);
+            }
+            (next_stream(&d.streams, pending.group.as_deref()),
+                d.streams.iter().any(|group| matches!(group.items, Load::Loading)))
+        });
+        if let Some(stream) = stream {
+            self.player.pending_binge.borrow_mut().take();
+            self.play_with(&stream, Some(pending.meta), Some(pending.video));
+        } else if !loading {
+            self.player.pending_binge.borrow_mut().take();
+            self.player.state.write(|s| s.status = Status::Error(
+                "No playable streams were found for this episode. Go back to choose another source or episode.".into()
+            ));
         }
     }
 
     pub fn stop_playback(&self) {
+        self.finish_playback(false);
+    }
+
+    fn opening_subtitle_preference(&self, meta: Option<&Meta>, video: Option<&Video>) -> String {
+        let session = self.player.session.borrow();
+        if self.player.state.peek(|s| s.status == Status::Opening)
+            && session.meta.as_ref().map(Meta::id) == meta.map(Meta::id)
+            && session.video.as_ref().map(Video::id) == video.map(Video::id)
+        {
+            session.preferred_sub.clone()
+        } else {
+            self.profile.peek(|p| p.settings.subtitle_lang.clone())
+        }
+    }
+
+    fn finish_playback(&self, replacing: bool) {
         self.player.subtitle_follow.suspend();
         self.player.subtitle_follow.set_pressed(false);
         crate::ui::hide_player_tooltips();
         self.player.preview.clear();
         // Also restore the window if playback is still preparing without an engine.
-        if self.player.fullscreen.get_untracked() {
+        if !replacing && self.player.fullscreen.get_untracked() {
             self.apply_fullscreen(false);
         }
         let engine = self.player.engine.borrow_mut().take();
-        let Some(engine) = engine else {
-            // Nothing decoding yet, but a torrent may still be preparing:
-            // invalidate it.
-            self.player.session_id.set(self.player.session_id.get() + 1);
-            if self.player.state.peek(|s| s.status != Status::Idle) {
-                self.player.state.write(|s| s.status = Status::Idle);
+        let had_engine = engine.is_some();
+        if let Some(engine) = engine {
+            if self.player.state.peek(|s| s.status != Status::Ended) {
+                self.record_player_progress(engine.position(), false, true);
             }
-            return;
-        };
-        let ended = self.player.state.peek(|s| s.status == Status::Ended);
-        if !ended {
-            self.record_player_progress(engine.position(), false, true);
+            engine.stop();
         }
-        engine.stop();
         self.player.session_id.set(self.player.session_id.get() + 1);
+        self.player.subtitle_revision.set(self.player.subtitle_revision.get() + 1);
+        self.player.pending_binge.borrow_mut().take();
+        self.player.scrub.set(None);
         self.player.frame.set(None);
+        self.player.position.set(0.0);
         self.player.cue.set(String::new());
         self.player.cues.borrow_mut().clear();
         let volume = self.player.state.write(|s| {
             s.status = Status::Idle;
             s.menu = Menu::None;
+            s.duration = 0.0;
+            s.live = false;
+            s.paused = false;
+            s.stalled = false;
+            s.controls_visible = true;
+            s.audio_tracks.clear();
+            s.audio_index = 0;
+            s.audio_delay = 0.0;
+            s.embedded_subs.clear();
+            s.addon_subs.clear();
+            s.sub_choice = SubChoice::Off;
+            s.sub_delay = 0.0;
+            s.sub_loaded_until = 0.0;
+            s.sub_loaded = false;
+            s.next = None;
+            s.up_next = None;
+            s.up_next_cancelled = false;
+            s.torrent = None;
             s.volume
         });
-        self.update_settings(|s| s.volume = volume);
+        if had_engine {
+            self.update_settings(|s| s.volume = volume);
+        }
     }
 
     // ------------------------------------------------------------ controls
@@ -1124,6 +1234,16 @@ impl App {
             return;
         }
         self.player.session.borrow_mut().auto_sub_done = true;
+        let language = self.player.state.peek(|s| match &choice {
+            SubChoice::Off => Some("off".to_owned()),
+            SubChoice::Embedded(index) => s.embedded_subs.get(*index).map(|t| t.language.clone()),
+            SubChoice::Addon(index) => s.addon_subs.get(*index).and_then(|t| t.lang.clone()),
+        });
+        if let Some(language) = language.filter(|language| !language.is_empty()) {
+            self.player.session.borrow_mut().preferred_sub = language;
+        }
+        let revision = self.player.subtitle_revision.get() + 1;
+        self.player.subtitle_revision.set(revision);
         self.player.cues.borrow_mut().clear();
         self.player.cue.set(String::new());
         self.player.state.write(|s| {
@@ -1135,11 +1255,11 @@ impl App {
         match &choice {
             SubChoice::Embedded(index) => {
                 let index = *index;
-                self.player.with_engine(|e| e.set_subtitle_track(Some(index)));
+                self.player.with_engine(|e| e.set_subtitle_track(Some(index), revision));
             }
             SubChoice::Off | SubChoice::Addon(_) => {
                 if matches!(previous, SubChoice::Embedded(_)) {
-                    self.player.with_engine(|e| e.set_subtitle_track(None));
+                    self.player.with_engine(|e| e.set_subtitle_track(None, revision));
                 }
             }
         }
@@ -1159,6 +1279,7 @@ impl App {
                 },
                 move |app, cues: Option<Vec<Cue>>| {
                     let still_selected = app.player.session_id.get() == session_id
+                        && app.player.subtitle_revision.get() == revision
                         && app.player.state.peek(|s| s.sub_choice == SubChoice::Addon(index));
                     if !still_selected {
                         return;
@@ -1403,6 +1524,193 @@ impl App {
                 app.notify("Fullscreen is not available");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod episode_transition_tests {
+    use super::*;
+
+    fn stream(url: &str, group: Option<&str>) -> Stream {
+        Stream {
+            url: Some(url.into()),
+            behavior_hints: StreamHints { binge_group: group.map(str::to_owned), ..Default::default() },
+            ..Default::default()
+        }
+    }
+
+    fn group(items: Load<Vec<Stream>>) -> StreamGroup {
+        StreamGroup { addon_name: "Provider".into(), items }
+    }
+
+    fn episode(number: u32) -> Video {
+        Video { id: Some(format!("series:1:{number}")), season: Some(1), episode: Some(number), ..Default::default() }
+    }
+
+    fn app() -> App {
+        App::with_profile(crate::store::Profile::default())
+    }
+
+    #[test]
+    fn next_source_waits_for_the_matching_release_then_falls_back() {
+        let fallback = stream("https://example.test/next.mkv", Some("other"));
+        let matching = stream("https://example.test/matching.mkv", Some("release"));
+        let mut groups = vec![group(Load::Ready(vec![fallback.clone()])), group(Load::Loading)];
+        assert!(next_stream(&groups, Some("release")).is_none());
+        groups[1].items = Load::Ready(vec![matching.clone()]);
+        assert_eq!(next_stream(&groups, Some("release")), Some(matching));
+        groups[1].items = Load::Failed("Unavailable".into());
+        assert_eq!(next_stream(&groups, Some("release")), Some(fallback.clone()));
+        assert_eq!(next_stream(&groups, None), Some(fallback));
+    }
+
+    #[test]
+    fn next_source_accepts_included_streams_without_a_binge_group() {
+        let included = stream("https://example.test/episode2.mkv", None);
+        let groups = vec![group(Load::Ready(vec![Stream::default(), included.clone()]))];
+        assert_eq!(next_stream(&groups, None), Some(included));
+        assert!(next_stream(&[group(Load::Ready(vec![Stream {
+            external_url: Some("https://example.test/browser".into()), ..Default::default()
+        }]))], None).is_none());
+    }
+
+    #[test]
+    fn next_episode_preserves_the_player_and_discards_old_subtitles() {
+        let app = app();
+        app.profile.write(|p| p.addons.clear());
+        let next = episode(2);
+        let meta = Meta { id: Some("series".into()), kind: "series".into(), name: Some("Show".into()),
+            videos: vec![episode(1), next.clone()], ..Default::default() };
+        {
+            let mut session = app.player.session.borrow_mut();
+            session.meta = Some(meta);
+            session.video = Some(episode(1));
+            session.preferred_sub = "eng".into();
+            session.auto_sub_done = true;
+        }
+        let routes = vec![Route::Board, Route::Detail, Route::Player];
+        app.route.set(routes.clone());
+        app.player.fullscreen.set(true);
+        app.player.cue.set("Previous episode".into());
+        app.player.cues.borrow_mut().push(Cue { start: 0.0, end: 99.0, text: "Previous episode".into() });
+        app.player.scrub.set(Some(99.0));
+        app.player.state.write(|s| {
+            s.status = Status::Playing;
+            s.sub_choice = SubChoice::Addon(0);
+            s.addon_subs.push(Subtitle { id: None, url: "https://example.test/old.srt".into(), lang: Some("eng".into()) });
+            s.sub_loaded_until = 99.0;
+            s.sub_loaded = true;
+            s.up_next = Some(5);
+            s.next = Some(next.clone());
+        });
+        let previous_session = app.player.session_id.get();
+        app.play_next(next.clone());
+        assert_eq!(app.route.get_untracked(), routes);
+        assert!(app.player.fullscreen.get_untracked());
+        assert_eq!(app.player.session.borrow().video.as_ref().map(Video::id), Some(next.id()));
+        assert_eq!(app.detail.peek(|d| d.video.as_ref().map(|v| v.id().to_owned())), Some(next.id().to_owned()));
+        assert!(app.player.cue.get_untracked().is_empty());
+        assert!(app.player.cue_list().is_empty());
+        assert_eq!(app.player.scrub.get(), None);
+        app.player.state.peek(|s| {
+            assert_eq!(s.sub_choice, SubChoice::Off);
+            assert!(s.addon_subs.is_empty() && s.embedded_subs.is_empty());
+            assert_eq!(s.sub_loaded_until, 0.0);
+            assert!(!s.sub_loaded);
+            assert!(s.up_next.is_none());
+            assert!(matches!(s.status, Status::Error(_)), "no sources must produce an in-player error");
+        });
+        assert!(!app.player.session.borrow().auto_sub_done);
+        assert_eq!(app.player.session.borrow().preferred_sub, "eng");
+        // The new media info should select a fresh track using the carried
+        // language, rather than retaining the old episode's addon index.
+        app.player.state.write(|s| {
+            s.status = Status::Opening;
+            s.embedded_subs.push(Track {
+                language: "eng".into(), title: "New episode English".into(), codec: "srt".into(), stream_index: 3,
+            });
+        });
+        let meta = app.player.session.borrow().meta.clone();
+        assert_eq!(app.opening_subtitle_preference(meta.as_ref(), Some(&next)), "eng");
+        app.auto_select_subtitle();
+        assert_eq!(app.player.state.peek(|s| s.sub_choice.clone()), SubChoice::Embedded(0));
+        app.player_event(previous_session, Event::Cues {
+            revision: app.player.subtitle_revision.get(),
+            cues: vec![Cue { start: 0.0, end: 10.0, text: "Late old subtitle".into() }], reset: false,
+        });
+        assert!(app.player.cue_list().is_empty());
+        app.player_event(app.player.session_id.get(), Event::Cues {
+            revision: app.player.subtitle_revision.get(),
+            cues: vec![Cue { start: 0.0, end: 10.0, text: "New episode subtitle".into() }], reset: false,
+        });
+        assert_eq!(app.player.cue_list()[0].text, "New episode subtitle");
+    }
+
+    #[test]
+    fn leaving_while_the_next_episode_loads_cancels_autoplay() {
+        let app = app();
+        app.route.set(vec![Route::Board, Route::Detail, Route::Player]);
+        *app.player.pending_binge.borrow_mut() = Some(PendingEpisode {
+            session_id: app.player.session_id.get(), meta: Meta::default(), video: episode(2), group: None,
+        });
+        app.back();
+        app.try_binge();
+        assert_eq!(app.current_route(), Route::Detail);
+        assert!(app.player.pending_binge.borrow().is_none());
+        assert_eq!(app.player.state.peek(|s| s.status.clone()), Status::Idle);
+        assert!(app.player.engine.borrow().is_none());
+    }
+
+    #[test]
+    fn subtitle_language_and_off_choice_follow_the_next_episode() {
+        let app = app();
+        app.player.state.write(|s| s.embedded_subs.push(Track {
+            language: "eng".into(), title: "English".into(), codec: "srt".into(), stream_index: 2,
+        }));
+        app.select_subtitle(SubChoice::Embedded(0));
+        assert_eq!(app.player.session.borrow().preferred_sub, "eng");
+        let revision = app.player.subtitle_revision.get();
+        app.select_subtitle(SubChoice::Off);
+        assert_eq!(app.player.session.borrow().preferred_sub, "off");
+        assert!(app.player.subtitle_revision.get() > revision);
+    }
+
+    #[test]
+    fn rapid_subtitle_switches_reject_queued_results_even_after_switching_back() {
+        let app = app();
+        app.player.state.write(|s| {
+            for language in ["eng", "spa"] {
+                s.embedded_subs.push(Track {
+                    language: language.into(), title: language.into(), codec: "srt".into(), stream_index: 2,
+                });
+            }
+        });
+        app.select_subtitle(SubChoice::Embedded(0));
+        let first = app.player.subtitle_revision.get();
+        app.select_subtitle(SubChoice::Embedded(1));
+        app.select_subtitle(SubChoice::Embedded(0));
+        let latest = app.player.subtitle_revision.get();
+        let session = app.player.session_id.get();
+        app.player_event(session, Event::Cues {
+            revision: first, cues: vec![Cue { start: 0.0, end: 10.0, text: "Obsolete".into() }], reset: false,
+        });
+        app.player_event(session, Event::SubtitleProgress { revision: first, until: 999.0, done: true });
+        assert!(app.player.cue_list().is_empty());
+        app.player.state.peek(|s| {
+            assert_eq!(s.sub_loaded_until, 0.0);
+            assert!(!s.sub_loaded);
+        });
+        app.player_event(session, Event::Cues {
+            revision: latest, cues: vec![Cue { start: 0.0, end: 10.0, text: "Current".into() }], reset: false,
+        });
+        app.player_event(session, Event::SubtitleProgress { revision: latest, until: 10.0, done: true });
+        assert_eq!(app.player.cue_list()[0].text, "Current");
+        assert!(app.player.state.peek(|s| s.sub_loaded));
+        app.select_subtitle(SubChoice::Off);
+        app.player_event(session, Event::Cues {
+            revision: latest, cues: vec![Cue { start: 0.0, end: 10.0, text: "Late after Off".into() }], reset: false,
+        });
+        assert!(app.player.cue_list().is_empty());
     }
 }
 
