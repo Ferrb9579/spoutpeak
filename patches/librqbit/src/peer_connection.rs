@@ -152,6 +152,22 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
     pub async fn manage_peer_incoming(
         &self,
         outgoing_chan: tokio::sync::mpsc::UnboundedReceiver<WriterRequest>,
+        incoming: CheckedIncomingConnection,
+        have_broadcast: tokio::sync::broadcast::Receiver<ValidPieceIndex>,
+    ) -> Result<()> {
+        let mut policy = self.connector.subscribe_encryption();
+        if *policy.borrow_and_update() != incoming.encryption_mode {
+            return Err(Error::Anyhow(anyhow::anyhow!("encryption policy changed")));
+        }
+        tokio::select! {
+            _ = policy.changed() => Err(Error::Anyhow(anyhow::anyhow!("encryption policy changed"))),
+            result = self.manage_peer_incoming_inner(outgoing_chan, incoming, have_broadcast) => result,
+        }
+    }
+
+    async fn manage_peer_incoming_inner(
+        &self,
+        outgoing_chan: tokio::sync::mpsc::UnboundedReceiver<WriterRequest>,
         mut incoming: CheckedIncomingConnection,
         have_broadcast: tokio::sync::broadcast::Receiver<ValidPieceIndex>,
     ) -> Result<()> {
@@ -212,6 +228,18 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
         outgoing_chan: tokio::sync::mpsc::UnboundedReceiver<WriterRequest>,
         have_broadcast: tokio::sync::broadcast::Receiver<ValidPieceIndex>,
     ) -> Result<()> {
+        let mut policy = self.connector.subscribe_encryption();
+        tokio::select! {
+            _ = policy.changed() => Err(Error::Anyhow(anyhow::anyhow!("encryption policy changed"))),
+            result = self.manage_peer_outgoing_inner(outgoing_chan, have_broadcast) => result,
+        }
+    }
+
+    async fn manage_peer_outgoing_inner(
+        &self,
+        outgoing_chan: tokio::sync::mpsc::UnboundedReceiver<WriterRequest>,
+        have_broadcast: tokio::sync::broadcast::Receiver<ValidPieceIndex>,
+    ) -> Result<()> {
         use tokio::io::AsyncWriteExt;
         let rwtimeout = self
             .options
@@ -224,12 +252,10 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
             .unwrap_or_else(|| Duration::from_secs(10));
 
         let now = Instant::now();
-        let (ckind, mut read, mut write) = with_timeout(
-            "connecting",
-            connect_timeout,
-            self.connector.connect(self.addr),
-        )
-        .await?;
+        let (ckind, mut read, mut write) = self
+            .connector
+            .connect_peer(self.addr, self.info_hash, connect_timeout)
+            .await?;
 
         async move {
             self.handler.on_connected(now.elapsed());

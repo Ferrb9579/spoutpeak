@@ -540,6 +540,19 @@ impl Inner {
         command
     }
 
+    fn subtitle_ffmpeg(&self, tool: &PathBuf, from: f64) -> Command {
+        let mut command = self.ffmpeg(tool);
+        // A seek can return a cue that began before `from`. Rebasing it
+        // creates negative timestamps, which the SRT muxer shifts to zero
+        // along with every following cue. Keep the media timeline instead,
+        // relative to the input start, for both subtitle readers.
+        command.args(["-copyts", "-start_at_zero"]);
+        if from > 0.0 {
+            command.args(["-ss", &format!("{from:.3}")]);
+        }
+        command
+    }
+
     fn open(self: Arc<Self>) {
         let Some((_, ffprobe)) = tools() else {
             self.emit(Event::Error { generation: 0, message:
@@ -832,10 +845,7 @@ impl Inner {
         if let Some(track) = config.subtitle_track.filter(|_| !live) {
             // Start a little early so a cue already on screen is included.
             let from = (position - 15.0).max(0.0);
-            let mut command = self.ffmpeg(&ffmpeg);
-            if from > 0.0 {
-                command.args(["-ss", &format!("{from:.3}")]);
-            }
+            let mut command = self.subtitle_ffmpeg(&ffmpeg, from);
             // Getting subtitle packets means reading the whole interleaved
             // file. Unthrottled, this reader races to the end of a torrent and
             // takes bandwidth from playback; at 1.1x it stays just ahead.
@@ -878,7 +888,7 @@ impl Inner {
                     }
                     if let Some(stdout) = stdout {
                         let keep = |inner: &Inner| inner.current(generation);
-                        inner.subtitle_loop(&keep, stdout, from, false, config.subtitle_revision);
+                        inner.subtitle_loop(&keep, stdout, false, config.subtitle_revision);
                     }
                 }
             });
@@ -1091,7 +1101,6 @@ impl Inner {
         &self,
         keep: &dyn Fn(&Inner) -> bool,
         stdout: ChildStdout,
-        offset: f64,
         report: bool,
         revision: u64,
     ) {
@@ -1114,7 +1123,7 @@ impl Inner {
                 return;
             }
             if line.trim().is_empty() {
-                if let Some(cue) = parse_block(&block, offset) {
+                if let Some(cue) = parse_block(&block, 0.0) {
                     batch.push(cue);
                 }
                 block.clear();
@@ -1127,7 +1136,7 @@ impl Inner {
                 block.push('\n');
             }
         }
-        if let Some(cue) = parse_block(&block, offset) {
+        if let Some(cue) = parse_block(&block, 0.0) {
             batch.push(cue);
         }
         if !keep(self) {
@@ -1213,7 +1222,7 @@ impl Inner {
             return;
         }
         self.emit(Event::SubtitleProgress { revision, until: 0.0, done: false });
-        let mut command = self.ffmpeg(&ffmpeg);
+        let mut command = self.subtitle_ffmpeg(&ffmpeg, 0.0);
         let cached = crate::streaming::completed_stream_file(&self.request.url);
         let network = cached.is_none() && (self.request.url.starts_with("http://") || self.request.url.starts_with("https://"));
         // Disk reads need no playback-rate limit. Uncached network reads
@@ -1250,7 +1259,7 @@ impl Inner {
             return;
         }
         if let Some(stdout) = stdout {
-            self.subtitle_loop(&keep, stdout, 0.0, true, revision);
+            self.subtitle_loop(&keep, stdout, true, revision);
         }
     }
 
@@ -1706,7 +1715,7 @@ mod seek_tests {
         let inner = engine.inner.clone();
         let reader = std::thread::spawn(move || {
             let keep = |inner: &Inner| inner.current(generation);
-            inner.subtitle_loop(&keep, stdout, 0.0, false, 2);
+            inner.subtitle_loop(&keep, stdout, false, 2);
         });
         match rx.recv_timeout(Duration::from_secs(3)).expect("current subtitle was buffered awaiting another cue") {
             Event::Cues { revision: 2, cues, .. } => assert_eq!(cues[0].text, "Opening line"),
@@ -1714,6 +1723,65 @@ mod seek_tests {
         }
         engine.stop();
         reader.join().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg on PATH; checks ASS subtitle timestamps after seeks"]
+    fn subtitle_seeks_preserve_timestamps_and_do_not_duplicate_sync_lines() {
+        let (ffmpeg, _) = tools().expect("FFmpeg and FFprobe on PATH");
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/subtitle-timestamp-test");
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("captions.ass");
+        std::fs::write(&source, concat!(
+            "[Script Info]\nScriptType: v4.00+\n\n",
+            "[V4+ Styles]\n",
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n",
+            "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1\n\n",
+            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
+            "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Opening line\n",
+            "Dialogue: 0,0:04:56.24,0:05:00.20,Default,,0,0,0,,A line already on screen\n",
+            "Dialogue: 0,0:05:02.95,0:05:04.58,Default,,0,0,0,,Following line\n",
+            "Dialogue: 0,0:05:10.00,0:05:12.00,Default,,0,0,0,,A line already on screen\n",
+        )).unwrap();
+        let media = directory.join("captions.mks");
+        let mut mux = Command::new(&ffmpeg);
+        mux.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"]).arg(&source)
+            .args(["-c:s", "copy", "-f", "matroska"]).arg(&media);
+        hide_console(&mut mux);
+        assert!(mux.status().unwrap().success());
+
+        let engine = engine(media.to_string_lossy().into_owned());
+        let extract = |from| {
+            let mut command = engine.inner.subtitle_ffmpeg(&ffmpeg, from);
+            command.arg("-i").arg(&media)
+                .args(["-map", "0:s:0", "-vn", "-an", "-dn", "-flush_packets", "1", "-f", "srt", "pipe:1"]);
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            super::super::subtitles::parse(std::str::from_utf8(&output.stdout).unwrap())
+        };
+        let full = extract(0.0);
+        assert_eq!(full.len(), 4);
+        assert!((full[1].start - 296.24).abs() < 0.001);
+        let app = crate::state::App::with_profile(crate::store::Profile::default());
+        app.player.state.write(|s| s.sub_choice = super::super::SubChoice::Embedded(0));
+        let session = app.player.session_id.get();
+        let revision = app.player.subtitle_revision.get();
+        // Also receive near-playhead cues before the background scan.
+        for from in [297.5, 0.0, 299.0, 301.0, 304.0] {
+            let cues = extract(from);
+            assert!(!cues.is_empty());
+            for cue in &cues {
+                assert!(full.iter().any(|original| original.text == cue.text
+                    && (original.start - cue.start).abs() < 0.001
+                    && (original.end - cue.end).abs() < 0.001),
+                    "seek {from} changed the cue timing: {cue:?}");
+            }
+            app.player_event(session, Event::Cues { revision, cues, reset: false });
+        }
+        let merged = app.player.cue_list();
+        assert_eq!(merged.len(), full.len(), "readers duplicated lines in the sync list");
+        assert_eq!(merged.iter().filter(|cue| cue.text == "A line already on screen").count(), 2,
+            "separate utterances of the same words must remain separate");
     }
 
     #[test]

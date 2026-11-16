@@ -163,6 +163,7 @@ pub async fn start() -> Result<(), String> {
 pub fn configure(settings: &TorrentSettings) {
     *config().lock().unwrap() = settings.clone();
     if let Some(engine) = ENGINE.get() {
+        engine.session.set_encryption(settings.encryption);
         engine.session.ratelimits.set_download_bps(speed_cap(settings));
     }
 }
@@ -539,6 +540,7 @@ async fn launch() -> Result<Arc<Engine>, String> {
         ..Default::default()
     };
     let options = |persist: bool, port: u16| SessionOptions {
+        encryption: settings.encryption,
         listen: Some(listen(port)),
         dht: Some(DhtSessionConfig {
             persistence: persist.then(|| DhtPersistenceConfig {

@@ -423,6 +423,8 @@ impl Default for DhtSessionConfig {
 }
 
 pub struct SessionOptions {
+    /// Peer payload encryption policy, applied to TCP, uTP and SOCKS.
+    pub encryption: crate::EncryptionMode,
     /// DHT configuration. Set to None to disable DHT entirely.
     /// Defaults to DHT enabled with persistence.
     pub dht: Option<DhtSessionConfig>,
@@ -491,6 +493,7 @@ pub struct SessionOptions {
 impl Default for SessionOptions {
     fn default() -> Self {
         Self {
+            encryption: crate::EncryptionMode::default(),
             dht: Some(DhtSessionConfig::default()),
             bind_device_name: None,
             disable_trackers: false,
@@ -538,6 +541,7 @@ fn torrent_file_from_info_bytes(info_bytes: &[u8], trackers: &[url::Url]) -> any
 }
 
 pub(crate) struct CheckedIncomingConnection {
+    pub encryption_mode: crate::EncryptionMode,
     pub kind: ConnectionKind,
     pub addr: SocketAddr,
     pub reader: BoxAsyncReadVectored,
@@ -733,6 +737,7 @@ impl Session {
 
             let stream_connector = Arc::new(
                 StreamConnector::new(StreamConnectorArgs {
+                    encryption: opts.encryption,
                     enable_tcp: opts.connect.as_ref().map(|c| c.enable_tcp).unwrap_or(true),
                     socks_proxy_config: proxy_config,
                     utp_socket: listen_result.as_ref().and_then(|l| l.utp_socket.clone()),
@@ -912,7 +917,7 @@ impl Session {
         self: Arc<Self>,
         addr: SocketAddr,
         kind: ConnectionKind,
-        mut reader: BoxAsyncReadVectored,
+        reader: BoxAsyncReadVectored,
         writer: BoxAsyncWrite,
     ) -> anyhow::Result<(Arc<TorrentStateLive>, CheckedIncomingConnection)> {
         let rwtimeout = self
@@ -936,12 +941,32 @@ impl Session {
             bail!("Incoming ip {incoming_ip} is not in allowlist");
         }
 
+        let mut policy = self.connector.subscribe_encryption();
+        let encryption_mode = *policy.borrow_and_update();
+        let keys: Vec<_> = self
+            .db
+            .read()
+            .torrents
+            .values()
+            .map(|t| t.info_hash())
+            .collect();
+        let (mut reader, writer, mse_key) = tokio::select! {
+            _ = policy.changed() => bail!("encryption policy changed during handshake"),
+            result = tokio::time::timeout(rwtimeout, crate::mse::accept(reader, writer, encryption_mode, &keys)) => result??,
+        };
         let mut read_buf = ReadBuf::new();
         let h = read_buf
             .read_handshake(&mut reader, rwtimeout)
             .await
             .context("error reading handshake")?;
         trace!("received handshake from {addr}: {:?}", h);
+
+        if policy.has_changed().unwrap_or(true) {
+            bail!("encryption policy changed during handshake");
+        }
+        if mse_key.is_some_and(|key| key != h.info_hash) {
+            bail!("MSE torrent does not match peer handshake");
+        }
 
         if h.peer_id == self.peer_id {
             bail!("seems like we are connecting to ourselves, ignoring");
@@ -964,6 +989,7 @@ impl Session {
         Ok((
             live,
             CheckedIncomingConnection {
+                encryption_mode,
                 addr,
                 reader,
                 writer,
@@ -1030,6 +1056,12 @@ impl Session {
 
     pub fn get_dht(&self) -> Option<&Dht> {
         self.dht.as_ref()
+    }
+
+    /// Change peer encryption policy. Existing connections are disconnected
+    /// and reconnect under the new policy, including metadata discovery.
+    pub fn set_encryption(&self, mode: crate::EncryptionMode) {
+        self.connector.set_encryption(mode);
     }
 
     fn merge_peer_opts(&self, other: Option<PeerConnectionOptions>) -> PeerConnectionOptions {

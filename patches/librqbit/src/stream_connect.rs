@@ -60,6 +60,7 @@ pub(crate) struct SocksProxyConfig {
 
 #[derive(Default, Debug, Clone)]
 pub(crate) struct StreamConnectorArgs {
+    pub encryption: crate::EncryptionMode,
     pub enable_tcp: bool,
     pub socks_proxy_config: Option<SocksProxyConfig>,
     pub utp_socket: Option<Arc<UtpSocketUdp>>,
@@ -129,6 +130,7 @@ gen_stats!(ConnectStatsAtomic ConnectStatsSnapshot, [], [
 
 #[derive(Debug)]
 pub(crate) struct StreamConnector {
+    encryption: tokio::sync::watch::Sender<crate::EncryptionMode>,
     proxy_config: Option<SocksProxyConfig>,
     enable_tcp: bool,
     bind_device: Option<BindDevice>,
@@ -154,6 +156,7 @@ impl StreamConnector {
         }
 
         Ok(Self {
+            encryption: tokio::sync::watch::channel(config.encryption).0,
             proxy_config: config.socks_proxy_config,
             enable_tcp: config.enable_tcp,
             utp_socket: config.utp_socket,
@@ -207,6 +210,59 @@ impl StreamConnector {
 
     pub fn stats(&self) -> &ConnectStatsAtomic {
         &self.stats
+    }
+
+    pub(crate) fn encryption(&self) -> crate::EncryptionMode {
+        *self.encryption.borrow()
+    }
+
+    pub(crate) fn subscribe_encryption(
+        &self,
+    ) -> tokio::sync::watch::Receiver<crate::EncryptionMode> {
+        self.encryption.subscribe()
+    }
+
+    pub(crate) fn set_encryption(&self, mode: crate::EncryptionMode) {
+        self.encryption.send_if_modified(|current| {
+            if *current == mode {
+                return false;
+            }
+            *current = mode;
+            true
+        });
+    }
+
+    pub(crate) async fn connect_peer(
+        &self,
+        addr: SocketAddr,
+        key: librqbit_core::Id20,
+        timeout: Duration,
+    ) -> Result<(ConnectionKind, BoxAsyncReadVectored, BoxAsyncWrite)> {
+        let mode = self.encryption();
+        if mode != crate::EncryptionMode::Disabled {
+            let encrypted = tokio::time::timeout(timeout, async {
+                let (kind, r, w) = self.connect(addr).await?;
+                let (r, w) = crate::mse::initiate(r, w, key)
+                    .await
+                    .map_err(Error::Anyhow)?;
+                Ok::<_, Error>((kind, r, w))
+            })
+            .await;
+            match encrypted {
+                Ok(Ok(connection)) => return Ok(connection),
+                _ if mode == crate::EncryptionMode::Prefer => {
+                    debug!(
+                        ?addr,
+                        "MSE failed; retrying with a fresh plaintext connection"
+                    );
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(error) => return Err(Error::Anyhow(error.into())),
+            }
+        }
+        tokio::time::timeout(timeout, self.connect(addr))
+            .await
+            .map_err(|e| Error::Anyhow(e.into()))?
     }
 
     pub async fn connect(
@@ -324,6 +380,126 @@ impl StreamConnector {
                 },
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod encryption_tests {
+    use super::*;
+    use crate::EncryptionMode;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn prefer_retries_on_a_fresh_connection_and_require_never_downgrades() {
+        for mode in [
+            EncryptionMode::Prefer,
+            EncryptionMode::Require,
+            EncryptionMode::Disabled,
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let connector = StreamConnector::new(StreamConnectorArgs {
+                encryption: mode,
+                enable_tcp: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let server = async {
+                let (mut first, _) = listener.accept().await.unwrap();
+                if mode != EncryptionMode::Disabled {
+                    let mut public = [0; 96];
+                    first.read_exact(&mut public).await.unwrap();
+                    drop(first); // simulate a peer without MSE support
+                    if mode == EncryptionMode::Require {
+                        assert!(
+                            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                                .await
+                                .is_err()
+                        );
+                        return;
+                    }
+                    first = listener.accept().await.unwrap().0;
+                }
+                let mut header = [0; 20];
+                first.read_exact(&mut header).await.unwrap();
+                assert_eq!(&header, b"\x13BitTorrent protocol");
+            };
+            let client = async {
+                let result = connector
+                    .connect_peer(
+                        addr,
+                        librqbit_core::Id20::new([1; 20]),
+                        Duration::from_secs(1),
+                    )
+                    .await;
+                if mode == EncryptionMode::Require {
+                    assert!(result.is_err());
+                } else {
+                    let (_, _, mut w) = result.unwrap();
+                    w.write_all(b"\x13BitTorrent protocol").await.unwrap();
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(server, client);
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_encryption_times_out_before_plaintext_retry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connector = StreamConnector::new(StreamConnectorArgs {
+            encryption: EncryptionMode::Prefer,
+            enable_tcp: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let server = async {
+            let (_stalled, _) = listener.accept().await.unwrap();
+            let (mut retry, _) = listener.accept().await.unwrap();
+            let mut marker = [0; 5];
+            retry.read_exact(&mut marker).await.unwrap();
+            assert_eq!(&marker, b"plain");
+        };
+        let client = async {
+            let (_, _, mut w) = connector
+                .connect_peer(
+                    addr,
+                    librqbit_core::Id20::new([1; 20]),
+                    Duration::from_millis(100),
+                )
+                .await
+                .unwrap();
+            w.write_all(b"plain").await.unwrap();
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(server, client);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn policy_changes_notify_active_connections_but_noop_updates_do_not() {
+        let connector = StreamConnector::new(StreamConnectorArgs {
+            enable_tcp: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let mut policy = connector.subscribe_encryption();
+        connector.set_encryption(EncryptionMode::Disabled);
+        assert!(!policy.has_changed().unwrap());
+        connector.set_encryption(EncryptionMode::Require);
+        policy.changed().await.unwrap();
+        assert_eq!(*policy.borrow_and_update(), EncryptionMode::Require);
+        connector.set_encryption(EncryptionMode::Prefer);
+        assert!(policy.has_changed().unwrap());
     }
 }
 

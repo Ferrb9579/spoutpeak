@@ -508,6 +508,21 @@ fn streaming_card(app: &App, settings: &Settings) -> Widget {
         setting_row("Torrent engine", "", row(status_row).into()),
     ];
 
+    rows.push(setting_row(
+        "Peer encryption",
+        "Prefer allows unencrypted peers; Require may find fewer peers. Changes reconnect peers. Your IP remains visible.",
+        choices(
+            app,
+            vec![
+                ("Disabled".to_owned(), librqbit::EncryptionMode::Disabled),
+                ("Prefer".to_owned(), librqbit::EncryptionMode::Prefer),
+                ("Require".to_owned(), librqbit::EncryptionMode::Require),
+            ],
+            torrent.encryption,
+            |s, v| s.torrent.encryption = v,
+        ),
+    ));
+
     // Cache size.
     let mut sizes: Vec<(String, Option<u64>)> = [0u64, 2, 5, 10, 20, 50, 100]
         .iter()

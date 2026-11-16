@@ -168,6 +168,22 @@ mod subtitle_loading_tests {
     use super::*;
 
     #[test]
+    fn torrent_encryption_preserves_old_profiles_and_round_trips_all_modes() {
+        let old: TorrentSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.encryption, librqbit::EncryptionMode::Disabled);
+        for mode in [
+            librqbit::EncryptionMode::Disabled,
+            librqbit::EncryptionMode::Prefer,
+            librqbit::EncryptionMode::Require,
+        ] {
+            let settings = TorrentSettings { encryption: mode, ..Default::default() };
+            let restored: TorrentSettings =
+                serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+            assert_eq!(restored.encryption, mode);
+        }
+    }
+
+    #[test]
     fn subtitle_loading_setting_preserves_old_profiles_and_round_trips() {
         let mut settings: Settings = serde_json::from_str("{}").unwrap();
         assert!(!settings.fast_subtitles);
@@ -235,6 +251,8 @@ pub enum ReadAhead {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TorrentSettings {
+    /// Encryption for connections to torrent peers.
+    pub encryption: librqbit::EncryptionMode,
     /// Bytes of torrent data kept on disk for replays; `None` = unlimited.
     pub cache_size: Option<u64>,
     /// Days a cached torrent is kept after it was last streamed; `Some(0)`
@@ -251,6 +269,7 @@ pub struct TorrentSettings {
 impl Default for TorrentSettings {
     fn default() -> Self {
         Self {
+            encryption: librqbit::EncryptionMode::Disabled,
             cache_size: Some(2 * 1024 * 1024 * 1024),
             cache_max_age_days: Some(7),
             read_ahead: ReadAhead::Auto,
