@@ -327,9 +327,12 @@ fn ai_card(app: &App, settings: &Settings) -> Widget {
         titled(icons::type_(), "Local AI"), gap(8.0),
         text("LFM3-Omni-2B", 16.0, FontWeight::W600, TEXT).into(), gap(4.0),
         muted("Optional local model. First tool: subtitle matching from audio. Runs on your computer; media is not uploaded."),
-        setting_row("Enable local AI", "Starts only when you request an AI task", toggle(app,
+        setting_row("Enable local AI", "Allow optional on-device AI tools", toggle(app,
             settings.local_ai_enabled, |s, v| s.local_ai_enabled = v)),
-        muted("Subtitle assist: pause as a line starts, then use Find spoken line in Subtitles → Sync. Review the match before applying a delay."),
+        setting_row("Automatic subtitle sync", "Align to audio as you watch. Works with same-language subtitles; uncertain sections keep their timing.",
+            toggle(app, settings.automatic_subtitle_sync, |s, v| s.automatic_subtitle_sync = v)),
+        muted("Automatic sync analyzes audio near playback and may read additional media. Manual delay becomes fine-tuning after the audio correction."),
+        muted("Manual assist is also available: pause as a line starts, then use Find spoken line in Subtitles → Sync."),
         gap(8.0),
         muted("Q4_K_M model + Q8 audio/vision projector and CPU runtime: about 1.63 GB download. Additional memory is needed while running."),
         gap(8.0),
@@ -340,12 +343,12 @@ fn ai_card(app: &App, settings: &Settings) -> Widget {
         children.push(text(&model.stage, 13.0, FontWeight::W500, ACCENT).into());
         if model.downloading {
             children.push(muted(format!("{:.0} / {:.0} MB · {:.0}%", model.downloaded as f64 / 1e6,
-                crate::ai::DOWNLOAD_SIZE as f64 / 1e6,
-                100.0 * model.downloaded as f64 / crate::ai::DOWNLOAD_SIZE as f64)));
+                model.total as f64 / 1e6,
+                100.0 * model.downloaded as f64 / model.total.max(1) as f64)));
         }
         let cancel = app.clone();
         children.push(gap(8.0));
-        children.push(button("Cancel", Tone::Neutral, move || cancel.ai.cancel()));
+        children.push(button("Stop task", Tone::Neutral, move || cancel.cancel_ai_task()));
     } else {
         children.push(text(if model.installed { "Downloaded · ready when enabled" } else { "Model is not downloaded" },
             13.0, FontWeight::W500, if model.installed { ACCENT } else { MUTED }).into());
@@ -362,6 +365,21 @@ fn ai_card(app: &App, settings: &Settings) -> Widget {
         }
         children.push(gap(8.0));
         children.push(row(actions).into());
+        children.push(gap(10.0));
+        children.push(muted(if model.timing_installed { "Speech timing model downloaded · automatic sync ready" }
+            else { "Automatic sync needs the additional speech timing model (~157 MB)." }));
+        let mut timing_actions = Vec::new();
+        if settings.local_ai_enabled {
+            let download = app.clone();
+            timing_actions.push(button(if model.timing_installed { "Verify timing model" } else { "Download timing model" },
+                Tone::Neutral, move || download.download_timing_model()));
+        }
+        if crate::player::alignment::model_dir().exists() {
+            let remove = app.clone();
+            timing_actions.push(hgap(8.0));
+            timing_actions.push(button("Remove timing model", Tone::Neutral, move || remove.remove_timing_model()));
+        }
+        children.push(row(timing_actions).into());
     }
     if let Some(error) = model.error {
         children.push(gap(8.0));

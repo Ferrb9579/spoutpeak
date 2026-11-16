@@ -851,11 +851,18 @@ fn subtitles_panel(app: &App) -> Panel {
     panel.gap(10.0);
 
     if choice != SubChoice::Off {
+        let automatic = app.profile.read(|p| p.settings.local_ai_enabled && p.settings.automatic_subtitle_sync);
+        if automatic {
+            let status = if app.ai.state.read(|s| s.timing_installed) {
+                app.player.alignment.read(|s| if s.message.is_empty() { "Automatic sync · waiting for dialogue".to_owned() } else { s.message.clone() })
+            } else { "Download the speech timing model in Settings → Local AI".to_owned() };
+            panel.push(text(status, 11.5, FontWeight::W400, ACCENT).max_lines(Some(2)), 38.0);
+        }
         let (earlier, later, sync) = (app.clone(), app.clone(), app.clone());
         panel.row(vec![
             SizedBox::new()
                 .width(110.0)
-                .child(text(format!("Delay {delay:+.2}s"), 12.5, FontWeight::W500, MUTED))
+                .child(text(format!("{} {delay:+.2}s", if automatic { "Fine-tune" } else { "Delay" }), 12.5, FontWeight::W500, MUTED))
                 .into(),
             icon_pill("Subtitles earlier", icons::minus(), move || earlier.adjust_subtitle_delay(-0.25)),
             hgap(6.0),
@@ -1303,7 +1310,7 @@ fn ai_subtitle_assist(app: &App) -> Widget {
         let cancel = app.clone();
         children.push(hrow(vec![
             Expanded::new(text(&model.stage, 12.0, FontWeight::W400, MUTED).max_lines(Some(2))).into(),
-            hgap(6.0), pill("Cancel", false, move || cancel.ai.cancel()),
+            hgap(6.0), pill("Stop task", false, move || cancel.cancel_ai_task()),
         ]).into());
     } else {
         let find = app.clone();
@@ -1490,6 +1497,11 @@ fn sync_panel_content(app: &App) -> Widget {
                 }).into(),
                 gap(6.0),
                 ai_subtitle_assist(app),
+                if app.profile.read(|p| p.settings.local_ai_enabled && p.settings.automatic_subtitle_sync) {
+                    let message = app.player.alignment.read(|s| s.message.clone());
+                    text(if message.is_empty() { "Automatic sync enabled · waiting for audio and subtitles".to_owned() } else { message },
+                        11.0, FontWeight::W400, ACCENT).max_lines(Some(2)).into()
+                } else { SizedBox::shrink().into() },
                 gap(6.0),
                 Expanded::new(list).into(),
             ])

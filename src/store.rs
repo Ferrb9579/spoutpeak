@@ -96,6 +96,8 @@ pub struct Settings {
     pub fast_subtitles: bool,
     /// Local AI is opt-in; enabling does not download or start the model.
     pub local_ai_enabled: bool,
+    /// Continuously align subtitles to timestamped speech in the selected audio.
+    pub automatic_subtitle_sync: bool,
     pub audio_lang: String,
     pub subtitle_size: f32,
     pub subtitle_style: SubtitleStyle,
@@ -137,6 +139,7 @@ impl Default for Settings {
             subtitle_lang: "eng".to_owned(),
             fast_subtitles: false,
             local_ai_enabled: false,
+            automatic_subtitle_sync: false,
             audio_lang: "eng".to_owned(),
             subtitle_size: 28.0,
             subtitle_style: SubtitleStyle::default(),
@@ -169,12 +172,15 @@ mod subtitle_loading_tests {
         let mut settings: Settings = serde_json::from_str("{}").unwrap();
         assert!(!settings.fast_subtitles);
         assert!(!settings.local_ai_enabled);
+        assert!(!settings.automatic_subtitle_sync);
         settings.fast_subtitles = true;
         settings.local_ai_enabled = true;
+        settings.automatic_subtitle_sync = true;
         let saved = serde_json::to_vec(&settings).unwrap();
         let restored: Settings = serde_json::from_slice(&saved).unwrap();
         assert!(restored.fast_subtitles);
         assert!(restored.local_ai_enabled);
+        assert!(restored.automatic_subtitle_sync);
     }
 }
 

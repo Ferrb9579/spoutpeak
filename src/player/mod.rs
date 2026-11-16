@@ -2,6 +2,7 @@
 //! tracking progress into the library, subtitles, and next-episode binge.
 
 pub mod engine;
+pub mod alignment;
 pub mod subtitles;
 pub mod source;
 pub mod preview;
@@ -179,6 +180,7 @@ pub struct PlayerUi {
     pub subtitle_follow: SubtitleFollow,
     pub cue: Signal<String>,
     pub ai_match: Signal<Option<crate::ai::SubtitleMatch>>,
+    pub alignment: Shared<alignment::AutoSync>,
     /// Window mode is independent of playback updates and drives the app frame.
     pub fullscreen: Signal<bool>,
     fullscreen_restore_maximized: Rc<Cell<bool>>,
@@ -203,6 +205,7 @@ impl PlayerUi {
             subtitle_follow: SubtitleFollow::new(),
             cue: Signal::new(String::new()),
             ai_match: Signal::new(None),
+            alignment: Shared::new(alignment::AutoSync::default()),
             fullscreen: Signal::new(false),
             fullscreen_restore_maximized: Rc::new(Cell::new(false)),
             scrub: Rc::new(Cell::new(None)),
@@ -266,6 +269,11 @@ impl PlayerUi {
     /// The loaded subtitle cues, in time order.
     pub fn cue_list(&self) -> Vec<Cue> {
         let mut cues = self.cues.borrow().clone();
+        self.alignment.peek(|s| {
+            if !s.map.lines.is_empty() {
+                for cue in &mut cues { *cue = s.map.retime(cue); }
+            }
+        });
         cues.sort_by(|a, b| a.start.total_cmp(&b.start));
         cues
     }
@@ -840,6 +848,7 @@ impl App {
                         all.push(cue);
                     }
                 }
+                self.player.alignment.write(|s| s.map.reconcile(&all));
             }
             Event::SubtitleProgress { revision, until, done } => {
                 if revision != self.player.subtitle_revision.get() || !matches!(
@@ -902,7 +911,7 @@ impl App {
         {
             self.queue_subtitle_follow();
         }
-        let text = subtitles::active_text(&self.player.cues.borrow(), seconds - delay);
+        let text = subtitles::active_text(&self.player.cue_list(), seconds - delay);
         if text != self.player.cue.get_untracked() {
             self.player.cue.set(text);
         }
@@ -918,6 +927,7 @@ impl App {
         if status != Status::Playing {
             return;
         }
+        self.maybe_auto_sync();
         self.update_up_next(seconds);
         let hide_after = self.profile.peek(|p| p.settings.controls_hide_seconds).max(1);
         let idle = self.player.session.borrow().last_activity.elapsed().as_secs_f64()
@@ -1105,6 +1115,7 @@ impl App {
     }
 
     fn finish_playback(&self, replacing: bool) {
+        self.player.clear_alignment();
         if !self.ai.state.peek(|s| s.downloading) { self.ai.cancel(); }
         self.player.ai_match.set(None);
         self.player.subtitle_follow.suspend();
@@ -1276,6 +1287,7 @@ impl App {
         if !self.player.state.peek(|s| index < s.audio_tracks.len() && s.audio_index != index) {
             return;
         }
+        self.player.clear_alignment();
         if !self.ai.state.peek(|s| s.downloading) { self.ai.cancel(); }
         self.player.ai_match.set(None);
         self.player.with_engine(|e| e.set_audio_track(index));
@@ -1322,6 +1334,7 @@ impl App {
             session.preferred_sub_ordinal = ordinal;
         }
         let revision = self.player.subtitle_revision.get() + 1;
+        self.player.clear_alignment();
         if !self.ai.state.peek(|s| s.downloading) { self.ai.cancel(); }
         self.player.ai_match.set(None);
         self.player.subtitle_revision.set(revision);
@@ -1553,6 +1566,7 @@ impl App {
     }
 
     pub fn adjust_audio_delay(&self, delta: f64) {
+        self.player.clear_alignment();
         if !self.ai.state.peek(|s| s.downloading) { self.ai.cancel(); }
         self.player.ai_match.set(None);
         let delay = self.player.state.write(|s| {
@@ -1564,6 +1578,7 @@ impl App {
     }
 
     pub fn reset_audio_delay(&self) {
+        self.player.clear_alignment();
         if !self.ai.state.peek(|s| s.downloading) { self.ai.cancel(); }
         self.player.ai_match.set(None);
         self.player.state.write(|s| s.audio_delay = 0.0);

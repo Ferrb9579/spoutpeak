@@ -1510,11 +1510,13 @@ impl App {
     }
 
     pub fn update_settings(&self, update: impl FnOnce(&mut store::Settings)) {
-        let (dir, torrent, subtitle_loading) = self.profile.write(|p| {
+        let (dir, torrent, subtitle_loading, sync_changed) = self.profile.write(|p| {
             let previous = p.settings.fast_subtitles;
+            let old_sync = (p.settings.local_ai_enabled, p.settings.automatic_subtitle_sync);
             update(&mut p.settings);
             (p.settings.download_dir.clone(), p.settings.torrent.clone(),
-                (previous != p.settings.fast_subtitles).then_some(p.settings.fast_subtitles))
+                (previous != p.settings.fast_subtitles).then_some(p.settings.fast_subtitles),
+                old_sync != (p.settings.local_ai_enabled, p.settings.automatic_subtitle_sync))
         });
         crate::downloads::set_custom_folder(&dir);
         crate::streaming::configure(&torrent);
@@ -1524,6 +1526,9 @@ impl App {
         if !self.profile.peek(|p| p.settings.local_ai_enabled) {
             self.ai.cancel();
             self.player.ai_match.set(None);
+        }
+        if sync_changed {
+            self.auto_sync_preferences_changed();
         }
         self.save_profile();
     }

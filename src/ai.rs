@@ -46,9 +46,11 @@ fn installed_at(dir: &Path) -> bool {
 #[derive(Clone, Default)]
 pub struct ModelState {
     pub installed: bool,
+    pub timing_installed: bool,
     pub busy: bool,
     pub downloading: bool,
     pub downloaded: u64,
+    pub total: u64,
     pub stage: String,
     pub error: Option<String>,
 }
@@ -65,6 +67,7 @@ impl LocalAi {
         Self {
             state: Shared::new(ModelState {
                 installed: installed_at(&model_dir()),
+                timing_installed: crate::player::alignment::installed(),
                 ..Default::default()
             }),
             generation: Rc::new(Cell::new(0)),
@@ -86,6 +89,7 @@ impl LocalAi {
             s.error = None;
             s.stage = stage.into();
             s.downloaded = 0;
+            s.total = DOWNLOAD_SIZE;
         });
         Some((id, cancel))
     }
@@ -106,12 +110,13 @@ impl LocalAi {
             s.downloading = false;
             s.stage.clear();
             s.installed = installed_at(&model_dir());
+            s.timing_installed = crate::player::alignment::installed();
             s.error = result.err().filter(|e| e != "Cancelled");
         });
     }
 }
 
-fn progress(id: u64, downloaded: u64, stage: &str) {
+pub(crate) fn progress(id: u64, downloaded: u64, stage: &str) {
     let stage = stage.to_owned();
     state::ui(move |app| {
         if app.ai.generation.get() == id && app.ai.state.peek(|s| s.busy) {
@@ -161,11 +166,11 @@ impl App {
     }
 }
 
-struct Artifact {
-    name: &'static str,
-    size: u64,
-    hash: &'static str,
-    url: String,
+pub(crate) struct Artifact {
+    pub name: &'static str,
+    pub size: u64,
+    pub hash: &'static str,
+    pub url: String,
 }
 
 fn artifacts() -> Vec<Artifact> {
@@ -221,7 +226,7 @@ async fn install(id: u64, cancel: CancellationToken) -> Result<(), String> {
 
 /// Resumes partial downloads only when the server confirms the exact byte range.
 /// Hashes resumed bytes too; only verified artifacts get their final filename.
-async fn download(
+pub(crate) async fn download(
     client: &reqwest::Client,
     dir: &Path,
     artifact: &Artifact,
@@ -344,6 +349,14 @@ async fn verify(
 }
 
 fn extract_runtime(dir: &Path, cancel: &CancellationToken) -> Result<(), String> {
+    unpack_runtime(dir, "llama-server.exe", cancel)
+}
+
+pub(crate) fn unpack_runtime(
+    dir: &Path,
+    executable: &str,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
     let file = std::fs::File::open(dir.join("runtime.zip")).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let target = dir.join("runtime");
@@ -362,8 +375,8 @@ fn extract_runtime(dir: &Path, cancel: &CancellationToken) -> Result<(), String>
         let mut output = std::fs::File::create(target.join(name)).map_err(|e| e.to_string())?;
         std::io::copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
     }
-    if !target.join("llama-server.exe").is_file() {
-        return Err("The runtime archive is missing llama-server.exe.".into());
+    if !target.join(executable).is_file() {
+        return Err(format!("The runtime archive is missing {executable}."));
     }
     Ok(())
 }
@@ -384,7 +397,7 @@ pub struct SubtitleMatch {
     pub position: f64,
 }
 
-fn command(path: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+pub(crate) fn command(path: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
     let mut c = tokio::process::Command::new(path);
     c.kill_on_drop(true).stdin(std::process::Stdio::null());
     #[cfg(windows)]
@@ -576,7 +589,7 @@ async fn transcribe_inner(sample: AudioSample) -> Result<String, String> {
     Ok(text.to_owned())
 }
 
-fn words(text: &str) -> Vec<String> {
+pub(crate) fn words(text: &str) -> Vec<String> {
     let mut clean = String::new();
     let mut hidden = false;
     for ch in text.chars() {
