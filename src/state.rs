@@ -639,6 +639,14 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let profile = store::load_profile();
+        tracing::info!(player = ?profile.settings.player,
+            hardware_decoding = profile.settings.hardware_decoding,
+            max_video_height = profile.settings.max_video_height,
+            fast_subtitles = profile.settings.fast_subtitles,
+            local_ai_enabled = profile.settings.local_ai_enabled,
+            automatic_subtitle_sync = profile.settings.automatic_subtitle_sync,
+            peer_encryption = ?profile.settings.torrent.encryption,
+            addon_count = profile.addons.len(), "Loaded playback configuration");
         Self::with_profile(profile)
     }
 
@@ -680,6 +688,7 @@ impl App {
     // ------------------------------------------------------------ startup
 
     pub fn startup(&self) {
+        tracing::info!("Starting background services");
         let has_addons = self.profile.peek(|p| !p.addons.is_empty());
         if has_addons {
             self.load_board();
@@ -710,12 +719,14 @@ impl App {
     }
 
     pub fn notify(&self, message: impl Into<String>) {
+        let message = message.into();
+        tracing::info!(message = %message, "User notification");
         let generation = {
             let mut generation = self.toast_generation.borrow_mut();
             *generation += 1;
             *generation
         };
-        self.toast.set(Some(message.into()));
+        self.toast.set(Some(message));
         spawn(
             // Built inside the task: a Tokio timer needs the runtime context.
             async { tokio::time::sleep(std::time::Duration::from_millis(4200)).await },
@@ -734,6 +745,7 @@ impl App {
     }
 
     pub fn go(&self, route: Route) {
+        tracing::info!(?route, "Navigating");
         if std::env::var_os("SPOUTPEAK_DEBUG").is_some() {
             eprintln!("[nav] go {route:?}");
         }
@@ -1499,12 +1511,15 @@ impl App {
 
     /// Starts the built-in torrent engine (also the Settings "Retry").
     pub fn start_streaming(&self) {
+        tracing::info!("Starting torrent engine");
         let settings = self.profile.peek(|p| p.settings.torrent.clone());
         crate::streaming::configure(&settings);
         spawn(crate::streaming::start(), |app, result| {
             if let Err(error) = &result {
+                tracing::error!(%error, "Torrent engine startup failed");
                 app.notify(format!("Torrent engine: {error}"));
             }
+            tracing::info!(success = result.is_ok(), "Torrent engine startup completed");
             app.server_online.set(Some(result.is_ok()));
         });
     }

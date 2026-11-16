@@ -64,3 +64,40 @@ Use `windows` on Windows with Inno Setup 6 installed. On macOS, use `macos`
 with `arm64`; no Homebrew dependencies are needed. Linux system
 dependencies are listed in the workflow. The package
 script honors `CARGO_BUILD_TARGET` when an explicit Rust target is used.
+
+## Crash diagnostics
+
+Logging starts before the native window or renderer. On Windows, logs are in
+`%LOCALAPPDATA%\spoutpeak\logs`; if that directory is unwritable, the app tries
+`%TEMP%\spoutpeak-logs`. Settings → Diagnostics opens the active directory or
+exports a ZIP to Downloads. An app that cannot open its window can still run
+`spoutpeak.exe --export-diagnostics`, or the log folder can be copied manually.
+`--open-logs` opens the folder without creating the UI. Reports are never uploaded.
+
+Each session records UTC timestamps, version/revision, OS/architecture, startup
+stages, renderer/dependency warnings, playback settings/errors and FFmpeg output.
+OS, CPU, memory and GPU driver details are collected in the background. A
+`.status.json` records startup and clean/error shutdown; a leftover `running`
+status can also mean forced termination, power loss, or an open instance.
+Rust panics save a `.panic.txt` with a forced backtrace, including worker threads.
+Windows unhandled exceptions attempt a `.native.txt` and a small `.dmp` from a
+dedicated writer thread. This is best-effort; forced kills and some severe
+process failures cannot invoke a crash handler.
+
+Logs rotate at 4 MiB with one previous segment per session. The most recent
+eight sessions and three native dumps are retained. Exports include diagnostic
+text only: no profiles, addon configuration, media, or binary memory dumps.
+URL credentials, paths/queries and common secret fields are redacted; review
+the report before sharing it. Native dumps stay local for optional analysis.
+Set `SPOUTPEAK_LOG=debug` for more detail (`RUST_LOG` is also supported), or
+`SPOUTPEAK_LOG_DIR` to choose another log directory.
+
+Keep `spoutpeak.pdb` with the exact Windows executable distributed to users.
+Release builds retain debug symbols, and CI saves matching PDBs in a separate
+`spoutpeak-windows-symbols-<commit>` artifact for 90 days. Download and archive
+those symbols for releases supported longer than that. Dumps from one build
+cannot be reliably symbolized with a different build's PDB.
+
+`cargo test diagnostics::tests` verifies rotation, retention, redaction, ZIP
+contents, panic backtraces and (on Windows) real native-exception minidumps in
+isolated child processes. It does not crash the running desktop app.

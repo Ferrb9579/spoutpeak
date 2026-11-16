@@ -211,6 +211,9 @@ impl Engine {
     }
 
     pub fn open(request: OpenRequest, emit: impl Fn(Event) + Send + Sync + 'static) -> Self {
+        tracing::info!(source = crate::diagnostics::source_kind(&request.url),
+            start = request.start, max_height = request.max_height,
+            hardware_decoding = request.hardware_decoding, "Opening media");
         let inner = Arc::new(Inner::new(request, emit));
         let worker = inner.clone();
         std::thread::Builder::new()
@@ -274,6 +277,7 @@ impl Engine {
     }
 
     pub fn seek(&self, seconds: f64) {
+        tracing::info!(seconds, "Seeking or restarting playback");
         self.inner.queue_restart(seconds);
     }
 
@@ -303,6 +307,7 @@ impl Engine {
 
     /// Selects an embedded subtitle track to extract, or none.
     pub fn set_subtitle_track(&self, index: Option<usize>, revision: u64) {
+        tracing::info!(?index, revision, "Selecting subtitle track");
         let fast = {
             let mut config = self.inner.config.lock().unwrap();
             config.subtitle_track = index;
@@ -332,6 +337,7 @@ impl Engine {
     }
 
     pub fn stop(&self) {
+        tracing::info!("Stopping playback engine");
         self.inner.alive.store(false, Ordering::Release);
         self.inner.generation.fetch_add(1, Ordering::AcqRel);
         self.inner.sub_pass.fetch_add(1, Ordering::AcqRel);
@@ -396,6 +402,9 @@ impl Inner {
     }
 
     fn emit(&self, event: Event) {
+        if let Event::Error { generation, message } = &event {
+            tracing::error!(generation, %message, "Playback failed");
+        }
         if self.alive.load(Ordering::Acquire) {
             (self.emit)(event);
         }
@@ -477,6 +486,10 @@ impl Inner {
     fn register_child(&self, generation: u64, mut child: Child) -> bool {
         let mut children = self.children.lock().unwrap();
         if self.current(generation) {
+            tracing::debug!(generation, pid = child.id(), "Registered media helper");
+            if let Some(stderr) = child.stderr.take() {
+                crate::diagnostics::capture_stderr(stderr, "ffmpeg", generation);
+            }
             children.push(child);
             true
         } else {
@@ -535,7 +548,7 @@ impl Inner {
             .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         hide_console(&mut command);
         command
     }
@@ -598,6 +611,7 @@ impl Inner {
         }
         let remote = self.request.url.starts_with("http://") || self.request.url.starts_with("https://");
         let Some(info) = parse_probe(&output.0, self.request.max_height, remote) else {
+            tracing::warn!(message = %output.1, "FFprobe could not read media");
             let reason = output.1.lines().last().unwrap_or("").trim().to_owned();
             self.emit(Event::Error { generation: 0, message: if reason.is_empty() {
                 "This stream could not be opened.".into()
@@ -606,6 +620,10 @@ impl Inner {
             }});
             return;
         };
+        tracing::info!(width = info.width, height = info.height, fps = info.fps,
+            duration = info.duration, hdr = info.hdr, dolby_vision = info.dolby_vision,
+            live = info.live, audio_tracks = info.audio.len(), subtitle_tracks = info.subtitles.len(),
+            "Media probe completed");
         {
             let preferred = &self.request.preferred_audio;
             let mut config = self.config.lock().unwrap();
@@ -625,10 +643,15 @@ impl Inner {
         let _ = std::thread::Builder::new()
             .name("player-audio-out".into())
             .spawn(move || {
-                let Ok(mut output) = rodio::DeviceSinkBuilder::open_default_sink() else {
-                    let _ = ready_tx.send(false);
-                    return;
+                let mut output = match rodio::DeviceSinkBuilder::open_default_sink() {
+                    Ok(output) => output,
+                    Err(error) => {
+                        tracing::error!(%error, "Could not open default audio output");
+                        let _ = ready_tx.send(false);
+                        return;
+                    }
                 };
+                tracing::info!("Default audio output opened");
                 output.log_on_drop(false);
                 let sink = rodio::Player::connect_new(output.mixer());
                 sink.append(QueueSource {
@@ -646,6 +669,7 @@ impl Inner {
             });
         let available = ready_rx.recv_timeout(Duration::from_secs(3)).unwrap_or(false);
         self.audio_device.store(available, Ordering::Release);
+        tracing::info!(available, "Audio output initialization completed");
     }
 
     fn start_ticker(self: Arc<Self>) {
@@ -679,6 +703,7 @@ impl Inner {
     /// (Re)starts decoding at `position`. Used for open, seek, track and
     /// speed changes, and reconnects.
     fn restart(self: Arc<Self>, generation: u64, position: f64) {
+        tracing::info!(generation, position, hardware_decoding = self.request.hardware_decoding, "Restarting decoders");
         let _restart = self.restart_lock.lock().unwrap();
         let Some((ffmpeg, _)) = tools() else { return };
         let Some(info) = self.info.lock().unwrap().clone() else {
@@ -762,6 +787,7 @@ impl Inner {
                         let inner = self.clone();
                         std::thread::spawn(move || {
                             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                                crate::diagnostics::helper_line("video", generation, &line);
                                 if live {
                                     inner.note_live_start(generation, &line, true);
                                 } else if !line.trim().is_empty() {
@@ -821,6 +847,7 @@ impl Inner {
                         let inner = self.clone();
                         std::thread::spawn(move || {
                             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                                crate::diagnostics::helper_line("audio", generation, &line);
                                 inner.note_live_start(generation, &line, false);
                             }
                         });
@@ -838,7 +865,10 @@ impl Inner {
                         });
                     }
                 }
-                Err(_) => self.audio_unavailable(generation, info.has_video),
+                Err(error) => {
+                    tracing::error!(generation, %error, "Could not spawn audio decoder");
+                    self.audio_unavailable(generation, info.has_video);
+                }
             }
         }
 
@@ -881,15 +911,18 @@ impl Inner {
                 if !inner.current(generation) {
                     return;
                 }
-                if let Ok(mut child) = command.spawn() {
-                    let stdout = child.stdout.take();
-                    if !inner.register_child(generation, child) {
-                        return;
+                match command.spawn() {
+                    Ok(mut child) => {
+                        let stdout = child.stdout.take();
+                        if !inner.register_child(generation, child) {
+                            return;
+                        }
+                        if let Some(stdout) = stdout {
+                            let keep = |inner: &Inner| inner.current(generation);
+                            inner.subtitle_loop(&keep, stdout, false, config.subtitle_revision);
+                        }
                     }
-                    if let Some(stdout) = stdout {
-                        let keep = |inner: &Inner| inner.current(generation);
-                        inner.subtitle_loop(&keep, stdout, false, config.subtitle_revision);
-                    }
+                    Err(error) => tracing::warn!(generation, %error, "Could not spawn subtitle reader"),
                 }
             });
         }
@@ -1160,6 +1193,9 @@ impl Inner {
             let _ = child.wait();
             return false;
         }
+        if let Some(stderr) = child.stderr.take() {
+            crate::diagnostics::capture_stderr(stderr, "subtitles", pass);
+        }
         let previous = slot.replace(child);
         drop(slot);
         if let Some(mut previous) = previous {
@@ -1253,7 +1289,13 @@ impl Inner {
                 "-dn",
             ])
             .args(["-flush_packets", "1", "-f", "srt", "pipe:1"]);
-        let Ok(mut child) = command.spawn() else { return };
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                tracing::warn!(pass, %error, "Could not spawn subtitle scan");
+                return;
+            }
+        };
         let stdout = child.stdout.take();
         if !self.register_subtitle_child(pass, child) {
             return;

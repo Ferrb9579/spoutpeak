@@ -689,6 +689,42 @@ fn open_card(app: &App) -> Widget {
     .into()
 }
 
+fn diagnostics_card(app: &App) -> Widget {
+    let open_app = app.clone();
+    let export_app = app.clone();
+    card(col(vec![
+        section("Diagnostics"),
+        gap(6.0),
+        muted("If Spoutpeak crashes, reopen it and export a report to share for troubleshooting."),
+        gap(8.0),
+        row(vec![
+            small_button("Open log folder", Tone::Neutral, move || {
+                if let Err(error) = open::that(crate::diagnostics::directory()) {
+                    open_app.notify(format!("Could not open logs: {error}"));
+                }
+            }),
+            hgap(8.0),
+            small_button("Export diagnostics", Tone::Neutral, move || {
+                export_app.notify("Preparing diagnostic report…");
+                crate::state::spawn(async {
+                    tokio::task::spawn_blocking(crate::diagnostics::export_report).await
+                        .map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+                }, |app, result| match result {
+                    Ok(path) => {
+                        if let Some(parent) = path.parent() { let _ = open::that(parent); }
+                        app.notify(format!("Report saved: {}", path.display()));
+                    }
+                    Err(error) => app.notify(format!("Could not export diagnostics: {error}")),
+                });
+            }),
+        ]).into(),
+        gap(8.0),
+        muted("Exports recent logs and OS/GPU details to Downloads. Review the ZIP before sharing. Crash memory dumps stay in the log folder."),
+        gap(4.0),
+        muted(format!("Logs: {}", crate::diagnostics::directory().display())),
+    ]).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
+}
+
 pub fn screen(app: &App) -> Widget {
     let settings = app.profile.read(|p| p.settings.clone());
     let about = card(
@@ -727,6 +763,8 @@ pub fn screen(app: &App) -> Widget {
                 shortcuts_card(),
                 gap(16.0),
                 open_card(app),
+                gap(16.0),
+                diagnostics_card(app),
                 gap(16.0),
                 about.into(),
             ])

@@ -2,6 +2,13 @@
 mod branding;
 
 fn main() {
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/index");
+    if let Ok(output) = std::process::Command::new("git").args(["rev-parse", "--short=12", "HEAD"]).output()
+        && output.status.success()
+    {
+        println!("cargo:rustc-env=SPOUTPEAK_BUILD_REVISION={}", String::from_utf8_lossy(&output.stdout).trim());
+    }
     println!("cargo:rerun-if-changed=assets/logo.svg");
     println!("cargo:rerun-if-changed=src/branding.rs");
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
