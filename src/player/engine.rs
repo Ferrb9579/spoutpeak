@@ -113,6 +113,8 @@ struct Inner {
     emit: Box<dyn Fn(Event) + Send + Sync>,
     alive: AtomicBool,
     generation: AtomicU64,
+    /// Only one restart may reset the clock and replace decoder processes.
+    restart_lock: Mutex<()>,
     paused: AtomicBool,
     /// Set once the first frame after a (re)start is ready, so sound and
     /// picture begin together.
@@ -186,42 +188,7 @@ pub fn tools() -> Option<(PathBuf, PathBuf)> {
 
 impl Engine {
     pub fn open(request: OpenRequest, emit: impl Fn(Event) + Send + Sync + 'static) -> Self {
-        let inner = Arc::new(Inner {
-            volume: AtomicU32::new(request.volume.to_bits()),
-            request,
-            emit: Box::new(emit),
-            alive: AtomicBool::new(true),
-            generation: AtomicU64::new(0),
-            paused: AtomicBool::new(false),
-            started: AtomicBool::new(false),
-            consumed_frames: AtomicU64::new(0),
-            trim_frames: AtomicI64::new(0),
-            clock: Mutex::new(ClockState {
-                base: 0.0,
-                speed: 1.0,
-                audio: false,
-                anchor: Instant::now(),
-                anchor_position: 0.0,
-            }),
-            audio_queue: Mutex::new(VecDeque::new()),
-            audio_device: AtomicBool::new(false),
-            children: Mutex::new(Vec::new()),
-            frame: Mutex::new(None),
-            frame_pending: AtomicBool::new(false),
-            info: Mutex::new(None),
-            config: Mutex::new(Config {
-                audio_track: 0,
-                subtitle_track: None,
-                speed: 1.0,
-                audio_delay: 0.0,
-            }),
-            last_error: Mutex::new(String::new()),
-            last_restart: Mutex::new(Instant::now()),
-            live_video_start: Mutex::new(None),
-            live_audio_start: Mutex::new(None),
-            sub_pass: AtomicU64::new(0),
-            sub_child: Mutex::new(None),
-        });
+        let inner = Arc::new(Inner::new(request, emit));
         let worker = inner.clone();
         std::thread::Builder::new()
             .name("player-open".into())
@@ -257,14 +224,12 @@ impl Engine {
         // A paused live stream falls out of the broadcast window: resuming
         // rejoins at the live edge.
         if !paused && self.inner.is_live() {
-            let inner = self.inner.clone();
-            std::thread::spawn(move || inner.restart(0.0));
+            self.inner.queue_restart(0.0);
         }
     }
 
     pub fn seek(&self, seconds: f64) {
-        let inner = self.inner.clone();
-        std::thread::spawn(move || inner.restart(seconds));
+        self.inner.queue_restart(seconds);
     }
 
     pub fn set_volume(&self, volume: f32) {
@@ -324,6 +289,46 @@ impl Drop for Engine {
 }
 
 impl Inner {
+    fn new(request: OpenRequest, emit: impl Fn(Event) + Send + Sync + 'static) -> Self {
+        Self {
+            volume: AtomicU32::new(request.volume.to_bits()),
+            request,
+            emit: Box::new(emit),
+            alive: AtomicBool::new(true),
+            generation: AtomicU64::new(0),
+            restart_lock: Mutex::new(()),
+            paused: AtomicBool::new(false),
+            started: AtomicBool::new(false),
+            consumed_frames: AtomicU64::new(0),
+            trim_frames: AtomicI64::new(0),
+            clock: Mutex::new(ClockState {
+                base: 0.0,
+                speed: 1.0,
+                audio: false,
+                anchor: Instant::now(),
+                anchor_position: 0.0,
+            }),
+            audio_queue: Mutex::new(VecDeque::new()),
+            audio_device: AtomicBool::new(false),
+            children: Mutex::new(Vec::new()),
+            frame: Mutex::new(None),
+            frame_pending: AtomicBool::new(false),
+            info: Mutex::new(None),
+            config: Mutex::new(Config {
+                audio_track: 0,
+                subtitle_track: None,
+                speed: 1.0,
+                audio_delay: 0.0,
+            }),
+            last_error: Mutex::new(String::new()),
+            last_restart: Mutex::new(Instant::now()),
+            live_video_start: Mutex::new(None),
+            live_audio_start: Mutex::new(None),
+            sub_pass: AtomicU64::new(0),
+            sub_child: Mutex::new(None),
+        }
+    }
+
     fn emit(&self, event: Event) {
         if self.alive.load(Ordering::Acquire) {
             (self.emit)(event);
@@ -362,16 +367,22 @@ impl Inner {
     }
 
     /// Marks the first frame ready and starts the wall clock.
-    fn start_clock(&self) {
+    fn start_clock(&self, generation: u64) {
         let mut clock = self.clock.lock().unwrap();
+        if !self.current(generation) {
+            return;
+        }
         clock.anchor = Instant::now();
         self.started.store(true, Ordering::Release);
     }
 
     /// Audio ran out before the picture did: keep time by wall clock.
-    fn fall_back_to_wall_clock(&self) {
+    fn fall_back_to_wall_clock(&self, generation: u64) {
         let position = self.now();
         let mut clock = self.clock.lock().unwrap();
+        if !self.current(generation) {
+            return;
+        }
         clock.audio = false;
         clock.anchor_position = position;
         clock.anchor = Instant::now();
@@ -384,6 +395,29 @@ impl Inner {
         // reap their processes here; Drop must never start another thread.
         for child in &mut children { let _ = child.kill(); }
         for mut child in children { let _ = child.wait(); }
+    }
+
+    /// Register under the same lock used to drain children. An obsolete
+    /// worker owns only its new child; it must never kill newer decoders.
+    fn register_child(&self, generation: u64, mut child: Child) -> bool {
+        let mut children = self.children.lock().unwrap();
+        if self.current(generation) {
+            children.push(child);
+            true
+        } else {
+            drop(children);
+            let _ = child.kill();
+            let _ = child.wait();
+            false
+        }
+    }
+
+    fn queue_restart(self: &Arc<Self>, position: f64) {
+        // Assign the generation before spawning so request order wins over
+        // thread scheduling. Waiting restarts skip work once superseded.
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let inner = self.clone();
+        std::thread::spawn(move || inner.restart(generation, position));
     }
 
     fn input_args(&self, command: &mut Command) {
@@ -443,7 +477,9 @@ impl Inner {
             Ok(mut child) => {
                 let mut stdout = child.stdout.take();
                 let mut stderr = child.stderr.take();
-                self.children.lock().unwrap().push(child);
+                if !self.register_child(0, child) {
+                    return;
+                }
                 let mut json = Vec::new();
                 if let Some(out) = stdout.as_mut() {
                     let _ = out.read_to_end(&mut json);
@@ -492,7 +528,7 @@ impl Inner {
         self.emit(Event::Info(info));
         self.clone().start_ticker();
         let start = self.request.start;
-        self.restart(start);
+        self.restart(0, start);
     }
 
     /// Owns the sound device for the engine's lifetime.
@@ -551,15 +587,15 @@ impl Inner {
 
     /// (Re)starts decoding at `position`. Used for open, seek, track and
     /// speed changes, and reconnects.
-    fn restart(self: Arc<Self>, position: f64) {
+    fn restart(self: Arc<Self>, generation: u64, position: f64) {
+        let _restart = self.restart_lock.lock().unwrap();
         let Some((ffmpeg, _)) = tools() else { return };
         let Some(info) = self.info.lock().unwrap().clone() else {
             return;
         };
-        if !self.alive.load(Ordering::Acquire) {
+        if !self.current(generation) {
             return;
         }
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.kill_children();
         self.audio_queue.lock().unwrap().clear();
         *self.last_restart.lock().unwrap() = Instant::now();
@@ -621,7 +657,9 @@ impl Inner {
                 Ok(mut child) => {
                     let stdout = child.stdout.take();
                     let stderr = child.stderr.take();
-                    self.children.lock().unwrap().push(child);
+                    if !self.register_child(generation, child) {
+                        return;
+                    }
                     if let Some(stderr) = stderr {
                         let inner = self.clone();
                         std::thread::spawn(move || {
@@ -684,7 +722,9 @@ impl Inner {
                         }
                     });
                 }
-                self.children.lock().unwrap().push(child);
+                if !self.register_child(generation, child) {
+                    return;
+                }
                 if let Some(stdout) = stdout {
                     let inner = self.clone();
                     let has_video = info.has_video;
@@ -741,10 +781,7 @@ impl Inner {
                 }
                 if let Ok(mut child) = command.spawn() {
                     let stdout = child.stdout.take();
-                    inner.children.lock().unwrap().push(child);
-                    if !inner.current(generation) {
-                        // A restart cleared the children while this spawned.
-                        inner.kill_children();
+                    if !inner.register_child(generation, child) {
                         return;
                     }
                     if let Some(stdout) = stdout {
@@ -769,7 +806,7 @@ impl Inner {
         };
         let slot = if video { &self.live_video_start } else { &self.live_audio_start };
         let mut slot = slot.lock().unwrap();
-        if slot.is_none() {
+        if self.current(generation) && slot.is_none() {
             *slot = Some(seconds);
         }
     }
@@ -790,11 +827,16 @@ impl Inner {
         0.0
     }
 
-    fn publish(&self, pixels: &[u8], width: u32, height: u32) {
+    fn publish(&self, generation: u64, pixels: &[u8], width: u32, height: u32) {
         let Ok(handle) = ImageHandle::from_rgba8(width, height, Arc::<[u8]>::from(pixels)) else {
             return;
         };
-        *self.frame.lock().unwrap() = Some(handle);
+        let mut frame = self.frame.lock().unwrap();
+        if !self.current(generation) {
+            return;
+        }
+        *frame = Some(handle);
+        drop(frame);
         if !self.frame_pending.swap(true, Ordering::AcqRel) {
             self.emit(Event::Frame);
         }
@@ -826,11 +868,11 @@ impl Inner {
             if index == 1 {
                 // Always show the first frame, so seeking while paused updates
                 // the picture, and release the audio.
-                self.publish(&buffer, width, height);
+                self.publish(generation, &buffer, width, height);
                 if live && uses_audio {
                     base += self.live_offset(generation);
                 }
-                self.start_clock();
+                self.start_clock(generation);
                 continue;
             }
             loop {
@@ -846,7 +888,7 @@ impl Inner {
             if self.now() - pts > 0.2 {
                 continue; // late: drop to catch up
             }
-            self.publish(&buffer, width, height);
+            self.publish(generation, &buffer, width, height);
         }
         if self.current(generation) {
             self.finished(generation, base + index as f64 / fps);
@@ -868,6 +910,9 @@ impl Inner {
             }
             {
                 let mut queue = self.audio_queue.lock().unwrap();
+                if !self.current(generation) {
+                    return;
+                }
                 if queue.len() < AUDIO_QUEUE_TARGET {
                     let chunk = silence.min(4096);
                     queue.extend(std::iter::repeat_n(0i16, chunk));
@@ -909,6 +954,9 @@ impl Inner {
                 }
                 {
                     let mut queue = self.audio_queue.lock().unwrap();
+                    if !self.current(generation) {
+                        return;
+                    }
                     if queue.len() < AUDIO_QUEUE_TARGET {
                         queue.extend(samples.iter().copied());
                         break;
@@ -925,7 +973,7 @@ impl Inner {
             return;
         }
         if has_video || !decoded_any {
-            self.fall_back_to_wall_clock();
+            self.fall_back_to_wall_clock(generation);
         } else {
             let position = self.now();
             self.finished(generation, position);
@@ -1072,7 +1120,12 @@ impl Inner {
                 format!("Playback failed: {reason}")
             }));
         } else {
-            self.restart(position);
+            // A reconnect from an old decoder must not supersede a seek.
+            if self.generation.compare_exchange(
+                generation, generation + 1, Ordering::AcqRel, Ordering::Acquire,
+            ).is_ok() {
+                self.restart(generation + 1, position);
+            }
         }
     }
 }
@@ -1154,6 +1207,122 @@ fn audio_sample(sample: i16, volume: f32) -> f32 {
     let scaled = sample as f32 / 32768.0 * volume;
     let out = if volume > 1.0 { soft_clip(scaled) } else { scaled };
     out.clamp(-1.0, 1.0)
+}
+
+#[cfg(test)]
+mod seek_tests {
+    use super::*;
+
+    fn engine(url: String) -> Engine {
+        Engine { inner: Arc::new(Inner::new(OpenRequest {
+            url, headers: Vec::new(), start: 0.0, max_height: 90,
+            hardware_decoding: false, volume: 1.0, preferred_audio: String::new(),
+        }, |_| {})) }
+    }
+
+    #[test]
+    fn obsolete_video_cannot_release_audio_or_replace_the_picture() {
+        let engine = engine(String::new());
+        let inner = &engine.inner;
+        inner.generation.store(2, Ordering::Release);
+        inner.publish(2, &[0, 0, 255, 255], 1, 1);
+        inner.publish(1, &[255, 0, 0, 255], 1, 1);
+        inner.start_clock(1);
+        assert!(!inner.started.load(Ordering::Acquire));
+        assert_eq!(engine.take_frame().unwrap().decoded().pixels().as_ref(), &[0, 0, 255, 255]);
+        inner.start_clock(2);
+        assert!(inner.started.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn obsolete_audio_cannot_change_the_new_clock() {
+        let engine = engine(String::new());
+        let inner = &engine.inner;
+        inner.generation.store(2, Ordering::Release);
+        inner.clock.lock().unwrap().audio = true;
+        inner.fall_back_to_wall_clock(1);
+        assert!(inner.clock.lock().unwrap().audio);
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg on PATH; exercises rapid seeks with video, audio and subtitles"]
+    fn rapid_seeks_keep_video_advancing_with_audio() {
+        let (ffmpeg, _) = tools().expect("FFmpeg and FFprobe on PATH");
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/rapid-seek-test");
+        std::fs::create_dir_all(&directory).unwrap();
+        let subtitles = directory.join("captions.srt");
+        std::fs::write(&subtitles, "1\n00:00:00,000 --> 00:00:19,000\nSeek regression\n").unwrap();
+        let video = directory.join("video.mkv");
+        let mut command = Command::new(&ffmpeg);
+        command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-f", "lavfi", "-i", "testsrc2=s=160x90:r=20:d=20",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=20"])
+            .arg("-i").arg(&subtitles)
+            .args(["-c:v", "ffv1", "-c:a", "pcm_s16le", "-c:s", "srt"]).arg(&video);
+        hide_console(&mut command);
+        assert!(command.status().unwrap().success());
+
+        let engine = engine(video.to_string_lossy().into_owned());
+        let inner = &engine.inner;
+        let track = |stream_index| Track {
+            language: String::new(), title: String::new(), codec: String::new(), stream_index,
+        };
+        *inner.info.lock().unwrap() = Some(MediaInfo {
+            duration: 20.0, width: 160, height: 90, fps: 20.0, has_video: true,
+            audio: vec![track(1)], subtitles: vec![track(2)], ..Default::default()
+        });
+        inner.config.lock().unwrap().subtitle_track = Some(0);
+        inner.audio_device.store(true, Ordering::Release);
+        engine.set_paused(true);
+        // Queue requests while startup is blocked to force superseded workers
+        // to compete for the lock, then also interrupt active process starts.
+        {
+            let _restart = inner.restart_lock.lock().unwrap();
+            for second in 1..20 { engine.seek(second as f64 / 2.0); }
+            engine.seek(3.0);
+        }
+        for second in 0..30 {
+            std::thread::sleep(Duration::from_millis(8));
+            engine.seek((second % 12) as f64);
+        }
+        engine.seek(12.0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !inner.started.load(Ordering::Acquire) || inner.clock.lock().unwrap().base != 12.0 {
+            assert!(Instant::now() < deadline, "latest seek did not produce a frame");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(engine.position(), 12.0, "paused seek must not advance");
+        assert!(engine.take_frame().is_some(), "paused seek must update the picture");
+
+        // Reproduce a subtitle spawn finishing after its seek was cancelled.
+        // Rejecting it must leave the current video and audio children alive.
+        let generation = inner.generation.load(Ordering::Acquire);
+        let mut stale = Command::new(&ffmpeg);
+        stale.args(["-nostdin", "-re", "-f", "lavfi", "-i", "color=s=16x16:d=20",
+            "-f", "null", "-"]).stdout(Stdio::null()).stderr(Stdio::null());
+        hide_console(&mut stale);
+        assert!(!inner.register_child(generation - 1, stale.spawn().unwrap()));
+        assert!(inner.children.lock().unwrap().iter_mut().all(|child| child.try_wait().unwrap().is_none()));
+
+        // Drive the real PCM queue without requiring a sound device in CI.
+        let mut audio = QueueSource {
+            inner: inner.clone(), local: Vec::new(), cursor: 0, generation: 0, frame_count: 0,
+        };
+        engine.set_paused(false);
+        let mut pictures = std::collections::HashSet::new();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while engine.position() < 13.0 {
+            assert!(Instant::now() < deadline, "audio stopped after rapid seeks");
+            for _ in 0..960 { let _ = audio.next(); }
+            if let Some(frame) = engine.take_frame() {
+                pictures.insert(frame.decoded().pixels().to_vec());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(pictures.len() >= 10, "video froze while audio advanced: {} distinct frames", pictures.len());
+        engine.stop();
+        assert!(inner.children.lock().unwrap().is_empty());
+    }
 }
 
 #[cfg(test)]
