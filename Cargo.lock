@@ -1704,29 +1704,7 @@ dependencies = [
  "objc2-core-text",
  "objc2-foundation 0.3.2",
  "parlance",
- "read-fonts 0.41.0",
- "roxmltree",
- "smallvec",
- "windows 0.62.2",
- "windows-core 0.62.2",
- "yeslogic-fontconfig-sys",
-]
-
-[[package]]
-name = "fontique"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb17c03da08e75b2a84346a7548f34c038fa24d9d5cb12b1ed18c1ea8dbe86d8"
-dependencies = [
- "hashbrown 0.17.1",
- "linebender_resource_handle",
- "memmap2",
- "objc2 0.6.5",
- "objc2-core-foundation",
- "objc2-core-text",
- "objc2-foundation 0.3.2",
- "parlance",
- "read-fonts 0.46.0",
+ "read-fonts",
  "roxmltree",
  "smallvec",
  "windows 0.62.2",
@@ -2105,21 +2083,8 @@ checksum = "c03d949a14aa089bbb282f7dd76a498a7f684428e4257202efc119ec010376f9"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
- "read-fonts 0.41.0",
+ "read-fonts",
  "smallvec",
-]
-
-[[package]]
-name = "harfrust"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "865dcc4105d51c323d8fedbb2d75b5e9c8ecddf5613f74c82f851d0afbc97114"
-dependencies = [
- "bitflags 2.13.2",
- "bytemuck",
- "read-fonts 0.46.0",
- "smallvec",
- "yoke",
 ]
 
 [[package]]
@@ -2659,9 +2624,9 @@ checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 
 [[package]]
 name = "incular"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20c324cd87b8cb6c9f704066bd024083cd8bae66b4c44344e35efab6fb17241b"
+checksum = "bcba0c23f2ba677d6138d74e14a99c11809f81c8a5e58fbeefddc0d91cd39d1d"
 dependencies = [
  "incular-accessibility",
  "incular-animation",
@@ -2689,9 +2654,9 @@ dependencies = [
 
 [[package]]
 name = "incular-accessibility"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb0627fa31be0f760df22dce637b43dc71d7c129c5ed95f930471189b3b6405b"
+checksum = "760202ca7afdbaabc85323f429958b23da0191962fbde1f6fad3e9049736dd81"
 dependencies = [
  "accesskit",
  "incular-core",
@@ -2700,24 +2665,24 @@ dependencies = [
 
 [[package]]
 name = "incular-animation"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "503026ac702ba59b9a44e3324e59e72fa366497eef4162bdcba74761af7ce2d4"
+checksum = "4d09baebeb933eafd654f7f6a7043019cec6f892aaef41ca59d4550383a7fd07"
 dependencies = [
  "incular-core",
 ]
 
 [[package]]
 name = "incular-assets"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46a644b111aab5441b49ede0718970c70cff0850239f819a56a9c27bfd794a04"
+checksum = "c6fdfa7d9a9d4f5e6f9b70e22faa815422f41b6e176117a53f1154d42b324c51"
 
 [[package]]
 name = "incular-config"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0e02b2de57c8191d266a229facd2ef5a9e2238c31096de47ac7b96d6c0ecc0e"
+checksum = "e76d3087b01d0690d9a457e0face2be4d4dd52e254f48291769bc098a4c571bf"
 dependencies = [
  "icu_datetime",
  "icu_decimal",
@@ -2730,9 +2695,9 @@ dependencies = [
 
 [[package]]
 name = "incular-controls"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f4438839e3f1fceecb041743a233cfe6d06721a37fc327e5e33f82d449b81e9"
+checksum = "8593ec480d632d0402c25daed088b7982b493e1744026189d066540ef61650f4"
 dependencies = [
  "bitflags 2.13.2",
  "incular-config",
@@ -2748,9 +2713,9 @@ dependencies = [
 
 [[package]]
 name = "incular-core"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0793ce74bbd184baa843f5e24cab24d4a0ce27c66699c56904ceeb848c9009f"
+checksum = "271f2c1cc8f8af72d792e776095b673f44deb48ed11e0f12bc5dec06fac8a856"
 dependencies = [
  "bitflags 2.13.2",
  "keyboard-types 0.8.3",
@@ -2764,9 +2729,9 @@ dependencies = [
 
 [[package]]
 name = "incular-desktop"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b6f0c2fd7f3a24251ec500c9e32a5a3cc0f15a491be3465c8c14d4e6b83501d"
+checksum = "a0c38edc7d7caa136697805df5f08d91aad4ea687ad2f56c95d169a2dc0719d1"
 dependencies = [
  "accesskit_winit",
  "arboard",
@@ -2797,9 +2762,9 @@ dependencies = [
 
 [[package]]
 name = "incular-gestures"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37f797ff5c6d005dd2503b351f45a792e51f32d8e2dfde71d9e2bb2d66b7426e"
+checksum = "1ca9b0f3d6a8bcfc142e1ac9ca26865aee708952022725752142b0b3a6df9410"
 dependencies = [
  "incular-core",
  "thiserror 2.0.21",
@@ -2807,9 +2772,9 @@ dependencies = [
 
 [[package]]
 name = "incular-image"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80586fb38983220e612c022df9f7b376d31cca4ae956cb32974842fd9c9b229b"
+checksum = "c243f07c47afe0c0d5476a7b429d3168b06c96f7054a0cb541381f8a81ca6191"
 dependencies = [
  "image",
  "incular-config",
@@ -2821,9 +2786,9 @@ dependencies = [
 
 [[package]]
 name = "incular-layout"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2719fd535bef5a5347375655c60af48fa0e79d390c192d66c509fa61e7a06c9a"
+checksum = "b433f6b8467dcf5adf043b93f34de8b6f1119cef01622b6534be63b083b6d71f"
 dependencies = [
  "incular-config",
  "incular-core",
@@ -2831,9 +2796,9 @@ dependencies = [
 
 [[package]]
 name = "incular-linux"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52603d5b7d01c3d26d11d0ceebe061f09baabac192abaa59b28ff097775a8f69"
+checksum = "ab021e04f54bc491d78510342958b80174e5753edb57a7974fac92f15a8cd94a"
 dependencies = [
  "ashpd",
  "futures-util",
@@ -2852,9 +2817,9 @@ dependencies = [
 
 [[package]]
 name = "incular-macos"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63736e62457b40328f4889b7c9a0a3705af6ce8113b36ea369551cf45630b29a"
+checksum = "a8d5e10fd9075dd998abcdaceddcb3936aff96bf00c246735ddbbe35e01cdd8c"
 dependencies = [
  "block2 0.5.1",
  "incular-config",
@@ -2874,9 +2839,9 @@ dependencies = [
 
 [[package]]
 name = "incular-material"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80b8de5697061f6390de671357c1346a0c8b2fa41e351ab15938676da8c1e587"
+checksum = "00e748ff7b8e06711f83bac1b08090d80afa32b05233512523f2f5d15ae48975"
 dependencies = [
  "bitflags 2.13.2",
  "incular-config",
@@ -2894,9 +2859,9 @@ dependencies = [
 
 [[package]]
 name = "incular-navigation"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aab9ebee9e0b608e73500c78514299dfe21853793c8e611b23d67c2e67cfb69d"
+checksum = "96aa3103125d64ab457b167e4bb7ade6fe3ac2c93d2de90cf2eb3fc90138e3e8"
 dependencies = [
  "incular-core",
  "incular-widgets",
@@ -2908,9 +2873,9 @@ dependencies = [
 
 [[package]]
 name = "incular-platform"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d15205d6d0308d9a496af1e6dddef3cbd7b8d2306cf75729f351f5727297f52"
+checksum = "8829166d31335654a4066a6cd4e83377caf0539a54bd24f7829b86f638af3d10"
 dependencies = [
  "bitflags 2.13.2",
  "directories",
@@ -2922,9 +2887,9 @@ dependencies = [
 
 [[package]]
 name = "incular-rendering"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7722d9416ebdf68196eaa2268afedfe63c9768f64109f68d4b565d4b2ccae58b"
+checksum = "9e6e011f2cce7273a926c5f973c0665c2c1464328594d63782ceb3f936a5878f"
 dependencies = [
  "incular-assets",
  "incular-core",
@@ -2935,9 +2900,9 @@ dependencies = [
 
 [[package]]
 name = "incular-runtime"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32623e7dc0dfeb53e58243c33a25f53eb12af8caa7ca7ee48c65f806c16d9e35"
+checksum = "860360c975cb771abe5536dde5938116d4c9a62f6b761ec24f4d263a2b24fa8b"
 dependencies = [
  "bitflags 2.13.2",
  "incular-accessibility",
@@ -2964,9 +2929,9 @@ dependencies = [
 
 [[package]]
 name = "incular-scroll"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d21154fcd72af7774042b0403aced603eaee2e398132ea882b24f679350dd8ee"
+checksum = "b6f817bbccbde75a412a158ba42ee618935c139262d37d7704b1acc0c79a9c72"
 dependencies = [
  "incular-animation",
  "incular-config",
@@ -2977,18 +2942,18 @@ dependencies = [
 
 [[package]]
 name = "incular-semantics"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baedee51f98c920f8ed2a3e178abe68fafd49bfd9a92a638fdd184cb3de673da"
+checksum = "39f3914a631e58c04c33abeac7bc8b877a543a16036f3fe64f7ea8eb38c0685a"
 dependencies = [
  "incular-core",
 ]
 
 [[package]]
 name = "incular-text"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7569981f3772ab6f6101777bfce1981324ca5c8408ec90e130fff739cb00120"
+checksum = "d17b7f9247a88ff85d6ab83be1b5f7944c013f24d763fd6da9332b156d89304d"
 dependencies = [
  "bitflags 2.13.2",
  "icu_properties",
@@ -2998,15 +2963,15 @@ dependencies = [
  "incular-core",
  "incular-rendering",
  "lru",
- "parley 0.12.0",
+ "parley",
  "serde_json",
 ]
 
 [[package]]
 name = "incular-wgpu"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98c4754f6dbb4f959e17fafc4669400c03e87b3d7a3e14e2f69f16e839e0f135"
+checksum = "5c3973d0f9e331d42eb3a6c7b19b1888ca3a2363f9d2f29613ea6e75635279a0"
 dependencies = [
  "ab_glyph",
  "ab_glyph_rasterizer",
@@ -3023,16 +2988,16 @@ dependencies = [
  "pollster",
  "postcard",
  "self_cell",
- "skrifa 0.44.0",
+ "skrifa",
  "thiserror 2.0.21",
  "wgpu",
 ]
 
 [[package]]
 name = "incular-widgets"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "244798c5b2d5402719eb65696b13d8073ad14e1ba5223f35d89f76daac256d5b"
+checksum = "0640fc45605de1fb569ba54e8af65d0b365937a1881f7f19e53365eefecac10f"
 dependencies = [
  "bitflags 2.13.2",
  "icu_segmenter",
@@ -3057,9 +3022,9 @@ dependencies = [
 
 [[package]]
 name = "incular-windows"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54ae26f20921e65e646e9cf6fe8415b7dd9bfcb5860f061870b7f467f50a7747"
+checksum = "3e0674129157f5f3f97b96102a223ac77e4a0fc3585791d18d229363517fb023"
 dependencies = [
  "crash-handler",
  "incular-config",
@@ -4813,25 +4778,11 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61bd0c0c1737f0b3d3726dc06b225083af213b61913e4fbae1670613a106c6ce"
 dependencies = [
- "fontique 0.12.0",
+ "fontique",
  "hashbrown 0.17.1",
  "linebender_resource_handle",
  "parlance",
- "parley_engine 0.12.0",
- "smallvec",
-]
-
-[[package]]
-name = "parley"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f00d9e3b12cd601fbd38535b7a8dbc1f761bcc842c4be4803f7ac2d89bb78e01"
-dependencies = [
- "fontique 0.13.0",
- "hashbrown 0.17.1",
- "linebender_resource_handle",
- "parlance",
- "parley_engine 0.13.0",
+ "parley_engine",
  "smallvec",
 ]
 
@@ -4846,26 +4797,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "parley_data"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcd6506d5b966f3324e191691325077cbac6e08ea1b828ba9cd86f660e10d9e5"
-dependencies = [
- "icu_collections",
- "icu_properties",
-]
-
-[[package]]
 name = "parley_emoji"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c4482d912d7671a7cd2089794f90ef3bb5f5f8c738230fb0fcd50fa020f0ed3"
-
-[[package]]
-name = "parley_emoji"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66dbd709d00551ad2305b8a9479ca04d722a3d21276eba3d74596359b8a64eaa"
 
 [[package]]
 name = "parley_engine"
@@ -4873,8 +4808,8 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b74c0d373e462e504ad4436710a39f099e18e848e1ee711f70cd2dcd5a69b290"
 dependencies = [
- "fontique 0.12.0",
- "harfrust 0.12.0",
+ "fontique",
+ "harfrust",
  "hashbrown 0.17.1",
  "icu_locale_core",
  "icu_normalizer",
@@ -4882,30 +4817,9 @@ dependencies = [
  "icu_segmenter",
  "linebender_resource_handle",
  "parlance",
- "parley_data 0.12.0",
- "parley_emoji 0.12.0",
- "skrifa 0.44.0",
-]
-
-[[package]]
-name = "parley_engine"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd9c37658a7f75addef6fb3183cde6ed16fdf7757436dc64f073144f2b99879f"
-dependencies = [
- "fontique 0.13.0",
- "harfrust 0.15.0",
- "hashbrown 0.17.1",
- "icu_locale_core",
- "icu_normalizer",
- "icu_properties",
- "icu_provider",
- "icu_segmenter",
- "linebender_resource_handle",
- "parlance",
- "parley_data 0.13.0",
- "parley_emoji 0.13.0",
- "skrifa 0.49.0",
+ "parley_data",
+ "parley_emoji",
+ "skrifa",
 ]
 
 [[package]]
@@ -5411,20 +5325,6 @@ dependencies = [
  "bytemuck",
  "font-types",
  "once_cell",
-]
-
-[[package]]
-name = "read-fonts"
-version = "0.46.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdaa4fffe9ff3ca2c353fa9729792805b9b3e324695ff5a081f860612e81b330"
-dependencies = [
- "bytemuck",
- "foldhash 0.2.0",
- "font-types",
- "once_cell",
- "smallvec",
- "yoke",
 ]
 
 [[package]]
@@ -6115,20 +6015,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
 dependencies = [
  "bytemuck",
- "read-fonts 0.41.0",
-]
-
-[[package]]
-name = "skrifa"
-version = "0.49.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7459fb60888ad9a5f367dd293fa2fb9df142cb451aa6bfd6cd66a7d6a9b739d"
-dependencies = [
- "bytemuck",
- "once_cell",
- "read-fonts 0.46.0",
- "smallvec",
- "yoke",
+ "read-fonts",
 ]
 
 [[package]]
@@ -6239,8 +6126,6 @@ dependencies = [
  "librqbit",
  "log",
  "open",
- "parley 0.12.0",
- "parley 0.13.0",
  "reqwest",
  "resvg",
  "rodio",
