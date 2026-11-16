@@ -321,6 +321,59 @@ fn shortcuts_card() -> Widget {
     })).into()
 }
 
+fn ai_card(app: &App, settings: &Settings) -> Widget {
+    let model = app.ai.state.read(Clone::clone);
+    let mut children: Vec<Widget> = vec![
+        titled(icons::type_(), "Local AI"), gap(8.0),
+        text("LFM3-Omni-2B", 16.0, FontWeight::W600, TEXT).into(), gap(4.0),
+        muted("Optional local model. First tool: subtitle matching from audio. Runs on your computer; media is not uploaded."),
+        setting_row("Enable local AI", "Starts only when you request an AI task", toggle(app,
+            settings.local_ai_enabled, |s, v| s.local_ai_enabled = v)),
+        muted("Subtitle assist: pause as a line starts, then use Find spoken line in Subtitles → Sync. Review the match before applying a delay."),
+        gap(8.0),
+        muted("Q4_K_M model + Q8 audio/vision projector and CPU runtime: about 1.63 GB download. Additional memory is needed while running."),
+        gap(8.0),
+    ];
+    if !crate::ai::supported() {
+        children.push(muted("Local AI installation currently supports Windows x64."));
+    } else if model.busy {
+        children.push(text(&model.stage, 13.0, FontWeight::W500, ACCENT).into());
+        if model.downloading {
+            children.push(muted(format!("{:.0} / {:.0} MB · {:.0}%", model.downloaded as f64 / 1e6,
+                crate::ai::DOWNLOAD_SIZE as f64 / 1e6,
+                100.0 * model.downloaded as f64 / crate::ai::DOWNLOAD_SIZE as f64)));
+        }
+        let cancel = app.clone();
+        children.push(gap(8.0));
+        children.push(button("Cancel", Tone::Neutral, move || cancel.ai.cancel()));
+    } else {
+        children.push(text(if model.installed { "Downloaded · ready when enabled" } else { "Model is not downloaded" },
+            13.0, FontWeight::W500, if model.installed { ACCENT } else { MUTED }).into());
+        let mut actions = Vec::new();
+        if settings.local_ai_enabled {
+            let download = app.clone();
+            actions.push(button(if model.installed { "Verify / repair" } else { "Download model" }, Tone::Primary,
+                move || download.download_ai_model()));
+        }
+        if crate::ai::model_dir().exists() {
+            let remove = app.clone();
+            actions.push(hgap(8.0));
+            actions.push(button("Remove download", Tone::Neutral, move || remove.remove_ai_model()));
+        }
+        children.push(gap(8.0));
+        children.push(row(actions).into());
+    }
+    if let Some(error) = model.error {
+        children.push(gap(8.0));
+        children.push(text(error, 12.0, FontWeight::W400, DANGER).max_lines(Some(4)).into());
+    }
+    children.push(gap(8.0));
+    children.push(button("Model details & license", Tone::Neutral, || {
+        let _ = open::that_detached("https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF");
+    }));
+    card(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
+}
+
 fn playback_card(app: &App, settings: &Settings) -> Widget {
     let ffmpeg_ok = crate::player::engine::tools().is_some();
     let mut children: Vec<Widget> = vec![titled(icons::play(), "Playback"), gap(6.0)];
@@ -627,6 +680,8 @@ pub fn screen(app: &App) -> Widget {
             PAGE_PADDING,
             col(vec![
                 playback_card(app, &settings),
+                gap(16.0),
+                ai_card(app, &settings),
                 gap(16.0),
                 controls_card(app, &settings),
                 gap(16.0),

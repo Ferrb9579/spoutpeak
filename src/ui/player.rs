@@ -1295,6 +1295,44 @@ fn sync_panel(app: &App) -> Widget {
     Builder::new(move |_| sync_panel_content(&app)).into()
 }
 
+fn ai_subtitle_assist(app: &App) -> Widget {
+    if !app.profile.read(|p| p.settings.local_ai_enabled) { return SizedBox::shrink().into(); }
+    let model = app.ai.state.read(Clone::clone);
+    let mut children: Vec<Widget> = vec![];
+    if model.busy {
+        let cancel = app.clone();
+        children.push(hrow(vec![
+            Expanded::new(text(&model.stage, 12.0, FontWeight::W400, MUTED).max_lines(Some(2))).into(),
+            hgap(6.0), pill("Cancel", false, move || cancel.ai.cancel()),
+        ]).into());
+    } else {
+        let find = app.clone();
+        children.push(hrow(vec![
+            Expanded::new(text("Match 8 seconds of audio locally", 12.0, FontWeight::W400, MUTED)).into(),
+            hgap(6.0), pill("Find spoken line", false, move || find.find_subtitle_with_ai()),
+        ]).into());
+    }
+    if let Some(found) = app.player.ai_match.get() {
+        children.push(gap(5.0));
+        children.push(text(format!("Heard: {}", found.transcript), 12.0, FontWeight::W400, TEXT).max_lines(Some(2)).into());
+        if let Some(cue) = found.cue {
+            let apply = app.clone();
+            children.push(text(format!("Match: {}", cue.text.replace('\n', " ")), 12.0, FontWeight::W500, ACCENT).max_lines(Some(2)).into());
+            children.push(text("Timing uses your paused position. Apply only if this line starts there.", 11.0,
+                FontWeight::W400, MUTED).max_lines(Some(2)).into());
+            children.push(pill(&format!("Apply {:+.2}s", found.position - cue.start), false,
+                move || apply.apply_ai_subtitle_match()));
+        } else {
+            children.push(text("No unique match in the loaded lines. Load more lines or sync manually.", 12.0,
+                FontWeight::W400, MUTED).max_lines(Some(2)).into());
+        }
+    }
+    if let Some(error) = model.error {
+        children.push(text(error, 12.0, FontWeight::W400, DANGER).max_lines(Some(2)).into());
+    }
+    col(children).cross_axis_alignment(CrossAxisAlignment::Stretch).into()
+}
+
 fn sync_panel_content(app: &App) -> Widget {
     const WIDTH: f32 = 470.0;
     let cues = Rc::new(app.player.cue_list());
@@ -1450,6 +1488,8 @@ fn sync_panel_content(app: &App) -> Widget {
                         pill("Current position", false, move || jump.scroll_subtitle_sync_to_current()),
                     ]).into()
                 }).into(),
+                gap(6.0),
+                ai_subtitle_assist(app),
                 gap(6.0),
                 Expanded::new(list).into(),
             ])

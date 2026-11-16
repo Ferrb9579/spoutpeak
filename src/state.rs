@@ -631,6 +631,7 @@ pub struct App {
     pub server_online: Signal<Option<bool>>,
     search_typing: Rc<std::cell::Cell<u64>>,
     pub player: PlayerUi,
+    pub ai: crate::ai::LocalAi,
     pub downloads: Shared<Vec<crate::downloads::Download>>,
     pub controllers: Controllers,
 }
@@ -649,6 +650,7 @@ impl App {
             toast: Signal::new(None),
             toast_generation: Rc::new(RefCell::new(0)),
             player: PlayerUi::new(&profile.settings),
+            ai: crate::ai::LocalAi::new(),
             profile: Shared::new(profile),
             library: Shared::new(store::load_library()),
             library_view: Shared::new(LibraryView {
@@ -1518,6 +1520,10 @@ impl App {
         crate::streaming::configure(&torrent);
         if let Some(fast) = subtitle_loading {
             self.player.set_subtitle_loading(fast);
+        }
+        if !self.profile.peek(|p| p.settings.local_ai_enabled) {
+            self.ai.cancel();
+            self.player.ai_match.set(None);
         }
         self.save_profile();
     }

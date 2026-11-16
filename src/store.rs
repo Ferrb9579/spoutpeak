@@ -94,6 +94,8 @@ pub struct Settings {
     pub subtitle_lang: String,
     /// Start a full embedded subtitle scan without a playback-rate cap.
     pub fast_subtitles: bool,
+    /// Local AI is opt-in; enabling does not download or start the model.
+    pub local_ai_enabled: bool,
     pub audio_lang: String,
     pub subtitle_size: f32,
     pub subtitle_style: SubtitleStyle,
@@ -134,6 +136,7 @@ impl Default for Settings {
             custom_player_path: String::new(),
             subtitle_lang: "eng".to_owned(),
             fast_subtitles: false,
+            local_ai_enabled: false,
             audio_lang: "eng".to_owned(),
             subtitle_size: 28.0,
             subtitle_style: SubtitleStyle::default(),
@@ -165,10 +168,13 @@ mod subtitle_loading_tests {
     fn subtitle_loading_setting_preserves_old_profiles_and_round_trips() {
         let mut settings: Settings = serde_json::from_str("{}").unwrap();
         assert!(!settings.fast_subtitles);
+        assert!(!settings.local_ai_enabled);
         settings.fast_subtitles = true;
+        settings.local_ai_enabled = true;
         let saved = serde_json::to_vec(&settings).unwrap();
         let restored: Settings = serde_json::from_slice(&saved).unwrap();
         assert!(restored.fast_subtitles);
+        assert!(restored.local_ai_enabled);
     }
 }
 

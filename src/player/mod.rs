@@ -178,6 +178,7 @@ pub struct PlayerUi {
     pub position: Signal<f64>,
     pub subtitle_follow: SubtitleFollow,
     pub cue: Signal<String>,
+    pub ai_match: Signal<Option<crate::ai::SubtitleMatch>>,
     /// Window mode is independent of playback updates and drives the app frame.
     pub fullscreen: Signal<bool>,
     fullscreen_restore_maximized: Rc<Cell<bool>>,
@@ -201,6 +202,7 @@ impl PlayerUi {
             position: Signal::new(0.0),
             subtitle_follow: SubtitleFollow::new(),
             cue: Signal::new(String::new()),
+            ai_match: Signal::new(None),
             fullscreen: Signal::new(false),
             fullscreen_restore_maximized: Rc::new(Cell::new(false)),
             scrub: Rc::new(Cell::new(None)),
@@ -1103,6 +1105,8 @@ impl App {
     }
 
     fn finish_playback(&self, replacing: bool) {
+        if !self.ai.state.peek(|s| s.downloading) { self.ai.cancel(); }
+        self.player.ai_match.set(None);
         self.player.subtitle_follow.suspend();
         self.player.subtitle_follow.set_pressed(false);
         crate::ui::hide_player_tooltips();
@@ -1272,6 +1276,8 @@ impl App {
         if !self.player.state.peek(|s| index < s.audio_tracks.len() && s.audio_index != index) {
             return;
         }
+        if !self.ai.state.peek(|s| s.downloading) { self.ai.cancel(); }
+        self.player.ai_match.set(None);
         self.player.with_engine(|e| e.set_audio_track(index));
         self.player.state.write(|s| {
             s.audio_index = index;
@@ -1316,6 +1322,8 @@ impl App {
             session.preferred_sub_ordinal = ordinal;
         }
         let revision = self.player.subtitle_revision.get() + 1;
+        if !self.ai.state.peek(|s| s.downloading) { self.ai.cancel(); }
+        self.player.ai_match.set(None);
         self.player.subtitle_revision.set(revision);
         self.player.cues.borrow_mut().clear();
         self.player.cue.set(String::new());
@@ -1398,6 +1406,57 @@ impl App {
         self.player.state.write(|s| s.menu = Menu::Sync);
         self.load_all_subtitles();
         self.scroll_subtitle_sync_to_current();
+    }
+
+    /// Matches dialogue from a short, independent audio sample. It never seeks
+    /// or changes playback; applying a delay remains an explicit user action.
+    pub fn find_subtitle_with_ai(&self) {
+        if !self.profile.peek(|p| p.settings.local_ai_enabled) { return; }
+        if !self.ai.state.peek(|s| s.installed) {
+            self.notify("Download LFM3-Omni-2B in Settings → Local AI first."); return;
+        }
+        if !self.player.state.peek(|s| s.status == Status::Playing && !s.live && s.sub_choice != SubChoice::Off) { return; }
+        if !self.player.state.peek(|s| s.paused) {
+            self.notify("Pause as a line starts, then find the spoken line."); return;
+        }
+        let position = self.player.position.get_untracked();
+        let Some(sample) = self.player.engine.borrow().as_ref().and_then(|e| e.audio_sample(position)) else { return };
+        let Some((id, cancel)) = self.ai.begin("Listening with LFM3-Omni-2B…", false) else { return };
+        self.player.ai_match.set(None);
+        let session = self.player.session_id.get();
+        let revision = self.player.subtitle_revision.get();
+        let audio = self.player.state.peek(|s| (s.audio_index, s.audio_delay));
+        let finished_cancel = cancel.clone();
+        spawn(crate::ai::transcribe(sample, cancel), move |app, result| {
+            match result {
+                Ok(transcript) => {
+                    if !finished_cancel.is_cancelled() {
+                        app.ai_subtitle_transcribed(session, revision, audio, position, transcript);
+                    }
+                    app.ai.finish(id, Ok(()));
+                }
+                Err(error) => app.ai.finish(id, Err(error)),
+            }
+        });
+    }
+
+    fn ai_subtitle_transcribed(&self, session: u64, revision: u64, audio: (usize, f64), position: f64, transcript: String) {
+        if !self.profile.peek(|p| p.settings.local_ai_enabled)
+            || self.player.session_id.get() != session
+            || self.player.subtitle_revision.get() != revision
+            || !self.player.state.peek(|s| (s.audio_index, s.audio_delay) == audio) { return; }
+        let cue = crate::ai::matching_cue(&transcript, &self.player.cue_list());
+        self.player.ai_match.set(Some(crate::ai::SubtitleMatch { transcript, cue, position }));
+    }
+
+    pub fn apply_ai_subtitle_match(&self) {
+        if !self.profile.peek(|p| p.settings.local_ai_enabled) { return; }
+        let Some(found) = self.player.ai_match.get_untracked() else { return };
+        let Some(cue) = found.cue else { return };
+        let delay = ((found.position - cue.start) * 20.0).round() / 20.0;
+        self.player.state.write(|s| s.sub_delay = delay);
+        self.player.ai_match.set(None);
+        self.notify(format!("Subtitles shifted {delay:+.2}s. Check the timing and fine-tune if needed."));
     }
 
     /// Returns to the playing line or marker and resumes following playback.
@@ -1494,6 +1553,8 @@ impl App {
     }
 
     pub fn adjust_audio_delay(&self, delta: f64) {
+        if !self.ai.state.peek(|s| s.downloading) { self.ai.cancel(); }
+        self.player.ai_match.set(None);
         let delay = self.player.state.write(|s| {
             s.audio_delay = ((s.audio_delay + delta).clamp(-10.0, 10.0) * 20.0).round() / 20.0;
             s.audio_delay
@@ -1503,6 +1564,8 @@ impl App {
     }
 
     pub fn reset_audio_delay(&self) {
+        if !self.ai.state.peek(|s| s.downloading) { self.ai.cancel(); }
+        self.player.ai_match.set(None);
         self.player.state.write(|s| s.audio_delay = 0.0);
         self.player.with_engine(|e| e.set_audio_delay(0.0));
         self.player_activity();
@@ -1633,6 +1696,36 @@ mod episode_transition_tests {
 
     fn app() -> App {
         App::with_profile(crate::store::Profile::default())
+    }
+
+    #[test]
+    fn ai_subtitle_results_reject_stale_sessions_tracks_audio_and_disabled_feature() {
+        let app = app();
+        app.profile.write(|p| p.settings.local_ai_enabled = true);
+        let session = app.player.session_id.get();
+        let revision = app.player.subtitle_revision.get();
+        let transcript = "You ever heard about the broken window theory?";
+        app.player.cues.borrow_mut().push(Cue { start: 40.0, end: 43.0, text: transcript.into() });
+        for (old_session, old_revision, old_audio) in [
+            (session + 1, revision, (0, 0.0)),
+            (session, revision + 1, (0, 0.0)),
+            (session, revision, (1, 0.0)),
+            (session, revision, (0, 0.25)),
+        ] {
+            app.ai_subtitle_transcribed(old_session, old_revision, old_audio, 15.0, transcript.into());
+            assert!(app.player.ai_match.get_untracked().is_none());
+        }
+        app.profile.write(|p| p.settings.local_ai_enabled = false);
+        app.ai_subtitle_transcribed(session, revision, (0, 0.0), 15.0, transcript.into());
+        assert!(app.player.ai_match.get_untracked().is_none());
+        app.profile.write(|p| p.settings.local_ai_enabled = true);
+        app.ai_subtitle_transcribed(session, revision, (0, 0.0), 15.0, transcript.into());
+        assert!(app.player.ai_match.get_untracked().unwrap().cue.is_some());
+        // Applying must use the sampled position, even if playback has moved.
+        app.player.position.set(100.0);
+        app.apply_ai_subtitle_match();
+        assert_eq!(app.player.state.peek(|s| s.sub_delay), -25.0);
+        assert!(app.player.ai_match.get_untracked().is_none());
     }
 
     #[test]

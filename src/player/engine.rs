@@ -229,6 +229,20 @@ impl Engine {
         self.inner.now()
     }
 
+    pub(crate) fn audio_sample(&self, position: f64) -> Option<crate::ai::AudioSample> {
+        let (audio_track, delay) = {
+            let config = self.inner.config.lock().unwrap();
+            (config.audio_track, config.audio_delay)
+        };
+        let info = self.inner.info.lock().unwrap();
+        let track = info.as_ref()?.audio.get(audio_track)?;
+        Some(crate::ai::AudioSample {
+            url: self.inner.request.url.clone(), headers: self.inner.request.headers.clone(),
+            stream_index: track.stream_index, position: (position - delay).max(0.0),
+            language: track.language.clone(),
+        })
+    }
+
     pub fn is_current_generation(&self, generation: u64) -> bool {
         self.inner.current(generation)
     }

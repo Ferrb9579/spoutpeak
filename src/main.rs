@@ -5,6 +5,7 @@
 )]
 
 mod addons;
+mod ai;
 mod convert;
 mod devtools;
 mod downloads;
@@ -81,6 +82,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = incular::run(application);
     // Native close requests (including Alt+F4) must release playback before
     // Windows begins destroying this thread's local application state.
-    state::with_app(|app| app.stop_playback());
+    state::with_app(|app| { app.ai.cancel(); app.stop_playback(); });
     result.map_err(Into::into)
 }
