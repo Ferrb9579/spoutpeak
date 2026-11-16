@@ -748,12 +748,15 @@ fn audio_panel(app: &App) -> Panel {
 /// How far the selected subtitle has loaded, for the menus. `None` when
 /// subtitles are off.
 fn subtitle_progress(app: &App) -> Option<(String, bool)> {
-    let (choice, until, loaded, duration) = app
+    let (choice, until, loaded, failed, duration) = app
         .player
         .state
-        .peek(|s| (s.sub_choice.clone(), s.sub_loaded_until, s.sub_loaded, s.duration));
+        .peek(|s| (s.sub_choice.clone(), s.sub_loaded_until, s.sub_loaded, s.sub_failed, s.duration));
     if choice == SubChoice::Off {
         return None;
+    }
+    if failed {
+        return Some(("Subtitle download failed. Select it again to retry.".to_owned(), false));
     }
     let count = app.player.cue_count();
     if loaded {

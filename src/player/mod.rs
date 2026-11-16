@@ -81,6 +81,7 @@ pub struct PlayerState {
     pub sub_loaded_until: f64,
     /// Every line of the selected subtitle is loaded.
     pub sub_loaded: bool,
+    pub sub_failed: bool,
     pub sub_size: f32,
     pub sub_style: SubtitleStyle,
     pub brightness: f32,
@@ -223,6 +224,7 @@ impl PlayerUi {
                 sub_delay: 0.0,
                 sub_loaded_until: 0.0,
                 sub_loaded: false,
+                sub_failed: false,
                 sub_size: settings.subtitle_size,
                 sub_style: settings.subtitle_style.clone(),
                 brightness: settings.brightness,
@@ -634,6 +636,7 @@ impl App {
             s.sub_delay = 0.0;
             s.sub_loaded_until = 0.0;
             s.sub_loaded = false;
+            s.sub_failed = false;
             s.sub_size = settings.subtitle_size;
             s.controls_visible = true;
             s.menu = Menu::None;
@@ -782,6 +785,15 @@ impl App {
         if self.player.session_id.get() != session_id {
             return;
         }
+        let generation = match &event {
+            Event::Position { generation, .. } | Event::Ended { generation } | Event::Error { generation, .. } => Some(*generation),
+            _ => None,
+        };
+        if let Some(generation) = generation {
+            if !self.player.with_engine(|engine| engine.is_current_generation(generation)).unwrap_or(false) {
+                return;
+            }
+        }
         match event {
             Event::Info(info) => self.player_info(info),
             Event::Frame => {
@@ -790,7 +802,7 @@ impl App {
                     self.player.frame.set(Some(frame));
                 }
             }
-            Event::Position { seconds, stalled } => self.player_tick(seconds, stalled),
+            Event::Position { seconds, stalled, .. } => self.player_tick(seconds, stalled),
             Event::Cues { revision, cues, reset } => {
                 if revision != self.player.subtitle_revision.get() || !matches!(
                     self.player.state.peek(|s| s.sub_choice.clone()),
@@ -824,10 +836,13 @@ impl App {
                     s.sub_loaded = done;
                 });
             }
-            Event::Ended => self.player_ended(),
-            Event::Error(message) => {
+            Event::Ended { .. } => self.player_ended(),
+            Event::Error { message, .. } => {
+                self.player.with_engine(|engine| engine.set_paused(true));
                 self.player.state.write(|s| {
                     s.status = Status::Error(message);
+                    s.paused = true;
+                    s.stalled = false;
                     s.controls_visible = true;
                 });
             }
@@ -838,10 +853,7 @@ impl App {
         self.player.preview.set_info(info.clone());
         let audio_index = {
             let preferred = self.profile.peek(|p| p.settings.audio_lang.clone());
-            info.audio
-                .iter()
-                .position(|t| same_language(&t.language, &preferred))
-                .unwrap_or(0)
+            info.preferred_audio_index(&preferred)
         };
         // Lets a read-ahead set in seconds work out how many bytes that is.
         if let Some(url) = self.player.session.borrow().torrent_url.as_deref() {
@@ -1099,6 +1111,15 @@ impl App {
         self.player.position.set(0.0);
         self.player.cue.set(String::new());
         self.player.cues.borrow_mut().clear();
+        {
+            let mut session = self.player.session.borrow_mut();
+            session.stream = None;
+            session.meta = None;
+            session.video = None;
+            session.torrent_url = None;
+            session.unsaved_ms = 0.0;
+            session.last_position = 0.0;
+        }
         let volume = self.player.state.write(|s| {
             s.status = Status::Idle;
             s.menu = Menu::None;
@@ -1116,6 +1137,7 @@ impl App {
             s.sub_delay = 0.0;
             s.sub_loaded_until = 0.0;
             s.sub_loaded = false;
+            s.sub_failed = false;
             s.next = None;
             s.up_next = None;
             s.up_next_cancelled = false;
@@ -1140,6 +1162,9 @@ impl App {
         if self.together_blocks_control() {
             return;
         }
+        if !self.player.state.peek(|s| matches!(s.status, Status::Playing | Status::Ended)) {
+            return;
+        }
         if self.player.state.peek(|s| s.status == Status::Ended) {
             self.seek_to(0.0);
             return;
@@ -1156,6 +1181,9 @@ impl App {
     }
 
     pub fn seek_to(&self, seconds: f64) {
+        if !seconds.is_finite() || !self.player.state.peek(|s| matches!(s.status, Status::Playing | Status::Ended)) {
+            return;
+        }
         if self.together_blocks_control() {
             return;
         }
@@ -1172,7 +1200,12 @@ impl App {
         self.player.session.borrow_mut().last_position = seconds;
         self.player.position.set(seconds);
         if self.player.state.peek(|s| s.status == Status::Ended) {
-            self.player.state.write(|s| s.status = Status::Playing);
+            self.player.with_engine(|e| e.set_paused(false));
+            self.player.state.write(|s| {
+                s.status = Status::Playing;
+                s.paused = false;
+                s.up_next_cancelled = false;
+            });
         }
         self.player_activity();
         self.together_local_change();
@@ -1220,6 +1253,9 @@ impl App {
     }
 
     pub fn select_audio(&self, index: usize) {
+        if !self.player.state.peek(|s| index < s.audio_tracks.len() && s.audio_index != index) {
+            return;
+        }
         self.player.with_engine(|e| e.set_audio_track(index));
         self.player.state.write(|s| {
             s.audio_index = index;
@@ -1228,8 +1264,21 @@ impl App {
     }
 
     pub fn select_subtitle(&self, choice: SubChoice) {
+        let valid = self.player.state.peek(|s| match &choice {
+            SubChoice::Off => true,
+            SubChoice::Embedded(index) => s.embedded_subs.get(*index).is_some_and(Track::is_text_subtitle),
+            SubChoice::Addon(index) => *index < s.addon_subs.len(),
+        });
+        if !valid { return; }
         let previous = self.player.state.peek(|s| s.sub_choice.clone());
-        if previous == choice {
+        if previous == choice && !self.player.state.peek(|s| s.sub_failed) {
+            if choice == SubChoice::Off {
+                // Off may already be showing while providers are still
+                // loading. An explicit choice must prevent later auto-select.
+                let mut session = self.player.session.borrow_mut();
+                session.auto_sub_done = true;
+                session.preferred_sub = "off".into();
+            }
             self.player.state.write(|s| s.menu = Menu::None);
             return;
         }
@@ -1251,6 +1300,7 @@ impl App {
             s.menu = Menu::None;
             s.sub_loaded_until = 0.0;
             s.sub_loaded = choice == SubChoice::Off;
+            s.sub_failed = false;
         });
         match &choice {
             SubChoice::Embedded(index) => {
@@ -1274,29 +1324,35 @@ impl App {
             let session_id = self.player.session_id.get();
             spawn(
                 async move {
-                    let bytes = http().get(&url).send().await.ok()?.bytes().await.ok()?;
+                    let bytes = http().get(&url).send().await.ok()?.error_for_status().ok()?.bytes().await.ok()?;
                     Some(subtitles::parse(&String::from_utf8_lossy(&bytes)))
                 },
                 move |app, cues: Option<Vec<Cue>>| {
-                    let still_selected = app.player.session_id.get() == session_id
-                        && app.player.subtitle_revision.get() == revision
-                        && app.player.state.peek(|s| s.sub_choice == SubChoice::Addon(index));
-                    if !still_selected {
-                        return;
-                    }
-                    match cues {
-                        Some(cues) if !cues.is_empty() => {
-                            let until = cues.iter().fold(0.0f64, |m, c| m.max(c.end));
-                            *app.player.cues.borrow_mut() = cues;
-                            app.player.state.write(|s| {
-                                s.sub_loaded_until = until;
-                                s.sub_loaded = true;
-                            });
-                        }
-                        _ => app.notify("Could not load that subtitle"),
-                    }
+                    app.addon_subtitle_loaded(session_id, revision, index, cues);
                 },
             );
+        }
+    }
+
+    fn addon_subtitle_loaded(&self, session_id: u64, revision: u64, index: usize, cues: Option<Vec<Cue>>) {
+        if self.player.session_id.get() != session_id || self.player.subtitle_revision.get() != revision
+            || !self.player.state.peek(|s| s.sub_choice == SubChoice::Addon(index)) {
+            return;
+        }
+        match cues {
+            Some(cues) if !cues.is_empty() => {
+                let until = cues.iter().fold(0.0f64, |m, c| m.max(c.end));
+                *self.player.cues.borrow_mut() = cues;
+                self.player.state.write(|s| {
+                    s.sub_loaded_until = until;
+                    s.sub_loaded = true;
+                    s.sub_failed = false;
+                });
+            }
+            _ => {
+                self.player.state.write(|s| s.sub_failed = true);
+                self.notify("Could not load that subtitle. Select it again to retry.");
+            }
         }
     }
 
@@ -1549,6 +1605,120 @@ mod episode_transition_tests {
 
     fn app() -> App {
         App::with_profile(crate::store::Profile::default())
+    }
+
+    #[test]
+    fn old_playback_events_cannot_end_or_rewind_a_new_seek() {
+        let app = app();
+        *app.player.engine.borrow_mut() = Some(Engine::test_stub(2));
+        app.player.state.write(|s| s.status = Status::Playing);
+        app.player.position.set(50.0);
+        let session = app.player.session_id.get();
+        for event in [Event::Ended { generation: 1 },
+            Event::Error { generation: 1, message: "Obsolete error".into() },
+            Event::Position { generation: 1, seconds: 10.0, stalled: true }] {
+            app.player_event(session, event);
+        }
+        assert_eq!(app.player.state.peek(|s| s.status.clone()), Status::Playing);
+        assert_eq!(app.player.position.get_untracked(), 50.0);
+        app.player_event(session, Event::Position { generation: 2, seconds: 51.0, stalled: false });
+        assert_eq!(app.player.position.get_untracked(), 51.0);
+        app.player_event(session, Event::Error { generation: 2, message: "Current error".into() });
+        app.player.state.peek(|s| {
+            assert_eq!(s.status, Status::Error("Current error".into()));
+            assert!(s.paused);
+        });
+    }
+
+    #[test]
+    fn controls_cannot_fake_playback_while_media_is_opening_or_failed() {
+        let app = app();
+        for status in [Status::Idle, Status::Opening, Status::Error("Unavailable".into())] {
+            app.player.state.write(|s| { s.status = status.clone(); s.paused = false; });
+            app.player.position.set(0.0);
+            app.toggle_pause();
+            app.seek_to(30.0);
+            assert_eq!(app.player.position.get_untracked(), 0.0);
+            assert!(!app.player.state.peek(|s| s.paused));
+            assert_eq!(app.player.state.peek(|s| s.status.clone()), status);
+        }
+        app.player.state.write(|s| s.status = Status::Playing);
+        app.seek_to(f64::NAN);
+        assert_eq!(app.player.position.get_untracked(), 0.0);
+    }
+
+    #[test]
+    fn replay_resumes_playback_and_resets_the_cancelled_next_episode() {
+        let app = app();
+        *app.player.engine.borrow_mut() = Some(Engine::test_stub(0));
+        app.player.state.write(|s| {
+            s.status = Status::Ended;
+            s.paused = true;
+            s.up_next_cancelled = true;
+        });
+        app.toggle_pause();
+        app.player.state.peek(|s| {
+            assert_eq!(s.status, Status::Playing);
+            assert!(!s.paused && !s.up_next_cancelled);
+        });
+    }
+
+    #[test]
+    fn default_audio_menu_matches_the_adaptive_video_variant() {
+        let app = app();
+        app.profile.write(|p| p.settings.audio_lang = "fra".into());
+        app.player_info(MediaInfo {
+            has_video: true, video_index: 2,
+            audio: [0, 3].into_iter().map(|stream_index| Track {
+                language: "eng".into(), title: String::new(), codec: "aac".into(), stream_index,
+            }).collect(), ..Default::default()
+        });
+        assert_eq!(app.player.state.peek(|s| s.audio_index), 1);
+    }
+
+    #[test]
+    fn failed_subtitle_download_is_retryable_and_old_completions_are_ignored() {
+        let app = app();
+        app.player.state.write(|s| {
+            s.sub_choice = SubChoice::Addon(0);
+            s.addon_subs.push(Subtitle { id: None, url: "http://127.0.0.1:0/subtitle.srt".into(), lang: Some("eng".into()) });
+        });
+        let session = app.player.session_id.get();
+        let first = app.player.subtitle_revision.get();
+        app.addon_subtitle_loaded(session, first, 0, None);
+        assert!(app.player.state.peek(|s| s.sub_failed));
+        app.select_subtitle(SubChoice::Addon(0));
+        let retry = app.player.subtitle_revision.get();
+        assert!(retry > first);
+        assert!(!app.player.state.peek(|s| s.sub_failed));
+        app.addon_subtitle_loaded(session, first, 0, None);
+        assert!(!app.player.state.peek(|s| s.sub_failed));
+        app.addon_subtitle_loaded(session, retry, 0, Some(vec![Cue { start: 0.0, end: 5.0, text: "Retried subtitle".into() }]));
+        assert_eq!(app.player.cue_list()[0].text, "Retried subtitle");
+        assert!(app.player.state.peek(|s| s.sub_loaded && !s.sub_failed));
+    }
+
+    #[test]
+    fn choosing_off_before_subtitles_arrive_prevents_later_auto_selection() {
+        let app = app();
+        app.player.session.borrow_mut().preferred_sub = "eng".into();
+        app.select_subtitle(SubChoice::Off);
+        app.player.state.write(|s| s.embedded_subs.push(Track {
+            language: "eng".into(), title: String::new(), codec: "srt".into(), stream_index: 2,
+        }));
+        app.auto_select_subtitle();
+        assert_eq!(app.player.state.peek(|s| s.sub_choice.clone()), SubChoice::Off);
+        assert_eq!(app.player.session.borrow().preferred_sub, "off");
+    }
+
+    #[test]
+    fn stopping_preparation_clears_the_old_media_and_subtitle_errors() {
+        let app = app();
+        app.player.session.borrow_mut().stream = Some(stream("https://example.test/old.mkv", None));
+        app.player.state.write(|s| s.sub_failed = true);
+        app.stop_playback();
+        assert!(app.player.current_media().is_none());
+        assert!(!app.player.state.peek(|s| s.sub_failed));
     }
 
     #[test]

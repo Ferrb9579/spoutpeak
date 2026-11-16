@@ -65,18 +65,26 @@ pub struct MediaInfo {
     pub subtitles: Vec<Track>,
 }
 
+impl MediaInfo {
+    pub fn preferred_audio_index(&self, preferred: &str) -> usize {
+        self.audio.iter().position(|track| crate::util::same_language(&track.language, preferred))
+            .or_else(|| self.audio.iter().position(|track| self.has_video && track.stream_index > self.video_index))
+            .unwrap_or(0)
+    }
+}
+
 pub enum Event {
     Info(MediaInfo),
     /// A new frame is waiting in [`Engine::take_frame`].
     Frame,
-    Position { seconds: f64, stalled: bool },
+    Position { generation: u64, seconds: f64, stalled: bool },
     /// Cues from the selected subtitle revision; `reset` clears earlier ones.
     Cues { revision: u64, cues: Vec<Cue>, reset: bool },
     /// The whole-file subtitle pass has read up to `until` seconds;
     /// `done` once it reached the end.
     SubtitleProgress { revision: u64, until: f64, done: bool },
-    Ended,
-    Error(String),
+    Ended { generation: u64 },
+    Error { generation: u64, message: String },
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +124,7 @@ struct Inner {
     generation: AtomicU64,
     /// Only one restart may reset the clock and replace decoder processes.
     restart_lock: Mutex<()>,
+    pending_seek: Mutex<Option<(u64, f64)>>,
     paused: AtomicBool,
     /// Set once the first frame after a (re)start is ready, so sound and
     /// picture begin together.
@@ -188,6 +197,16 @@ pub fn tools() -> Option<(PathBuf, PathBuf)> {
 }
 
 impl Engine {
+    #[cfg(test)]
+    pub(super) fn test_stub(generation: u64) -> Self {
+        let inner = Arc::new(Inner::new(OpenRequest {
+            url: String::new(), headers: Vec::new(), start: 0.0, max_height: 90,
+            hardware_decoding: false, volume: 1.0, preferred_audio: String::new(),
+        }, |_| {}));
+        inner.generation.store(generation, Ordering::Release);
+        Self { inner }
+    }
+
     pub fn open(request: OpenRequest, emit: impl Fn(Event) + Send + Sync + 'static) -> Self {
         let inner = Arc::new(Inner::new(request, emit));
         let worker = inner.clone();
@@ -207,6 +226,14 @@ impl Engine {
         self.inner.now()
     }
 
+    pub fn is_current_generation(&self, generation: u64) -> bool {
+        self.inner.current(generation)
+    }
+
+    fn restart_position(&self) -> f64 {
+        self.inner.pending_seek.lock().unwrap().map_or_else(|| self.position(), |(_, position)| position)
+    }
+
     /// Moves playback `seconds` forward (or back, when negative) gradually:
     /// with sound, by running a few percent fast or slow until caught up;
     /// without, at once. Replaces any correction still under way.
@@ -221,10 +248,10 @@ impl Engine {
     }
 
     pub fn set_paused(&self, paused: bool) {
-        self.inner.set_paused(paused);
+        let was_paused = self.inner.set_paused(paused);
         // A paused live stream falls out of the broadcast window: resuming
         // rejoins at the live edge.
-        if !paused && self.inner.is_live() {
+        if was_paused && !paused && self.inner.is_live() {
             self.inner.queue_restart(0.0);
         }
     }
@@ -241,19 +268,19 @@ impl Engine {
 
     pub fn set_speed(&self, speed: f64) {
         self.inner.config.lock().unwrap().speed = speed;
-        self.seek(self.position());
+        self.seek(self.restart_position());
     }
 
     pub fn set_audio_track(&self, index: usize) {
         self.inner.config.lock().unwrap().audio_track = index;
-        self.seek(self.position());
+        self.seek(self.restart_position());
     }
 
     /// Shifts the sound against the picture; restarts decoding in place.
     pub fn set_audio_delay(&self, seconds: f64) {
         self.inner.config.lock().unwrap().audio_delay = seconds;
         if !self.inner.is_live() {
-            self.seek(self.position());
+            self.seek(self.restart_position());
         }
     }
 
@@ -264,7 +291,7 @@ impl Engine {
             config.subtitle_track = index;
             config.subtitle_revision = revision;
         }
-        self.seek(self.position());
+        self.seek(self.restart_position());
         self.inner.queue_full_subtitles(false);
     }
 
@@ -300,6 +327,7 @@ impl Inner {
             alive: AtomicBool::new(true),
             generation: AtomicU64::new(0),
             restart_lock: Mutex::new(()),
+            pending_seek: Mutex::new(None),
             paused: AtomicBool::new(false),
             started: AtomicBool::new(false),
             consumed_frames: AtomicU64::new(0),
@@ -365,13 +393,18 @@ impl Inner {
         }
     }
 
-    fn set_paused(&self, paused: bool) {
+    fn set_paused(&self, paused: bool) -> bool {
         let mut clock = self.clock.lock().unwrap();
+        let was_paused = self.paused.load(Ordering::Acquire);
+        if was_paused == paused {
+            return was_paused;
+        }
         if !clock.audio {
             clock.anchor_position = self.clock_position(&clock);
             clock.anchor = Instant::now();
         }
         self.paused.store(paused, Ordering::Release);
+        was_paused
     }
 
     /// Marks the first frame ready and starts the wall clock.
@@ -429,7 +462,12 @@ impl Inner {
         }
         // Assign the generation before spawning so request order wins over
         // thread scheduling. Waiting restarts skip work once superseded.
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let generation = {
+            let mut pending = self.pending_seek.lock().unwrap();
+            let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+            *pending = Some((generation, position));
+            generation
+        };
         let inner = self.clone();
         std::thread::spawn(move || inner.restart(generation, position));
     }
@@ -470,10 +508,9 @@ impl Inner {
 
     fn open(self: Arc<Self>) {
         let Some((_, ffprobe)) = tools() else {
-            self.emit(Event::Error(
-                "ffmpeg is missing from the Spoutpeak folder. Reinstall Spoutpeak or choose an external player in Settings."
-                    .into(),
-            ));
+            self.emit(Event::Error { generation: 0, message:
+                "ffmpeg is missing from the Spoutpeak folder. Reinstall Spoutpeak or choose an external player in Settings.".into()
+            });
             return;
         };
         self.clone().start_audio_output();
@@ -505,7 +542,7 @@ impl Inner {
                 (json, errors)
             }
             Err(error) => {
-                self.emit(Event::Error(format!("could not run ffprobe: {error}")));
+                self.emit(Event::Error { generation: 0, message: format!("could not run ffprobe: {error}") });
                 return;
             }
         };
@@ -515,28 +552,17 @@ impl Inner {
         let remote = self.request.url.starts_with("http://") || self.request.url.starts_with("https://");
         let Some(info) = parse_probe(&output.0, self.request.max_height, remote) else {
             let reason = output.1.lines().last().unwrap_or("").trim().to_owned();
-            self.emit(Event::Error(if reason.is_empty() {
+            self.emit(Event::Error { generation: 0, message: if reason.is_empty() {
                 "This stream could not be opened.".into()
             } else {
                 format!("This stream could not be opened: {reason}")
-            }));
+            }});
             return;
         };
         {
             let preferred = &self.request.preferred_audio;
             let mut config = self.config.lock().unwrap();
-            config.audio_track = info
-                .audio
-                .iter()
-                .position(|t| crate::util::same_language(&t.language, preferred))
-                // Adaptive streams list one audio per variant: take the one
-                // that travels with the chosen video.
-                .or_else(|| {
-                    info.audio
-                        .iter()
-                        .position(|t| info.has_video && t.stream_index > info.video_index)
-                })
-                .unwrap_or(0);
+            config.audio_track = info.preferred_audio_index(preferred);
         }
         *self.info.lock().unwrap() = Some(info.clone());
         self.emit(Event::Info(info));
@@ -581,17 +607,21 @@ impl Inner {
             .spawn(move || {
                 let mut previous = -1.0;
                 let mut still = 0;
+                let mut previous_generation = 0;
                 while self.alive.load(Ordering::Acquire) {
                     std::thread::sleep(Duration::from_millis(200));
+                    let generation = self.generation.load(Ordering::Acquire);
                     let seconds = self.now();
                     let paused = self.paused.load(Ordering::Acquire);
-                    if !paused && (seconds - previous).abs() < 0.001 {
+                    if generation == previous_generation && !paused && (seconds - previous).abs() < 0.001 {
                         still += 1;
                     } else {
                         still = 0;
                     }
                     previous = seconds;
+                    previous_generation = generation;
                     self.emit(Event::Position {
+                        generation,
                         seconds,
                         stalled: still >= 3,
                     });
@@ -613,6 +643,7 @@ impl Inner {
         self.kill_children();
         self.audio_queue.lock().unwrap().clear();
         *self.last_restart.lock().unwrap() = Instant::now();
+        self.last_error.lock().unwrap().clear();
         let config = self.config.lock().unwrap().clone();
         let limit = if info.duration > 1.0 {
             info.duration - 0.5
@@ -636,6 +667,12 @@ impl Inner {
                 anchor: Instant::now(),
                 anchor_position: position,
             };
+        }
+        {
+            let mut pending = self.pending_seek.lock().unwrap();
+            if pending.as_ref().is_some_and(|(request, _)| *request == generation) {
+                pending.take();
+            }
         }
         let seek = format!("{position:.3}");
 
@@ -681,7 +718,8 @@ impl Inner {
                                 if live {
                                     inner.note_live_start(generation, &line, true);
                                 } else if !line.trim().is_empty() {
-                                    *inner.last_error.lock().unwrap() = line;
+                                    let mut last_error = inner.last_error.lock().unwrap();
+                                    if inner.current(generation) { *last_error = line; }
                                 }
                             }
                         });
@@ -693,7 +731,10 @@ impl Inner {
                         });
                     }
                 }
-                Err(error) => self.emit(Event::Error(format!("could not run ffmpeg: {error}"))),
+                Err(error) => {
+                    self.emit(Event::Error { generation, message: format!("could not run ffmpeg: {error}") });
+                    return;
+                }
             }
         }
 
@@ -726,28 +767,31 @@ impl Inner {
             }
             command.args(["-ac", "2", "-ar", &SAMPLE_RATE.to_string()]);
             command.args(["-f", "s16le", "pipe:1"]);
-            if let Ok(mut child) = command.spawn() {
-                let stdout = child.stdout.take();
-                if let Some(stderr) = child.stderr.take() {
-                    let inner = self.clone();
-                    std::thread::spawn(move || {
-                        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                            inner.note_live_start(generation, &line, false);
-                        }
-                    });
+            match command.spawn() {
+                Ok(mut child) => {
+                    let stdout = child.stdout.take();
+                    if let Some(stderr) = child.stderr.take() {
+                        let inner = self.clone();
+                        std::thread::spawn(move || {
+                            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                                inner.note_live_start(generation, &line, false);
+                            }
+                        });
+                    }
+                    if !self.register_child(generation, child) {
+                        return;
+                    }
+                    if let Some(stdout) = stdout {
+                        let inner = self.clone();
+                        let has_video = info.has_video;
+                        // Silence is in output time, so it scales with the tempo.
+                        let frames = (lead_silence / config.speed * SAMPLE_RATE as f64) as usize;
+                        std::thread::spawn(move || {
+                            inner.audio_loop(generation, stdout, has_video, frames)
+                        });
+                    }
                 }
-                if !self.register_child(generation, child) {
-                    return;
-                }
-                if let Some(stdout) = stdout {
-                    let inner = self.clone();
-                    let has_video = info.has_video;
-                    // Silence is in output time, so it scales with the tempo.
-                    let frames = (lead_silence / config.speed * SAMPLE_RATE as f64) as usize;
-                    std::thread::spawn(move || {
-                        inner.audio_loop(generation, stdout, has_video, frames)
-                    });
-                }
+                Err(_) => self.audio_unavailable(generation, info.has_video),
             }
         }
 
@@ -986,11 +1030,24 @@ impl Inner {
         if !self.current(generation) {
             return;
         }
-        if has_video || !decoded_any {
+        if !decoded_any {
+            self.audio_unavailable(generation, has_video);
+        } else if has_video {
             self.fall_back_to_wall_clock(generation);
         } else {
             let position = self.now();
             self.finished(generation, position);
+        }
+    }
+
+    fn audio_unavailable(&self, generation: u64, has_video: bool) {
+        if !self.current(generation) { return; }
+        if has_video {
+            // An empty/failed audio decoder must not leave the picture
+            // waiting forever on a sample clock that can never advance.
+            self.fall_back_to_wall_clock(generation);
+        } else {
+            self.emit(Event::Error { generation, message: "The audio stream could not be decoded.".into() });
         }
     }
 
@@ -1155,18 +1212,18 @@ impl Inner {
             .as_ref()
             .map_or((0.0, false), |i| (i.duration, i.live));
         if !live && (duration <= 0.0 || position >= duration - 5.0) {
-            self.emit(Event::Ended);
+            self.emit(Event::Ended { generation });
             return;
         }
         // Dropped connection mid-stream: reconnect, unless it keeps failing.
         let recently = self.last_restart.lock().unwrap().elapsed() < Duration::from_secs(8);
         if recently {
             let reason = self.last_error.lock().unwrap().clone();
-            self.emit(Event::Error(if reason.is_empty() {
+            self.emit(Event::Error { generation, message: if reason.is_empty() {
                 "The stream stopped unexpectedly.".into()
             } else {
                 format!("Playback failed: {reason}")
-            }));
+            }});
         } else {
             // A reconnect from an old decoder must not supersede a seek.
             if self.generation.compare_exchange(
@@ -1280,6 +1337,57 @@ mod seek_tests {
         assert_eq!(config.speed, 1.5);
         assert_eq!(config.audio_track, 1);
         assert_eq!(config.audio_delay, 0.25);
+    }
+
+    #[test]
+    fn changing_settings_during_a_seek_keeps_the_requested_destination() {
+        let engine = engine(String::new());
+        *engine.inner.info.lock().unwrap() = Some(MediaInfo { duration: 120.0, ..Default::default() });
+        let _restart = engine.inner.restart_lock.lock().unwrap();
+        engine.seek(80.0);
+        engine.set_speed(1.5);
+        engine.set_audio_delay(0.2);
+        engine.set_audio_track(1);
+        assert_eq!(engine.inner.pending_seek.lock().unwrap().as_ref().map(|(_, position)| *position), Some(80.0));
+        assert_eq!(engine.inner.config.lock().unwrap().speed, 1.5);
+        engine.stop();
+    }
+
+    #[test]
+    fn setting_an_already_playing_live_stream_to_play_does_not_restart_it() {
+        let engine = engine(String::new());
+        *engine.inner.info.lock().unwrap() = Some(MediaInfo { live: true, ..Default::default() });
+        let _restart = engine.inner.restart_lock.lock().unwrap();
+        engine.set_paused(false);
+        engine.set_paused(false);
+        assert_eq!(engine.inner.generation.load(Ordering::Acquire), 0);
+        engine.set_paused(true);
+        engine.set_paused(false);
+        let generation = engine.inner.generation.load(Ordering::Acquire);
+        assert_eq!(generation, 1);
+        engine.set_paused(false);
+        assert_eq!(engine.inner.generation.load(Ordering::Acquire), generation);
+        engine.stop();
+    }
+
+    #[test]
+    fn failed_audio_does_not_freeze_the_picture_or_mark_audio_only_as_finished() {
+        let mut engine = engine(String::new());
+        let (tx, rx) = std::sync::mpsc::channel();
+        Arc::get_mut(&mut engine.inner).unwrap().emit = Box::new(move |event| { let _ = tx.send(event); });
+        {
+            let mut clock = engine.inner.clock.lock().unwrap();
+            clock.audio = true;
+            clock.base = 30.0;
+        }
+        engine.inner.consumed_frames.store(SAMPLE_RATE as u64, Ordering::Release);
+        engine.inner.started.store(true, Ordering::Release);
+        engine.inner.audio_unavailable(0, true);
+        assert!(!engine.inner.clock.lock().unwrap().audio);
+        assert!(engine.position() >= 31.0);
+        assert!(rx.try_recv().is_err());
+        engine.inner.audio_unavailable(0, false);
+        assert!(matches!(rx.try_recv().unwrap(), Event::Error { generation: 0, .. }));
     }
 
     #[test]
