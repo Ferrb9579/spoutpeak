@@ -103,6 +103,7 @@ struct Config {
     audio_track: usize,
     subtitle_track: Option<usize>,
     subtitle_revision: u64,
+    fast_subtitles: bool,
     speed: f64,
     /// Seconds the sound is held back against the picture (negative plays
     /// it earlier).
@@ -153,6 +154,8 @@ struct Inner {
     /// The whole-file subtitle reader, kept apart from `children` so seeks
     /// do not restart it.
     sub_child: Mutex<Option<Child>>,
+    sub_fast: AtomicBool,
+    sub_fast_revision: AtomicU64,
 }
 
 pub struct Engine {
@@ -286,13 +289,27 @@ impl Engine {
 
     /// Selects an embedded subtitle track to extract, or none.
     pub fn set_subtitle_track(&self, index: Option<usize>, revision: u64) {
-        {
+        let fast = {
             let mut config = self.inner.config.lock().unwrap();
             config.subtitle_track = index;
             config.subtitle_revision = revision;
-        }
+            config.fast_subtitles
+        };
         self.seek(self.restart_position());
-        self.inner.queue_full_subtitles(false);
+        self.inner.queue_full_subtitles(fast);
+    }
+
+    pub fn set_subtitle_loading(&self, fast: bool) {
+        let selected = {
+            let mut config = self.inner.config.lock().unwrap();
+            if config.fast_subtitles == fast { return; }
+            config.fast_subtitles = fast;
+            config.subtitle_track.is_some()
+        };
+        if selected {
+            // Changing this preference replaces only the subtitle scan.
+            self.inner.queue_full_subtitles(fast);
+        }
     }
 
     /// Reads the whole subtitle track again, as fast as the source allows.
@@ -349,6 +366,7 @@ impl Inner {
                 audio_track: 0,
                 subtitle_track: None,
                 subtitle_revision: 0,
+                fast_subtitles: false,
                 speed: 1.0,
                 audio_delay: 0.0,
             }),
@@ -358,6 +376,8 @@ impl Inner {
             live_audio_start: Mutex::new(None),
             sub_pass: AtomicU64::new(0),
             sub_child: Mutex::new(None),
+            sub_fast: AtomicBool::new(false),
+            sub_fast_revision: AtomicU64::new(0),
         }
     }
 
@@ -822,7 +842,7 @@ impl Inner {
                     "-an",
                     "-dn",
                 ])
-                .args(["-f", "srt", "pipe:1"]);
+                .args(["-flush_packets", "1", "-f", "srt", "pipe:1"]);
             // Start once the picture is up, so the first frames get every
             // peer.
             let inner = self.clone();
@@ -1084,7 +1104,7 @@ impl Inner {
                     batch.push(cue);
                 }
                 block.clear();
-                if batch.len() >= 40 || last_flush.elapsed() > Duration::from_millis(400) {
+                if !report || until == 0.0 || batch.len() >= 40 || last_flush.elapsed() > Duration::from_millis(400) {
                     flush(&mut batch, &mut until);
                     last_flush = Instant::now();
                 }
@@ -1133,6 +1153,12 @@ impl Inner {
         // A delayed worker can never take or replace a newer pass's child.
         let (pass, previous) = {
             let mut slot = self.sub_child.lock().unwrap();
+            if fast && self.sub_fast.load(Ordering::Acquire)
+                && self.sub_fast_revision.load(Ordering::Acquire) == revision {
+                return;
+            }
+            self.sub_fast.store(fast, Ordering::Release);
+            self.sub_fast_revision.store(revision, Ordering::Release);
             (self.sub_pass.fetch_add(1, Ordering::AcqRel) + 1, slot.take())
         };
         drop(config);
@@ -1143,7 +1169,11 @@ impl Inner {
                 let _ = previous.wait();
             }
             if let Some(track) = track {
-                inner.full_subtitles(pass, track, revision, fast);
+                inner.clone().full_subtitles(pass, track, revision, fast);
+            }
+            let _slot = inner.sub_child.lock().unwrap();
+            if inner.subtitle_pass_current(pass) {
+                inner.sub_fast.store(false, Ordering::Release);
             }
         });
     }
@@ -1170,15 +1200,25 @@ impl Inner {
         }
         self.emit(Event::SubtitleProgress { revision, until: 0.0, done: false });
         let mut command = self.ffmpeg(&ffmpeg);
-        // Throttled, a torrent keeps bandwidth for playback; at 4x a
-        // two-hour film is read in half an hour.
-        if !fast {
+        let cached = crate::streaming::completed_stream_file(&self.request.url);
+        let network = cached.is_none() && (self.request.url.starts_with("http://") || self.request.url.starts_with("https://"));
+        // Disk reads need no playback-rate limit. Uncached network reads
+        // stay throttled until the user opens Sync or asks to load all.
+        if !fast && network {
             command.args(["-readrate", "4", "-readrate_initial_burst", "60"]);
         }
-        self.input_args(&mut command);
+        if cached.is_none() {
+            self.input_args(&mut command);
+            if self.request.url.starts_with("http://127.0.0.1:") {
+                let mut headers: String = self.request.headers.iter().map(|(key, value)| format!("{key}: {value}\r\n")).collect();
+                headers.push_str("X-Spoutpeak-Subtitles: 1\r\n");
+                command.args(["-headers", &headers]);
+            }
+        }
         command
-            .arg("-i")
-            .arg(&self.request.url)
+            .arg("-i");
+        if let Some(path) = cached { command.arg(path); } else { command.arg(&self.request.url); }
+        command
             .args([
                 "-map",
                 &info
@@ -1189,7 +1229,7 @@ impl Inner {
                 "-an",
                 "-dn",
             ])
-            .args(["-f", "srt", "pipe:1"]);
+            .args(["-flush_packets", "1", "-f", "srt", "pipe:1"]);
         let Ok(mut child) = command.spawn() else { return };
         let stdout = child.stdout.take();
         if !self.register_subtitle_child(pass, child) {
@@ -1470,11 +1510,41 @@ mod seek_tests {
         engine.load_all_subtitles();
         let third = engine.inner.sub_pass.load(Ordering::Acquire);
         assert!(third > second);
+        engine.load_all_subtitles();
+        assert_eq!(engine.inner.sub_pass.load(Ordering::Acquire), third, "a repeated fast-load request restarted the scan");
         engine.set_subtitle_track(None, 12);
         assert!(!engine.inner.subtitle_pass_current(third));
         let config = engine.inner.config.lock().unwrap();
         assert_eq!(config.subtitle_track, None);
         assert_eq!(config.subtitle_revision, 12);
+    }
+
+    #[test]
+    fn fast_subtitle_setting_applies_to_each_track_without_restarting_video() {
+        let engine = engine(String::new());
+        engine.set_subtitle_loading(true);
+        assert!(engine.inner.config.lock().unwrap().fast_subtitles);
+        assert_eq!(engine.inner.sub_pass.load(Ordering::Acquire), 0, "no track is selected yet");
+        *engine.inner.info.lock().unwrap() = Some(MediaInfo { has_video: true, ..Default::default() });
+        let _restart = engine.inner.restart_lock.lock().unwrap();
+        engine.set_subtitle_track(Some(0), 10);
+        let first = engine.inner.sub_pass.load(Ordering::Acquire);
+        assert!(engine.inner.sub_fast.load(Ordering::Acquire));
+        engine.set_subtitle_track(Some(1), 11);
+        let second = engine.inner.sub_pass.load(Ordering::Acquire);
+        assert!(second > first, "fast loading must not suppress a different track's request");
+        assert_eq!(engine.inner.sub_fast_revision.load(Ordering::Acquire), 11);
+        let generation = engine.inner.generation.load(Ordering::Acquire);
+        engine.load_all_subtitles();
+        assert_eq!(engine.inner.sub_pass.load(Ordering::Acquire), second, "same fast request should be reused");
+        engine.set_subtitle_loading(false);
+        assert!(!engine.inner.sub_fast.load(Ordering::Acquire));
+        assert!(engine.inner.sub_pass.load(Ordering::Acquire) > second);
+        assert_eq!(engine.inner.generation.load(Ordering::Acquire), generation, "loading preferences must not restart A/V");
+        engine.set_subtitle_loading(true);
+        assert!(engine.inner.sub_fast.load(Ordering::Acquire));
+        assert_eq!(engine.inner.generation.load(Ordering::Acquire), generation);
+        engine.stop();
     }
 
     #[test]
@@ -1554,9 +1624,82 @@ mod seek_tests {
                 _ => {}
             }
         }
+        // Near-playhead and whole-file readers overlap; the UI merges
+        // identical cues, so both are allowed to publish the same line.
+        latest.sort_by(|a, b| a.start.total_cmp(&b.start));
+        latest.dedup_by(|a, b| a.start == b.start && a.text == b.text);
         assert_eq!(latest.len(), 1);
         assert_eq!(latest[0].text, "Second track");
         engine.stop();
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg on PATH; checks local subtitle scan speed and pipe flushing"]
+    fn local_subtitles_load_quickly_and_current_cues_flush_immediately() {
+        let (ffmpeg, _) = tools().expect("FFmpeg and FFprobe on PATH");
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/subtitle-loading-test");
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("captions.srt");
+        std::fs::write(&source,
+            "1\n00:00:00,000 --> 00:00:01,000\nOpening line\n\n2\n00:30:00,000 --> 00:30:02,000\nLater line\n").unwrap();
+        let media = directory.join("captions.mks");
+        let mut mux = Command::new(&ffmpeg);
+        mux.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"]).arg(&source)
+            .args(["-c:s", "srt", "-f", "matroska"]).arg(&media);
+        hide_console(&mut mux);
+        assert!(mux.status().unwrap().success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut engine = engine(media.to_string_lossy().into_owned());
+        Arc::get_mut(&mut engine.inner).unwrap().emit = Box::new(move |event| { let _ = tx.send(event); });
+        *engine.inner.info.lock().unwrap() = Some(MediaInfo {
+            duration: 1802.0, subtitles: vec![Track {
+                language: "eng".into(), title: String::new(), codec: "srt".into(), stream_index: 0,
+            }], ..Default::default()
+        });
+        engine.inner.started.store(true, Ordering::Release);
+        // This is the normal background request, without pressing Load all.
+        // At the old 4x rate, a 30-minute timestamp would take minutes.
+        {
+            let mut config = engine.inner.config.lock().unwrap();
+            config.subtitle_track = Some(0);
+            config.subtitle_revision = 1;
+        }
+        engine.inner.queue_full_subtitles(false);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut lines = Vec::new();
+        loop {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).expect("local subtitle scan was rate limited") {
+                Event::Cues { cues, .. } => lines.extend(cues),
+                Event::SubtitleProgress { done: true, .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].start, 1800.0);
+
+        // The near-playhead reader must publish its first cue before the
+        // next cue arrives, rather than holding it in a 40-line batch.
+        while rx.try_recv().is_ok() {}
+        let mut command = Command::new(&ffmpeg);
+        command.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-readrate", "1", "-i"])
+            .arg(&media).args(["-flush_packets", "1", "-f", "srt", "pipe:1"])
+            .stdout(Stdio::piped()).stderr(Stdio::null());
+        hide_console(&mut command);
+        let mut child = command.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let generation = engine.inner.generation.load(Ordering::Acquire);
+        assert!(engine.inner.register_child(generation, child));
+        let inner = engine.inner.clone();
+        let reader = std::thread::spawn(move || {
+            let keep = |inner: &Inner| inner.current(generation);
+            inner.subtitle_loop(&keep, stdout, 0.0, false, 2);
+        });
+        match rx.recv_timeout(Duration::from_secs(3)).expect("current subtitle was buffered awaiting another cue") {
+            Event::Cues { revision: 2, cues, .. } => assert_eq!(cues[0].text, "Opening line"),
+            _ => panic!("expected the first current subtitle cue"),
+        }
+        engine.stop();
+        reader.join().unwrap();
     }
 
     #[test]

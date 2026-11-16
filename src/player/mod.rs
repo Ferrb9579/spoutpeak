@@ -283,6 +283,10 @@ impl PlayerUi {
         self.engine.borrow().as_ref().map(call)
     }
 
+    pub(crate) fn set_subtitle_loading(&self, fast: bool) {
+        self.with_engine(|engine| engine.set_subtitle_loading(fast));
+    }
+
     /// The engine's own clock, fresher than the position signal.
     pub(crate) fn precise_position(&self) -> Option<f64> {
         self.with_engine(|e| e.position())
@@ -664,6 +668,7 @@ impl App {
             },
             move |event| ui(move |app| app.player_event(session_id, event)),
         );
+        engine.set_subtitle_loading(settings.fast_subtitles);
         if (settings.default_speed - 1.0).abs() > 0.01 {
             engine.set_speed(settings.default_speed);
         }
@@ -1378,6 +1383,9 @@ impl App {
     /// Reads the rest of the embedded subtitle track without the read-rate
     /// cap (uses more bandwidth on torrents).
     pub fn load_all_subtitles(&self) {
+        if !self.player.state.peek(|s| matches!(s.sub_choice, SubChoice::Embedded(_)) && !s.sub_loaded) {
+            return;
+        }
         self.player.with_engine(Engine::load_all_subtitles);
         self.player.state.write(|s| s.sub_loaded = false);
     }
@@ -1388,6 +1396,7 @@ impl App {
     /// Opens the line list, scrolled to where the subtitles currently are.
     pub fn open_subtitle_sync(&self) {
         self.player.state.write(|s| s.menu = Menu::Sync);
+        self.load_all_subtitles();
         self.scroll_subtitle_sync_to_current();
     }
 

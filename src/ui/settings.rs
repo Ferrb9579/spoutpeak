@@ -382,6 +382,16 @@ fn playback_card(app: &App, settings: &Settings) -> Widget {
         language_choices(app, &settings.subtitle_lang, true, |s, v| s.subtitle_lang = v),
     ));
     children.push(setting_row(
+        "Subtitle loading",
+        "Fast reads all embedded lines as soon as possible. It can use more bandwidth and may read most of the video.",
+        choices(
+            app,
+            vec![("Balanced".to_owned(), false), ("Fast".to_owned(), true)],
+            settings.fast_subtitles,
+            |s, v| s.fast_subtitles = v,
+        ),
+    ));
+    children.push(setting_row(
         "Audio language",
         "Preferred track when a file has several",
         language_choices(app, &settings.audio_lang, false, |s, v| s.audio_lang = v),

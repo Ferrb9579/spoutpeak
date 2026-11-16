@@ -92,6 +92,8 @@ pub struct Settings {
     pub player: PlayerKind,
     pub custom_player_path: String,
     pub subtitle_lang: String,
+    /// Start a full embedded subtitle scan without a playback-rate cap.
+    pub fast_subtitles: bool,
     pub audio_lang: String,
     pub subtitle_size: f32,
     pub subtitle_style: SubtitleStyle,
@@ -131,6 +133,7 @@ impl Default for Settings {
             player: PlayerKind::Builtin,
             custom_player_path: String::new(),
             subtitle_lang: "eng".to_owned(),
+            fast_subtitles: false,
             audio_lang: "eng".to_owned(),
             subtitle_size: 28.0,
             subtitle_style: SubtitleStyle::default(),
@@ -151,6 +154,21 @@ impl Default for Settings {
             recent_searches: Vec::new(),
             watch_name: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod subtitle_loading_tests {
+    use super::*;
+
+    #[test]
+    fn subtitle_loading_setting_preserves_old_profiles_and_round_trips() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.fast_subtitles);
+        settings.fast_subtitles = true;
+        let saved = serde_json::to_vec(&settings).unwrap();
+        let restored: Settings = serde_json::from_slice(&saved).unwrap();
+        assert!(restored.fast_subtitles);
     }
 }
 

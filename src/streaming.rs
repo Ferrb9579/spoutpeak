@@ -286,6 +286,27 @@ pub fn cache_folder() -> PathBuf {
     crate::util::cache_dir().join("torrents")
 }
 
+/// A complete cached file can be scanned without another HTTP reader.
+/// Check every verified piece: sparse torrent files have their final length
+/// even while most of their contents are still missing.
+pub fn completed_stream_file(url: &str) -> Option<PathBuf> {
+    let engine = ENGINE.get()?;
+    let path = url.strip_prefix(&format!("{}/", engine.base))?.split('?').next()?;
+    let (hash, index) = path.split_once('/')?;
+    let index = index.parse::<usize>().ok()?;
+    let handle = engine.lookup(hash)?;
+    let metadata = handle.metadata.load_full()?;
+    let file = metadata.file_infos.get(index)?;
+    if file.len == 0 { return None; }
+    let api = librqbit::Api::new(engine.session.clone(), None);
+    let (haves, total) = api.api_dump_haves(TorrentIdOrHash::Id(handle.id())).ok()?;
+    if !file.piece_range.clone().all(|piece| piece < total && haves.get(piece as usize).is_some_and(|have| *have)) {
+        return None;
+    }
+    let path = handle.output_folder().join(&file.relative_filename);
+    (std::fs::metadata(&path).ok()?.len() == file.len).then_some(path)
+}
+
 /// Deletes every cached torrent that is not being streamed or downloaded
 /// right now, and returns the disk space freed.
 pub async fn clear_cache() -> Result<u64, String> {
@@ -1224,8 +1245,9 @@ async fn serve_file(
     };
     // A player is waiting on this response: its pieces come before any
     // read-ahead.
-    let preview = headers.get("x-spoutpeak-preview").is_some_and(|value| value == "1");
-    reader.set_priority(if preview { StreamPriority::Background } else { StreamPriority::Playback });
+    let background = headers.get("x-spoutpeak-preview").is_some_and(|value| value == "1")
+        || headers.get("x-spoutpeak-subtitles").is_some_and(|value| value == "1");
+    reader.set_priority(if background { StreamPriority::Background } else { StreamPriority::Playback });
     let len = reader.len();
 
     let mut out = HeaderMap::new();
@@ -1264,7 +1286,7 @@ async fn serve_file(
         inner: body,
         active,
         last_used,
-        readahead: if preview { None } else { readahead },
+        readahead: if background { None } else { readahead },
         id: next_reader_id(),
         position: start,
         opened: Instant::now(),

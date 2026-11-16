@@ -1508,12 +1508,17 @@ impl App {
     }
 
     pub fn update_settings(&self, update: impl FnOnce(&mut store::Settings)) {
-        let (dir, torrent) = self.profile.write(|p| {
+        let (dir, torrent, subtitle_loading) = self.profile.write(|p| {
+            let previous = p.settings.fast_subtitles;
             update(&mut p.settings);
-            (p.settings.download_dir.clone(), p.settings.torrent.clone())
+            (p.settings.download_dir.clone(), p.settings.torrent.clone(),
+                (previous != p.settings.fast_subtitles).then_some(p.settings.fast_subtitles))
         });
         crate::downloads::set_custom_folder(&dir);
         crate::streaming::configure(&torrent);
+        if let Some(fast) = subtitle_loading {
+            self.player.set_subtitle_loading(fast);
+        }
         self.save_profile();
     }
 }
