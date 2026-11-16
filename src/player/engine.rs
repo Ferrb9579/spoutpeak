@@ -413,6 +413,12 @@ impl Inner {
     }
 
     fn queue_restart(self: &Arc<Self>, position: f64) {
+        // Opening will apply the latest config after probing. Invalidate a
+        // decoder only once media info exists; otherwise an initial speed
+        // setting would cancel the probe and the first playback generation.
+        if self.info.lock().unwrap().is_none() {
+            return;
+        }
         // Assign the generation before spawning so request order wins over
         // thread scheduling. Waiting restarts skip work once superseded.
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -1218,6 +1224,20 @@ mod seek_tests {
             url, headers: Vec::new(), start: 0.0, max_height: 90,
             hardware_decoding: false, volume: 1.0, preferred_audio: String::new(),
         }, |_| {})) }
+    }
+
+    #[test]
+    fn settings_before_probe_do_not_cancel_opening() {
+        let engine = engine(String::new());
+        engine.set_speed(1.5);
+        engine.set_audio_track(1);
+        engine.set_audio_delay(0.25);
+        engine.seek(30.0);
+        assert!(engine.inner.current(0), "initial probe must remain current");
+        let config = engine.inner.config.lock().unwrap();
+        assert_eq!(config.speed, 1.5);
+        assert_eq!(config.audio_track, 1);
+        assert_eq!(config.audio_delay, 0.25);
     }
 
     #[test]
