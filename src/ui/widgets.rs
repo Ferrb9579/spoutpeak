@@ -249,7 +249,6 @@ pub fn smooth(controller: &ScrollController, view: impl Into<Widget>) -> Widget 
     motion::wheel(controller, WheelAxis::Vertical, view)
 }
 
-/// A status line for loading / empty / failed states.
 /// A spinner over a caption, centred in the space it is given: for a page
 /// or panel whose content is still on its way.
 pub fn loading_page(message: impl Into<String>) -> Widget {
@@ -271,10 +270,18 @@ pub fn loading_page(message: impl Into<String>) -> Widget {
 }
 
 /// A small spinner before a caption, for a part of a page still loading.
+/// The caption is lifted a little: its line box has more room below the
+/// letters than above, which left it looking lower than the spinner.
 pub fn loading_line(message: impl Into<String>) -> Widget {
-    row(vec![spinner(16.0), hgap(10.0), text(message, 13.0, FontWeight::W400, MUTED).into()]).into()
+    row(vec![
+        spinner(16.0),
+        hgap(10.0),
+        Transform::translation(Offset::new(0.0, -1.0), text(message, 13.0, FontWeight::W400, MUTED)).into(),
+    ])
+    .into()
 }
 
+/// A status line for loading / empty / failed states.
 pub fn notice(message: impl Into<String>, color: Color) -> Widget {
     Container::new()
         .padding(EdgeInsets::symmetric(0.0, 18.0))

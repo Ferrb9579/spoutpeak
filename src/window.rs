@@ -91,3 +91,16 @@ pub fn configure_corners() {
         STARTED.store(false, Ordering::Relaxed);
     }
 }
+
+/// Hides the mouse pointer until it next moves (the next move sets the
+/// pointer shape again). For the player's idle fullscreen.
+#[cfg(windows)]
+pub fn hide_cursor_until_moved() {
+    // SAFETY: SetCursor with no cursor only changes this thread's pointer shape.
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetCursor(None);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn hide_cursor_until_moved() {}

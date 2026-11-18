@@ -101,11 +101,38 @@ pub async fn load() -> Option<Vec<Entry>> {
     fetched.or_else(|| cached.as_deref().and_then(parse))
 }
 
-/// Up to `limit` titles matching `query`: every typed word must start a
-/// word of the name. The whole name, then names holding the typed words
-/// as whole words, then names starting with them rank first; ties go to
-/// the most popular.
-pub fn suggest(entries: &[Entry], query: &str, limit: usize) -> Vec<Suggestion> {
+/// How well a name (as `words` / `joined`) matches the typed words, higher
+/// is better; `None` unless every typed word starts a word of the name.
+/// The whole name, then names holding the typed words as whole words, then
+/// names starting with them.
+fn rank(words: &[String], joined: &str, typed: &[String], phrase: &str) -> Option<u8> {
+    if !typed.iter().all(|t| words.iter().any(|w| w.starts_with(t.as_str()))) {
+        return None;
+    }
+    Some(if joined == phrase {
+        3
+    } else if typed.iter().all(|t| words.iter().any(|w| w == t)) {
+        2
+    } else if joined.starts_with(phrase) {
+        1
+    } else {
+        0
+    })
+}
+
+/// [`rank`] for any text, such as a past search.
+pub fn match_rank(name: &str, query: &str) -> Option<u8> {
+    let typed = words(query);
+    let words = words(name);
+    if typed.is_empty() || words.is_empty() {
+        return None;
+    }
+    rank(&words, &words.join(" "), &typed, &typed.join(" "))
+}
+
+/// The titles as `(rank, suggestion)`, up to `limit`, best first; ties
+/// go to the most popular. See [`rank`].
+pub fn suggest(entries: &[Entry], query: &str, limit: usize) -> Vec<(u8, Suggestion)> {
     let typed = words(query);
     if typed.is_empty() {
         return Vec::new();
@@ -113,20 +140,7 @@ pub fn suggest(entries: &[Entry], query: &str, limit: usize) -> Vec<Suggestion> 
     let phrase = typed.join(" ");
     let mut found: Vec<(u8, u64, &Entry)> = entries
         .iter()
-        .filter(|e| typed.iter().all(|t| e.words.iter().any(|w| w.starts_with(t.as_str()))))
-        .map(|e| {
-            let whole_words = typed.iter().all(|t| e.words.iter().any(|w| w == t));
-            let rank = if e.joined == phrase {
-                3
-            } else if whole_words {
-                2
-            } else if e.joined.starts_with(&phrase) {
-                1
-            } else {
-                0
-            };
-            (rank, e.popularity, e)
-        })
+        .filter_map(|e| rank(&e.words, &e.joined, &typed, &phrase).map(|r| (r, e.popularity, e)))
         .collect();
     found.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
     let mut seen = std::collections::HashSet::new();
@@ -134,8 +148,57 @@ pub fn suggest(entries: &[Entry], query: &str, limit: usize) -> Vec<Suggestion> 
         .into_iter()
         .filter(|(_, _, e)| seen.insert(e.joined.clone()))
         .take(limit)
-        .map(|(_, _, e)| e.suggestion.clone())
+        .map(|(rank, _, e)| (rank, e.suggestion.clone()))
         .collect()
+}
+
+/// One line of the search dropdown.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuItem {
+    pub name: String,
+    /// "Movie  ·  2026" for a suggestion.
+    pub detail: Option<String>,
+    pub from_history: bool,
+}
+
+fn kind_label(kind: &str) -> &str {
+    match kind {
+        "movie" => "Movie",
+        "series" => "Series",
+        other => other,
+    }
+}
+
+/// Past searches and suggestions in one list, best match first. With
+/// nothing typed: the history. A past search ranks before a suggestion
+/// matching as well, and a suggestion equal to a past search is dropped.
+pub fn menu(history: &[String], suggestions: &[(u8, Suggestion)], query: &str, limit: usize) -> Vec<MenuItem> {
+    if words(query).is_empty() {
+        return history
+            .iter()
+            .take(limit)
+            .map(|name| MenuItem { name: name.clone(), detail: None, from_history: true })
+            .collect();
+    }
+    let mut ranked: Vec<(u8, bool, usize, MenuItem)> = Vec::new();
+    for (index, name) in history.iter().enumerate() {
+        if let Some(rank) = match_rank(name, query) {
+            ranked.push((rank, true, index, MenuItem { name: name.clone(), detail: None, from_history: true }));
+        }
+    }
+    for (index, (rank, suggestion)) in suggestions.iter().enumerate() {
+        if history.iter().any(|h| words(h) == words(&suggestion.name)) {
+            continue;
+        }
+        let kind = kind_label(&suggestion.kind);
+        let detail = match &suggestion.year {
+            Some(year) => format!("{kind}  ·  {year}"),
+            None => kind.to_owned(),
+        };
+        ranked.push((*rank, false, index, MenuItem { name: suggestion.name.clone(), detail: Some(detail), from_history: false }));
+    }
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    ranked.into_iter().take(limit).map(|(_, _, _, item)| item).collect()
 }
 
 #[cfg(test)]
@@ -157,8 +220,31 @@ mod tests {
         .unwrap()
     }
 
-    fn names(found: Vec<Suggestion>) -> Vec<String> {
-        found.into_iter().map(|s| s.name).collect()
+    fn names(found: Vec<(u8, Suggestion)>) -> Vec<String> {
+        found.into_iter().map(|(_, s)| s.name).collect()
+    }
+
+    #[test]
+    fn menu_mixes_history_and_suggestions_by_match() {
+        let history: Vec<String> = ["The Odyssey", "attack on titan", "Dune part two"].map(String::from).to_vec();
+        let found = suggest(&feed(), "d", 10);
+        let menu = menu(&history, &found, "d", 10);
+        let names: Vec<(&str, bool)> = menu.iter().map(|m| (m.name.as_str(), m.from_history)).collect();
+        // Whole-word "d" titles first; then names starting with "d", the past
+        // search before the suggestion; "attack on titan" does not match.
+        assert_eq!(names, [
+            ("Initial D", false), ("Vampire Hunter D: Bloodlust", false), ("Mr. D", false),
+            ("Dune part two", true), ("Dune", false), ("The Walking Dead", false),
+        ]);
+        assert_eq!(menu[0].detail.as_deref(), Some("Series  ·  1998-2014"));
+        // Nothing typed: the history as it is.
+        assert_eq!(super::menu(&history, &[], " ", 2).iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            ["The Odyssey", "attack on titan"]);
+        // A suggestion already in the history shows once, as history.
+        let history = vec!["dune".to_owned()];
+        let menu = super::menu(&history, &suggest(&feed(), "dune", 5), "dune", 5);
+        assert_eq!(menu.len(), 1);
+        assert!(menu[0].from_history);
     }
 
     #[test]

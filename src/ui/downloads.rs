@@ -116,7 +116,10 @@ fn row_actions(app: &App, item: &Download) -> Vec<Widget> {
     let mut actions = Vec::new();
     match item.status {
         DownloadStatus::Preparing | DownloadStatus::Downloading => {
-            actions.push(action(icons::play(), "Watch now", Tone::Neutral, call(|app, id| app.watch_download(id))));
+            // Plays from the source while the download keeps going (a torrent
+            // shares its pieces between the two).
+            actions.push(super::tooltip::tooltip("Play now, while it keeps downloading",
+                small_icon_button(icons::play(), Some("Play"), Tone::Primary, call(|app, id| app.watch_download(id)))));
             actions.push(hgap(6.0));
             actions.push(small_icon_button(icons::pause(), Some("Pause"), Tone::Neutral, call(|app, id| app.pause_download(id))));
             actions.push(hgap(6.0));

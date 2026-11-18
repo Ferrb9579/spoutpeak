@@ -108,6 +108,16 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
             })
         }));
     }
+    // The page shows the art only blurred; this opens it sharp.
+    if let Some(art) = meta.background.clone().or_else(|| meta.poster.clone()).filter(|u| u.starts_with("http")) {
+        actions.push(hgap(10.0));
+        let app = app.clone();
+        actions.push(super::tooltip::tooltip(
+            "View artwork",
+            Widget::from(small_icon_button(icons::maximize(), None, Tone::Glass, move || { app.artwork_view.set(Some(art.clone())); }))
+                .accessibility_label("View artwork"),
+        ));
+    }
     if meta.id().starts_with("tt") {
         actions.push(hgap(10.0));
         let url = format!("https://www.imdb.com/title/{}/", meta.id());
@@ -423,11 +433,19 @@ fn streams_pane(app: &App, groups: &[StreamGroup], video: &Video, is_series: boo
             children.push(gap(8.0));
         }
     }
+    let asking = format!("Asking {loading} addon{}…", if loading == 1 { "" } else { "s" });
+    if loading > 0 && total == 0 {
+        // Nothing to list yet: the spinner takes the middle of the panel.
+        return Padding::all(
+            20.0,
+            vcol(vec![col(children).into(), Expanded::new(loading_page(asking)).into()])
+                .cross_axis_alignment(CrossAxisAlignment::Stretch),
+        )
+        .into();
+    }
     if loading > 0 {
-        children.push(loading_line(format!(
-            "Asking {loading} addon{}…",
-            if loading == 1 { "" } else { "s" }
-        )));
+        children.push(gap(8.0));
+        children.push(SizedBox::new().width(PANEL_INNER).child(Align::new(Alignment::CENTER, loading_line(asking))).into());
     } else if total == 0 {
         children.push(muted(if groups.is_empty() {
             "No installed addon provides streams for this. Install a stream addon under Addons."

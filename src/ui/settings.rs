@@ -143,7 +143,8 @@ fn board_card(app: &App, settings: &Settings) -> Widget {
             ),
         ));
         children.push(gap(6.0));
-        children.push(super::spotlight::preview(app));
+        // Lined up with the controls column of the rows around it.
+        children.push(Padding::new(EdgeInsets::only(270.0, 0.0, 0.0, 0.0), super::spotlight::preview(app)).into());
         children.push(gap(6.0));
         children.push(setting_row(
             "Show their rows on the Board",
@@ -377,16 +378,12 @@ fn ai_card(app: &App, settings: &Settings) -> Widget {
     let model = app.ai.state.read(Clone::clone);
     let mut children: Vec<Widget> = vec![
         titled(icons::type_(), "Local AI"), gap(8.0),
-        text("LFM3-Omni-2B", 16.0, FontWeight::W600, TEXT).into(), gap(4.0),
-        muted("Optional local model. First tool: subtitle matching from audio. Runs on your computer; media is not uploaded."),
-        setting_row("Enable local AI", "Allow optional on-device AI tools", toggle(app,
+        muted("Keeps subtitles in time with the audio. Runs on this PC; nothing is uploaded."),
+        gap(4.0),
+        setting_row("Enable local AI", "Allow the on-device tools", toggle(app,
             settings.local_ai_enabled, |s, v| s.local_ai_enabled = v)),
-        setting_row("Automatic subtitle sync", "Align to audio as you watch. Works with same-language subtitles; uncertain sections keep their timing.",
+        setting_row("Automatic subtitle sync", "Aligns same-language subtitles to the speech as you watch",
             toggle(app, settings.automatic_subtitle_sync, |s, v| s.automatic_subtitle_sync = v)),
-        muted("Automatic sync analyzes audio near playback and may read additional media. Manual delay becomes fine-tuning after the audio correction."),
-        muted("Manual assist is also available: pause as a line starts, then use Find spoken line in Subtitles → Sync."),
-        gap(8.0),
-        muted("Q4_K_M model + Q8 audio/vision projector and CPU runtime: about 1.63 GB download. Additional memory is needed while running."),
         gap(8.0),
     ];
     if !crate::ai::supported() {
@@ -402,7 +399,7 @@ fn ai_card(app: &App, settings: &Settings) -> Widget {
         children.push(gap(8.0));
         children.push(button("Stop task", Tone::Neutral, move || cancel.cancel_ai_task()));
     } else {
-        children.push(text(if model.installed { "Downloaded · ready when enabled" } else { "Model is not downloaded" },
+        children.push(text(if model.installed { "Model (LFM3-Omni-2B): downloaded" } else { "Model (LFM3-Omni-2B): not downloaded · about 1.6 GB" },
             13.0, FontWeight::W500, if model.installed { ACCENT } else { MUTED }).into());
         let mut actions = Vec::new();
         if settings.local_ai_enabled {
@@ -418,8 +415,10 @@ fn ai_card(app: &App, settings: &Settings) -> Widget {
         children.push(gap(8.0));
         children.push(row(actions).into());
         children.push(gap(10.0));
-        children.push(muted(if model.timing_installed { "Speech timing model downloaded · automatic sync ready" }
-            else { "Automatic sync needs the additional speech timing model (~157 MB)." }));
+        children.push(text(if model.timing_installed { "Speech timing model: downloaded" }
+            else { "Speech timing model: not downloaded · about 160 MB, needed for automatic sync" },
+            13.0, FontWeight::W500, if model.timing_installed { ACCENT } else { MUTED }).into());
+        children.push(gap(8.0));
         let mut timing_actions = Vec::new();
         if settings.local_ai_enabled {
             let download = app.clone();
@@ -437,10 +436,6 @@ fn ai_card(app: &App, settings: &Settings) -> Widget {
         children.push(gap(8.0));
         children.push(text(error, 12.0, FontWeight::W400, DANGER).max_lines(Some(4)).into());
     }
-    children.push(gap(8.0));
-    children.push(button("Model details & license", Tone::Neutral, || {
-        let _ = open::that_detached("https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF");
-    }));
     card(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
 }
 
@@ -522,12 +517,141 @@ fn playback_card(app: &App, settings: &Settings) -> Widget {
     card(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
 }
 
+/// `2`, `1.5`: at most one decimal, none when whole.
+fn amount(value: f64) -> String {
+    let rounded = (value * 10.0).round() / 10.0;
+    if rounded.fract() == 0.0 { format!("{rounded:.0}") } else { format!("{rounded:.1}") }
+}
+
 fn gib(bytes: u64) -> String {
-    format!("{} GB", bytes / 1_073_741_824)
+    format!("{} GB", amount(bytes as f64 / 1_073_741_824.0))
 }
 
 fn mib_per_second(bytes: u64) -> String {
-    format!("{:.0} MB/s", bytes as f64 / 1_048_576.0)
+    format!("{} MB/s", amount(bytes as f64 / 1_048_576.0))
+}
+
+// ------------------------------------------------- custom streaming values
+
+/// Splits `"1.5 GB"` / `"90s"` into a positive number and a lower-case unit.
+fn number_and_unit(text: &str) -> Option<(f64, String)> {
+    let text = text.trim().to_lowercase().replace(',', ".");
+    let split = text.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(text.len());
+    let number: f64 = text[..split].parse().ok()?;
+    let unit = text[split..].trim().trim_end_matches("/s").trim().to_owned();
+    (number.is_finite() && number >= 0.0).then_some((number, unit))
+}
+
+/// Cache size: GB unless `MB` / `TB` is given. `0` = no cache.
+fn parse_cache_size(text: &str) -> Option<Option<u64>> {
+    let (number, unit) = number_and_unit(text)?;
+    let scale = match unit.as_str() {
+        "" | "g" | "gb" | "gib" => 1_073_741_824.0,
+        "m" | "mb" | "mib" => 1_048_576.0,
+        "t" | "tb" | "tib" => 1_099_511_627_776.0,
+        _ => return None,
+    };
+    Some(Some((number * scale) as u64))
+}
+
+/// Days a cached torrent is kept: whole days, `0` = only while open.
+fn parse_days(text: &str) -> Option<Option<u32>> {
+    let (number, unit) = number_and_unit(text)?;
+    let days = match unit.as_str() {
+        "" | "d" | "day" | "days" => number,
+        "w" | "week" | "weeks" => number * 7.0,
+        _ => return None,
+    };
+    (days.fract() == 0.0 && days <= 3650.0).then_some(Some(days as u32))
+}
+
+/// Read ahead as a time (`90 s`, `3 min`, `1 h`; seconds without a unit)
+/// or a size (`512 MB`, `1.5 GB`).
+fn parse_read_ahead(text: &str) -> Option<ReadAhead> {
+    let (number, unit) = number_and_unit(text)?;
+    if number <= 0.0 {
+        return None;
+    }
+    let seconds = |s: f64| (s >= 1.0 && s <= 24.0 * 3600.0).then_some(ReadAhead::Seconds(s.round() as u32));
+    let megabytes = |mb: f64| (mb >= 1.0 && mb <= 1_048_576.0).then_some(ReadAhead::Megabytes(mb.round() as u32));
+    match unit.as_str() {
+        "" | "s" | "sec" | "secs" | "second" | "seconds" => seconds(number),
+        "m" | "min" | "mins" | "minute" | "minutes" => seconds(number * 60.0),
+        "h" | "hr" | "hour" | "hours" => seconds(number * 3600.0),
+        "mb" | "mib" => megabytes(number),
+        "gb" | "gib" => megabytes(number * 1024.0),
+        _ => None,
+    }
+}
+
+/// Peer connections per torrent.
+fn parse_peers(text: &str) -> Option<u32> {
+    let (number, unit) = number_and_unit(text)?;
+    (unit.is_empty() && number.fract() == 0.0 && (1.0..=5000.0).contains(&number)).then_some(number as u32)
+}
+
+/// Download cap: MB/s unless `KB` / `GB` is given (`/s` optional).
+fn parse_speed(text: &str) -> Option<Option<u64>> {
+    let (number, unit) = number_and_unit(text)?;
+    let scale = match unit.as_str() {
+        "" | "m" | "mb" | "mib" => 1_048_576.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "g" | "gb" | "gib" => 1_073_741_824.0,
+        _ => return None,
+    };
+    let bps = (number * scale) as u64;
+    (bps >= 10 * 1024).then_some(Some(bps))
+}
+
+thread_local! {
+    /// The custom fields' text, kept across rebuilds of the page.
+    static CUSTOM: std::cell::RefCell<std::collections::HashMap<&'static str, TextEditingController>> =
+        std::cell::RefCell::default();
+}
+
+/// A small field for a value the presets lack; Enter applies it.
+fn custom_field<V: 'static>(
+    app: &App,
+    key: &'static str,
+    placeholder: &'static str,
+    parse: fn(&str) -> Option<V>,
+    apply: fn(&mut Settings, V),
+) -> Widget {
+    let controller = CUSTOM.with(|c| c.borrow_mut().entry(key).or_insert_with(TextEditingController::new).clone());
+    let (app, field) = (app.clone(), controller.clone());
+    let input = input(&controller, placeholder, 130.0, move |value| {
+        if value.trim().is_empty() {
+            return;
+        }
+        match parse(&value) {
+            Some(parsed) => {
+                app.update_settings(|s| apply(s, parsed));
+                field.set_text("");
+            }
+            None => app.notify(format!("Couldn't use “{}”. Try something like {placeholder}.", value.trim())),
+        }
+    })
+    .size(Size::new(130.0, 32.0));
+    super::tooltip::tooltip("Type a value and press Enter", input)
+}
+
+/// [`choices`] followed by a [`custom_field`].
+fn choices_or_custom<T: Copy + PartialEq + 'static>(
+    app: &App,
+    options: Vec<(String, T)>,
+    current: T,
+    apply: fn(&mut Settings, T),
+    custom: Widget,
+) -> Widget {
+    let mut chips: Vec<Widget> = options
+        .into_iter()
+        .map(|(label, value)| {
+            let app = app.clone();
+            chip(label, value == current, move || app.update_settings(|s| apply(s, value)))
+        })
+        .collect();
+    chips.push(custom);
+    Wrap::new(chips).spacing(8.0).run_spacing(8.0).cross_axis_alignment(WrapCrossAlignment::Center).into()
 }
 
 /// The built-in torrent engine: status, cache and swarm tuning.
@@ -592,7 +716,8 @@ fn streaming_card(app: &App, settings: &Settings) -> Widget {
     rows.push(setting_row(
         "Cache size",
         "Torrent data kept on disk for faster replays",
-        choices(app, sizes, torrent.cache_size, |s, v| s.torrent.cache_size = v),
+        choices_or_custom(app, sizes, torrent.cache_size, |s, v| s.torrent.cache_size = v,
+            custom_field(app, "cache", "e.g. 15 GB", parse_cache_size, |s, v| s.torrent.cache_size = v)),
     ));
     let mut ages: Vec<(String, Option<u32>)> = vec![
         ("While open".to_owned(), Some(0)),
@@ -610,14 +735,16 @@ fn streaming_card(app: &App, settings: &Settings) -> Widget {
     rows.push(setting_row(
         "Keep cached torrents",
         "Deleted this long after they were last played",
-        choices(app, ages, torrent.cache_max_age_days, |s, v| s.torrent.cache_max_age_days = v),
+        choices_or_custom(app, ages, torrent.cache_max_age_days, |s, v| s.torrent.cache_max_age_days = v,
+            custom_field(app, "age", "e.g. 14 days", parse_days, |s, v| s.torrent.cache_max_age_days = v)),
     ));
     let mut ahead: Vec<(String, ReadAhead)> = vec![("Auto".to_owned(), ReadAhead::Auto)];
     let seconds_label = |s: u32| {
         if s % 60 == 0 { format!("{} min", s / 60) } else { format!("{s} s") }
     };
-    let megabytes_label =
-        |mb: u32| if mb >= 1024 { format!("{} GB", mb / 1024) } else { format!("{mb} MB") };
+    let megabytes_label = |mb: u32| {
+        if mb >= 1024 { format!("{} GB", amount(f64::from(mb) / 1024.0)) } else { format!("{mb} MB") }
+    };
     ahead.extend([30u32, 60, 120, 300, 600].map(|s| (seconds_label(s), ReadAhead::Seconds(s))));
     ahead.extend([256u32, 1024].map(|mb| (megabytes_label(mb), ReadAhead::Megabytes(mb))));
     ahead.push(("Whole file".to_owned(), ReadAhead::WholeFile));
@@ -631,7 +758,8 @@ fn streaming_card(app: &App, settings: &Settings) -> Widget {
     rows.push(setting_row(
         "Read ahead",
         "Buffered past the playback position, also while paused. Times use the file's average bitrate; Auto is about 2.5% of the file",
-        choices(app, ahead, torrent.read_ahead, |s, v| s.torrent.read_ahead = v),
+        choices_or_custom(app, ahead, torrent.read_ahead, |s, v| s.torrent.read_ahead = v,
+            custom_field(app, "ahead", "e.g. 3 min", parse_read_ahead, |s, v| s.torrent.read_ahead = v)),
     ));
     rows.push(setting_row(
         "Clear cache",
@@ -684,7 +812,8 @@ fn streaming_card(app: &App, settings: &Settings) -> Widget {
     rows.push(setting_row(
         "Max peer connections",
         "More peers: faster starts, more bandwidth",
-        choices(app, connections, torrent.max_connections, |s, v| s.torrent.max_connections = v),
+        choices_or_custom(app, connections, torrent.max_connections, |s, v| s.torrent.max_connections = v,
+            custom_field(app, "peers", "e.g. 300", parse_peers, |s, v| s.torrent.max_connections = v)),
     ));
 
     let mut caps: Vec<(String, Option<u64>)> = [2u64, 5, 10, 25, 50, 75]
@@ -700,7 +829,8 @@ fn streaming_card(app: &App, settings: &Settings) -> Widget {
     rows.push(setting_row(
         "Download speed limit",
         "Upper bound on torrent download speed",
-        choices(app, caps, torrent.speed_limit, |s, v| s.torrent.speed_limit = v),
+        choices_or_custom(app, caps, torrent.speed_limit, |s, v| s.torrent.speed_limit = v,
+            custom_field(app, "speed", "e.g. 15 MB/s", parse_speed, |s, v| s.torrent.speed_limit = v)),
     ));
     card(col(rows).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
 }
@@ -827,4 +957,52 @@ pub fn screen(app: &App) -> Widget {
         .physics(motion::APP_SCROLLED)
         .controller(app.controllers.settings.clone())),
     )
+}
+
+#[cfg(test)]
+mod custom_value_tests {
+    use super::*;
+
+    #[test]
+    fn sizes_and_speeds_take_optional_units() {
+        assert_eq!(parse_cache_size("15"), Some(Some(15 * 1_073_741_824)));
+        assert_eq!(parse_cache_size("1.5 GB"), Some(Some(1_610_612_736)));
+        assert_eq!(parse_cache_size("512mb"), Some(Some(512 * 1_048_576)));
+        assert_eq!(parse_cache_size("0"), Some(Some(0)));
+        assert_eq!(parse_cache_size("lots"), None);
+        assert_eq!(parse_speed("15 MB/s"), Some(Some(15 * 1_048_576)));
+        assert_eq!(parse_speed("800 kb/s"), Some(Some(800 * 1024)));
+        assert_eq!(parse_speed("1,5"), Some(Some(1_572_864)));
+        assert_eq!(parse_speed("1 kb"), None);
+    }
+
+    #[test]
+    fn read_ahead_is_a_time_or_a_size() {
+        assert_eq!(parse_read_ahead("90"), Some(ReadAhead::Seconds(90)));
+        assert_eq!(parse_read_ahead("3 min"), Some(ReadAhead::Seconds(180)));
+        assert_eq!(parse_read_ahead("1h"), Some(ReadAhead::Seconds(3600)));
+        assert_eq!(parse_read_ahead("512 MB"), Some(ReadAhead::Megabytes(512)));
+        assert_eq!(parse_read_ahead("1.5gb"), Some(ReadAhead::Megabytes(1536)));
+        assert_eq!(parse_read_ahead("0"), None);
+        assert_eq!(parse_read_ahead("3 parsecs"), None);
+    }
+
+    #[test]
+    fn days_and_peers_are_whole_numbers() {
+        assert_eq!(parse_days("14"), Some(Some(14)));
+        assert_eq!(parse_days("2 weeks"), Some(Some(14)));
+        assert_eq!(parse_days("0"), Some(Some(0)));
+        assert_eq!(parse_days("1.5"), None);
+        assert_eq!(parse_peers("300"), Some(300));
+        assert_eq!(parse_peers("0"), None);
+        assert_eq!(parse_peers("2.5"), None);
+        assert_eq!(parse_peers("300 peers"), None);
+    }
+
+    #[test]
+    fn labels_show_one_decimal_at_most() {
+        assert_eq!(gib(1_610_612_736), "1.5 GB");
+        assert_eq!(gib(2 * 1_073_741_824), "2 GB");
+        assert_eq!(mib_per_second(15 * 1_048_576), "15 MB/s");
+    }
 }

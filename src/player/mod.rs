@@ -938,6 +938,9 @@ impl App {
         if hide {
             crate::ui::hide_player_tooltips();
             self.player.preview.cancel();
+            if self.player.fullscreen.get_untracked() {
+                crate::window::hide_cursor_until_moved();
+            }
         }
         if was_stalled != stalled || hide {
             self.player.state.write(|s| {

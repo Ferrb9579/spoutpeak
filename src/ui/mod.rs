@@ -2,6 +2,7 @@
 
 mod addons;
 mod ambient;
+mod artwork;
 mod browse;
 mod chrome;
 mod detail;
@@ -209,6 +210,10 @@ pub(super) fn handle_key(app: &App, event: &KeyboardEvent) -> bool {
         app.close_search_menu();
         return true;
     }
+    if matches!(event.code, Code::Escape | Code::BrowserBack) && app.artwork_view.get_untracked().is_some() {
+        app.artwork_view.set(None);
+        return true;
+    }
     if matches!(event.code, Code::Escape | Code::BrowserBack) && app.spotlight_picker.get_untracked() {
         app.close_spotlight_picker();
         return true;
@@ -349,6 +354,7 @@ pub fn root(app: &App) -> Widget {
         content,
         search_menu::layer(app),
         spotlight::layer(app),
+        artwork::layer(app),
         IgnorePointer::new(toast(app)).into(),
     ];
     let framed = chrome::frame(app, layers(stacked).fit(StackFit::Expand).into());

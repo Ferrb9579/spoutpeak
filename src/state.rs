@@ -663,11 +663,15 @@ pub struct App {
     search_typing: Rc<std::cell::Cell<u64>>,
     /// The history and suggestions dropdown under a search field.
     pub search_menu: Signal<bool>,
-    pub search_suggestions: Signal<Vec<crate::suggest::Suggestion>>,
+    pub search_suggestions: Signal<Vec<(u8, crate::suggest::Suggestion)>>,
+    /// What the dropdown matched against.
+    pub search_menu_query: Signal<String>,
     search_feed: Rc<RefCell<Load<Rc<Vec<crate::suggest::Entry>>>>>,
     /// The Spotlight catalog picker (a dialog over the app), its search
     /// text, and each catalog's titles for the picker's previews.
     pub spotlight_picker: Signal<bool>,
+    /// Artwork shown whole over the app (see `ui::artwork`).
+    pub artwork_view: Signal<Option<String>>,
     pub spotlight_filter: Signal<String>,
     pub spotlight_preview: Shared<HashMap<String, Load<Vec<Meta>>>>,
     pub player: PlayerUi,
@@ -722,8 +726,10 @@ impl App {
             search_typing: Rc::new(std::cell::Cell::new(0)),
             search_menu: Signal::new(false),
             search_suggestions: Signal::new(Vec::new()),
+            search_menu_query: Signal::new(String::new()),
             search_feed: Rc::new(RefCell::new(Load::Idle)),
             spotlight_picker: Signal::new(false),
+            artwork_view: Signal::new(None),
             spotlight_filter: Signal::new(String::new()),
             spotlight_preview: Shared::new(HashMap::new()),
             downloads: Shared::new(crate::downloads::load()),
@@ -1222,9 +1228,12 @@ impl App {
 
     fn refresh_suggestions(&self, text: &str) {
         let found = match &*self.search_feed.borrow() {
-            Load::Ready(entries) => crate::suggest::suggest(entries, text, 5),
+            Load::Ready(entries) => crate::suggest::suggest(entries, text, 10),
             _ => Vec::new(),
         };
+        if self.search_menu_query.get_untracked() != text {
+            self.search_menu_query.set(text.to_owned());
+        }
         if self.search_suggestions.get_untracked() != found {
             self.search_suggestions.set(found);
         }

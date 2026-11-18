@@ -61,8 +61,9 @@ fn bottom_scrim(width: f32, height: f32) -> Widget {
 pub fn preview(app: &App) -> Widget {
     let app = app.clone();
     LayoutBuilder::new(move |_, constraints| {
-        let width = constraints.max_width();
-        let height = (width * 0.32).clamp(150.0, 260.0);
+        // A modest 16:9 frame: a full-width strip cropped the art badly.
+        let width = constraints.max_width().min(520.0);
+        let height = width * 9.0 / 16.0;
         let app = app.clone();
         Builder::new(move |_| {
             let (featured, keys, rows) = app.board.read(|b| (b.featured.clone(), b.spotlight.clone(), b.rows.clone()));

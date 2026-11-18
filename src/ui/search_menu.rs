@@ -7,6 +7,7 @@
 //! anywhere else closes it.
 
 use crate::state::App;
+use crate::suggest::MenuItem;
 use crate::theme::*;
 use incular::controls::{Button, ButtonStyle, StateColor};
 use incular::prelude::*;
@@ -34,27 +35,25 @@ pub fn field(app: &App, field: Widget, width: f32) -> Widget {
     CompositedTransformTarget::new(LINK.with(|l| l.clone()), region).into()
 }
 
-fn section_header(title: &str, trailing: Option<Widget>) -> Widget {
-    let mut children: Vec<Widget> = vec![text(title, 12.5, FontWeight::W600, MUTED).into(), Spacer::new().into()];
-    children.extend(trailing);
-    SizedBox::new()
-        .height(32.0)
-        .child(Padding::new(
-            EdgeInsets::symmetric(12.0, 0.0),
-            hrow(children).cross_axis_alignment(CrossAxisAlignment::Center),
-        ))
-        .into()
-}
+/// Most lines the dropdown shows.
+const LIMIT: usize = 10;
 
-fn entry(app: &App, width: f32, label: String, detail: Option<String>, query: String) -> Widget {
-    let mut content: Vec<Widget> = vec![Flexible::new(line(label.clone(), 13.5, FontWeight::W500, TEXT)).into()];
-    if let Some(detail) = detail {
+fn entry(app: &App, width: f32, item: MenuItem) -> Widget {
+    // A clock marks a past search; a magnifier a suggested title.
+    let glyph = if item.from_history { icons::rotate_ccw() } else { icons::search() };
+    let mut content: Vec<Widget> = vec![
+        icon(glyph, 15.0, if item.from_history { MUTED } else { FAINT }),
+        hgap(12.0),
+        Flexible::new(line(item.name.clone(), 13.5, FontWeight::W500, TEXT)).into(),
+    ];
+    if let Some(detail) = item.detail {
         content.push(hgap(10.0));
         content.push(text(detail, 12.0, FontWeight::W400, FAINT).max_lines(Some(1)).into());
     }
-    let app = app.clone();
+    let (app, query) = (app.clone(), item.name.clone());
+    let label = if item.from_history { format!("Recent search: {}", item.name) } else { item.name };
     Widget::from(
-        Button::with_child(SizedBox::new().width(width - 48.0).child(hrow(content).cross_axis_alignment(CrossAxisAlignment::Center)))
+        Button::with_child(SizedBox::new().width(width - 40.0).child(hrow(content).cross_axis_alignment(CrossAxisAlignment::Center)))
             .style(ButtonStyle {
                 background: Some(Color::TRANSPARENT),
                 background_states: Some(StateColor::new(Color::TRANSPARENT).hovered(GLASS_HOVER)),
@@ -73,43 +72,28 @@ fn entry(app: &App, width: f32, label: String, detail: Option<String>, query: St
     .accessibility_label(label)
 }
 
-fn kind_label(kind: &str) -> &str {
-    match kind {
-        "movie" => "Movie",
-        "series" => "Series",
-        other => other,
-    }
-}
-
 fn menu(app: &App, width: f32) -> Option<Widget> {
     let history = app.profile.read(|p| p.settings.recent_searches.clone());
     let suggestions = app.search_suggestions.get();
-    if history.is_empty() && suggestions.is_empty() {
+    let query = app.search_menu_query.get();
+    let items = crate::suggest::menu(&history, &suggestions, &query, LIMIT);
+    if items.is_empty() {
         return None;
     }
-    let mut children: Vec<Widget> = Vec::new();
-    if !history.is_empty() {
+    let shows_history = items.iter().any(|item| item.from_history);
+    let mut children: Vec<Widget> = items.into_iter().map(|item| entry(app, width, item)).collect();
+    if shows_history {
         let clear = app.clone();
-        children.push(section_header(
-            "Search history",
-            Some(small_button("Clear history", Tone::Ghost, move || clear.clear_recent_searches())),
-        ));
-        for query in history {
-            children.push(entry(app, width, query.clone(), None, query));
-        }
-    }
-    if !suggestions.is_empty() {
-        if !children.is_empty() {
-            children.push(gap(8.0));
-        }
-        children.push(section_header("Search suggestions", None));
-        for suggestion in suggestions {
-            let detail = match &suggestion.year {
-                Some(year) => format!("{}  ·  {year}", kind_label(&suggestion.kind)),
-                None => kind_label(&suggestion.kind).to_owned(),
-            };
-            children.push(entry(app, width, suggestion.name.clone(), Some(detail), suggestion.name));
-        }
+        children.push(gap(4.0));
+        children.push(
+            SizedBox::new()
+                .width(width - 16.0)
+                .child(Align::new(
+                    Alignment::CENTER_RIGHT,
+                    small_button("Clear history", Tone::Ghost, move || clear.clear_recent_searches()),
+                ))
+                .into(),
+        );
     }
     let panel = Container::new()
         .width(width)
