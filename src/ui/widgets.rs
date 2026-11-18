@@ -250,6 +250,31 @@ pub fn smooth(controller: &ScrollController, view: impl Into<Widget>) -> Widget 
 }
 
 /// A status line for loading / empty / failed states.
+/// A spinner over a caption, centred in the space it is given: for a page
+/// or panel whose content is still on its way.
+pub fn loading_page(message: impl Into<String>) -> Widget {
+    let message = message.into();
+    Align::new(
+        Alignment::CENTER,
+        Padding::new(
+            EdgeInsets::symmetric(0.0, 48.0),
+            Column::new(vec![
+                spinner(30.0),
+                gap(14.0),
+                text(message, 13.5, FontWeight::W500, MUTED).align(TextAlign::Center).into(),
+            ])
+            .main_axis_size(MainAxisSize::Min)
+            .cross_axis_alignment(CrossAxisAlignment::Center),
+        ),
+    )
+    .into()
+}
+
+/// A small spinner before a caption, for a part of a page still loading.
+pub fn loading_line(message: impl Into<String>) -> Widget {
+    row(vec![spinner(16.0), hgap(10.0), text(message, 13.0, FontWeight::W400, MUTED).into()]).into()
+}
+
 pub fn notice(message: impl Into<String>, color: Color) -> Widget {
     Container::new()
         .padding(EdgeInsets::symmetric(0.0, 18.0))
@@ -325,6 +350,9 @@ pub fn poster_strip(app: &App, key: &str, items: Rc<Vec<Meta>>, size: CardSize) 
 
 /// One catalog on the Board / Search: header plus strip or status.
 pub fn catalog_section(app: &App, row: &CatalogRow) -> Option<Widget> {
+    if !row.on_board {
+        return None;
+    }
     let body: Widget = match &row.items {
         Load::Ready(items) if items.is_empty() => return None,
         Load::Ready(items) => {

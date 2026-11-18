@@ -9,10 +9,12 @@ mod stream_details;
 mod downloads;
 mod motion;
 mod player;
+mod search_menu;
 pub(crate) use player::hide_tooltips as hide_player_tooltips;
 mod together;
 pub mod tooltip;
 mod settings;
+mod spotlight;
 mod widgets;
 
 use crate::state::{App, Route};
@@ -203,6 +205,14 @@ pub(super) fn handle_key(app: &App, event: &KeyboardEvent) -> bool {
     }
     let stack = app.route.get_untracked();
     let route = stack.last().copied().unwrap_or(Route::Board);
+    if matches!(event.code, Code::Escape) && app.search_menu.get_untracked() {
+        app.close_search_menu();
+        return true;
+    }
+    if matches!(event.code, Code::Escape | Code::BrowserBack) && app.spotlight_picker.get_untracked() {
+        app.close_spotlight_picker();
+        return true;
+    }
     let shift = event.modifiers.contains(Modifiers::SHIFT);
     let control = event.modifiers.contains(Modifiers::CONTROL);
     let alt = event.modifiers.contains(Modifiers::ALT);
@@ -337,6 +347,8 @@ pub fn root(app: &App) -> Widget {
 
     let stacked = vec![
         content,
+        search_menu::layer(app),
+        spotlight::layer(app),
         IgnorePointer::new(toast(app)).into(),
     ];
     let framed = chrome::frame(app, layers(stacked).fit(StackFit::Expand).into());

@@ -102,6 +102,58 @@ fn seconds(values: &[u32]) -> Vec<(String, u32)> {
     values.iter().map(|v| (format!("{v}s"), *v)).collect()
 }
 
+/// On / Off for a Board setting; the Board is rebuilt to match.
+fn board_toggle(app: &App, on: bool, apply: fn(&mut Settings, bool)) -> Widget {
+    Wrap::new([("On", true), ("Off", false)].map(|(label, value)| {
+        let app = app.clone();
+        chip(label, value == on, move || {
+            if value != on {
+                app.update_settings(|s| apply(s, value));
+                app.load_board();
+            }
+        })
+    }))
+    .spacing(8.0)
+    .run_spacing(8.0)
+    .into()
+}
+
+/// The Board: its Spotlight and where the Spotlight's titles come from.
+fn board_card(app: &App, settings: &Settings) -> Widget {
+    let mut children = vec![
+        titled(icons::house(), "Board"),
+        gap(8.0),
+        setting_row(
+            "Show Spotlight",
+            "The rotating titles at the top of Home.",
+            board_toggle(app, settings.show_spotlight, |s, v| s.show_spotlight = v),
+        ),
+    ];
+    if settings.show_spotlight {
+        let count = app.spotlight_keys().len();
+        let open = app.clone();
+        children.push(setting_row(
+            "Spotlight catalogs",
+            "Up to 3 catalogs take turns, 6 titles each.",
+            icon_text_button(
+                icons::chevron_right(),
+                if count == 1 { "1 catalog".to_owned() } else { format!("{count} catalogs") },
+                Tone::Neutral,
+                move || open.open_spotlight_picker(),
+            ),
+        ));
+        children.push(gap(6.0));
+        children.push(super::spotlight::preview(app));
+        children.push(gap(6.0));
+        children.push(setting_row(
+            "Show their rows on the Board",
+            "Off: the Spotlight's catalogs appear only in the Spotlight.",
+            board_toggle(app, settings.spotlight_rows_on_board, |s, v| s.spotlight_rows_on_board = v),
+        ));
+    }
+    card(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
+}
+
 fn controls_card(app: &App, settings: &Settings) -> Widget {
     let children: Vec<Widget> = vec![
         titled(icons::gauge(), "Controls"),
@@ -748,6 +800,8 @@ pub fn screen(app: &App) -> Widget {
         smooth(&app.controllers.settings, SingleChildScrollView::new(Padding::new(
             PAGE_PADDING,
             col(vec![
+                board_card(app, &settings),
+                gap(16.0),
                 playback_card(app, &settings),
                 gap(16.0),
                 ai_card(app, &settings),

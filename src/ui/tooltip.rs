@@ -86,7 +86,7 @@ pub fn tooltip(text: impl Into<String>, child: impl Into<Widget>) -> Widget {
 
     Builder::new(move |_| {
         let at = shown.get();
-        let bubble = translucent_surface(Padding::new(EdgeInsets::symmetric(11.0, 8.0),
+        let bubble = acrylic_surface(Padding::new(EdgeInsets::symmetric(11.0, 8.0),
                 Text::new(text.clone())
                     .style(style(12.5, FontWeight::W500, TEXT)),
             ), 9.0);

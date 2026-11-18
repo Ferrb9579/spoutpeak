@@ -57,18 +57,21 @@ fn home_refresh(app: &App) -> Widget {
 }
 
 fn home_tools(app: &App) -> Widget {
-    let submit = app.clone();
+    let (submit, typed) = (app.clone(), app.clone());
     let field = input(&app.controllers.search, "Search movies, series…", 300.0, move |query| {
         submit.submit_search(query);
         submit.go(Route::Search);
-    }).size(Size::new(300.0, 32.0));
+    }).size(Size::new(300.0, 32.0)).style(backdrop_field_style())
+        .on_changed(move |value| typed.search_menu_typed(&value));
+    let field = frosted_glass(Widget::from(field).accessibility_label("Search movies and series"), 10.0, 16.0);
+    let field = super::search_menu::field(app, field, 300.0);
     let search = app.clone();
     let search_button = super::tooltip::tooltip("Search",
         icon_button(icon(icons::search(), 18.0, TEXT).accessibility_label("Search Home"), 32.0, move || {
             search.submit_search(search.controllers.search.text());
             search.go(Route::Search);
         }).accessibility_label("Search Home"));
-    row(vec![Widget::from(field).accessibility_label("Search movies and series"),
+    row(vec![field,
         hgap(4.0), search_button, hgap(8.0), home_refresh(app)]).into()
 }
 

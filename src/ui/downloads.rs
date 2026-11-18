@@ -3,13 +3,17 @@
 use super::motion;
 use super::widgets::*;
 use crate::downloads::{self, Download, DownloadStatus};
+use crate::streaming::Swarm;
 use crate::state::App;
 use crate::theme::*;
-use crate::util::{format_bytes, format_speed};
+use crate::util::{format_bytes, format_speed, format_time};
 use incular::prelude::*;
 use std::rc::Rc;
 
-const ROW_HEIGHT: f32 = 112.0;
+const ROW_HEIGHT: f32 = 128.0;
+/// Secondary lines on a row: brighter than `MUTED`, since the row sits on
+/// glass over whatever colours the ambient backdrop has.
+const DETAIL: Color = Color::rgba(205, 205, 205, 255);
 
 fn progress_bar(fraction: Option<f32>, color: Color) -> Widget {
     LayoutBuilder::new(move |_, constraints| {
@@ -33,14 +37,14 @@ fn status_line(item: &Download) -> (String, Color) {
         None => format_bytes(item.received),
     };
     match &item.status {
-        DownloadStatus::Preparing => ("Preparing…".to_owned(), MUTED),
+        DownloadStatus::Preparing => ("Preparing…".to_owned(), DETAIL),
         DownloadStatus::Converting => {
             let mut parts = vec![format!("Converting to {}", item.format.label())];
             parts.push(format!("{:.0}%", item.converted * 100.0));
             if let Some(encoder) = item.encoder {
                 parts.push(encoder.to_owned());
             }
-            (parts.join("  ·  "), MUTED)
+            (parts.join("  ·  "), DETAIL)
         }
         DownloadStatus::Downloading => {
             let mut parts = vec![size];
@@ -49,51 +53,91 @@ fn status_line(item: &Download) -> (String, Color) {
             }
             if item.speed > 0.0 {
                 parts.push(format_speed(item.speed));
+                if let Some(total) = item.total.filter(|t| *t > item.received) {
+                    let left = (total - item.received) as f64 / item.speed;
+                    if left < 100.0 * 3600.0 {
+                        parts.push(format!("{} left", format_time(left)));
+                    }
+                }
             }
-            (parts.join("  ·  "), MUTED)
+            (parts.join("  ·  "), DETAIL)
         }
         DownloadStatus::Done => (
             format!("Saved  ·  {}", format_bytes(item.total.unwrap_or(item.received))),
             GOOD,
         ),
         DownloadStatus::Failed(reason) => (format!("{reason}  ·  {size} saved"), DANGER),
-        DownloadStatus::Cancelled => (format!("Cancelled  ·  {size} saved"), FAINT),
+        DownloadStatus::Cancelled => (format!("Cancelled  ·  {size} saved"), MUTED),
+        DownloadStatus::Paused => {
+            let mut parts = vec![format!("Paused  ·  {size}")];
+            if let Some(fraction) = item.fraction() {
+                parts.push(format!("{:.0}%", fraction * 100.0));
+            }
+            (parts.join("  ·  "), DETAIL)
+        }
     }
+}
+
+/// Who a torrent download is connected to, e.g.
+/// `14 peers (5 seeds)  ·  3 connecting  ·  211 found  ·  limit 200`.
+fn swarm_line(swarm: &Swarm) -> String {
+    let plural = |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut parts = Vec::new();
+    if swarm.peers == 0 {
+        parts.push("No peers connected yet".to_owned());
+    } else {
+        parts.push(format!(
+            "{} ({})",
+            plural(swarm.peers, "peer", "peers"),
+            plural(swarm.seeders, "seed", "seeds")
+        ));
+    }
+    if swarm.connecting > 0 {
+        parts.push(format!("{} connecting", swarm.connecting));
+    }
+    parts.push(format!("{} found", swarm.discovered));
+    if let Some(limit) = swarm.limit {
+        parts.push(format!("limit {limit}"));
+    }
+    parts.join("  ·  ")
+}
+
+/// A labelled-by-tooltip icon button.
+fn action(glyph: Glyph, hint: &str, tone: Tone, on_click: impl Fn() + 'static) -> Widget {
+    super::tooltip::tooltip(hint, small_icon_button(glyph, None, tone, on_click).accessibility_label(hint))
 }
 
 fn row_actions(app: &App, item: &Download) -> Vec<Widget> {
     let id = item.id;
-    let action = |glyph: Glyph, tone: Tone, call: fn(&App, u64)| {
+    let call = |call: fn(&App, u64)| {
         let app = app.clone();
-        small_icon_button(glyph, None, tone, move || call(&app, id))
+        move || call(&app, id)
     };
     let mut actions = Vec::new();
     match item.status {
-        DownloadStatus::Preparing | DownloadStatus::Downloading | DownloadStatus::Converting => {
-            actions.push(action(icons::x(), Tone::Neutral, |app, id| app.cancel_download(id)));
+        DownloadStatus::Preparing | DownloadStatus::Downloading => {
+            actions.push(action(icons::play(), "Watch now", Tone::Neutral, call(|app, id| app.watch_download(id))));
+            actions.push(hgap(6.0));
+            actions.push(small_icon_button(icons::pause(), Some("Pause"), Tone::Neutral, call(|app, id| app.pause_download(id))));
+            actions.push(hgap(6.0));
+            actions.push(action(icons::x(), "Cancel and delete the partial file", Tone::Danger,
+                call(|app, id| app.delete_download(id))));
+        }
+        DownloadStatus::Converting => {
+            actions.push(action(icons::x(), "Stop converting (Resume converts again)", Tone::Neutral,
+                call(|app, id| app.cancel_download(id))));
         }
         DownloadStatus::Done => {
-            let app = app.clone();
-            actions.push(small_icon_button(icons::play(), Some("Play"), Tone::Primary, move || {
-                app.play_download(id)
-            }));
+            actions.push(small_icon_button(icons::play(), Some("Play"), Tone::Primary, call(|app, id| app.play_download(id))));
             actions.push(hgap(6.0));
-            actions.push(action(icons::folder_open(), Tone::Neutral, |app, id| {
-                app.reveal_download(id)
-            }));
+            actions.push(action(icons::folder_open(), "Show in folder", Tone::Neutral, call(|app, id| app.reveal_download(id))));
             actions.push(hgap(6.0));
-            actions.push(action(icons::trash_2(), Tone::Danger, |app, id| app.delete_download(id)));
+            actions.push(action(icons::trash_2(), "Delete the file", Tone::Danger, call(|app, id| app.delete_download(id))));
         }
-        DownloadStatus::Failed(_) | DownloadStatus::Cancelled => {
-            let app = app.clone();
-            actions.push(small_icon_button(
-                icons::rotate_ccw(),
-                Some("Resume"),
-                Tone::Neutral,
-                move || app.retry_download(id),
-            ));
+        DownloadStatus::Paused | DownloadStatus::Failed(_) | DownloadStatus::Cancelled => {
+            actions.push(small_icon_button(icons::play(), Some("Resume"), Tone::Primary, call(|app, id| app.retry_download(id))));
             actions.push(hgap(6.0));
-            actions.push(action(icons::trash_2(), Tone::Danger, |app, id| app.delete_download(id)));
+            actions.push(action(icons::trash_2(), "Delete the partial file", Tone::Danger, call(|app, id| app.delete_download(id))));
         }
     }
     actions
@@ -104,14 +148,19 @@ fn download_row(app: &App, item: &Download) -> Widget {
     let mut info: Vec<Widget> = vec![
         line(item.title.clone(), 14.5, FontWeight::W600, TEXT),
         gap(3.0),
-        line(item.source.clone(), 12.0, FontWeight::W400, FAINT),
+        line(item.source.clone(), 12.0, FontWeight::W400, MUTED),
         gap(10.0),
     ];
-    if item.status.is_active() {
-        info.push(progress_bar(item.fraction(), ACCENT));
+    if item.status.is_active() || item.status == DownloadStatus::Paused {
+        let color = if item.status == DownloadStatus::Paused { MUTED } else { ACCENT };
+        info.push(progress_bar(item.fraction(), color));
         info.push(gap(8.0));
     }
     info.push(line(status, 12.0, FontWeight::W500, status_color));
+    if let (DownloadStatus::Downloading, Some(swarm)) = (&item.status, &item.swarm) {
+        info.push(gap(4.0));
+        info.push(line(swarm_line(swarm), 12.0, FontWeight::W400, MUTED));
+    }
 
     Padding::new(
         EdgeInsets::only(0.0, 0.0, 0.0, 12.0),
@@ -142,13 +191,38 @@ pub fn screen(app: &App) -> Widget {
     let items: Rc<Vec<Download>> = Rc::new(app.downloads.read(|list| list.clone()));
     let open = app.clone();
     let folder = downloads::folder().to_string_lossy().into_owned();
-    let trailing = vec![
-        text(folder, 12.0, FontWeight::W400, FAINT).into(),
+    let running = items.iter().any(|d| matches!(d.status, DownloadStatus::Preparing | DownloadStatus::Downloading));
+    let stopped = items.iter().any(|d| d.status.can_resume());
+    let finished = items.iter().any(|d| d.status == DownloadStatus::Done);
+    let mut trailing: Vec<Widget> = Vec::new();
+    if running {
+        let app = app.clone();
+        trailing.push(small_icon_button(icons::pause(), Some("Pause all"), Tone::Neutral, move || app.pause_all_downloads()));
+        trailing.push(hgap(8.0));
+    }
+    if stopped {
+        let app = app.clone();
+        trailing.push(small_icon_button(icons::play(), Some("Resume all"), Tone::Neutral, move || app.resume_all_downloads()));
+        trailing.push(hgap(8.0));
+    }
+    if finished {
+        let app = app.clone();
+        trailing.push(super::tooltip::tooltip("Remove finished downloads from this list. The files stay.",
+            small_icon_button(icons::check(), Some("Clear finished"), Tone::Neutral, move || app.clear_finished_downloads())));
+        trailing.push(hgap(16.0));
+    }
+    trailing.extend([
+        // On its own glass: it sits straight on the ambient backdrop, which
+        // can be as light as the text.
+        glass(13.0)
+            .padding(EdgeInsets::symmetric(11.0, 6.0))
+            .child(line(folder, 12.0, FontWeight::W400, DETAIL))
+            .into(),
         hgap(12.0),
         small_icon_button(icons::folder_open(), Some("Open folder"), Tone::Neutral, move || {
             open.open_download_folder()
         }),
-    ];
+    ]);
     let body: Widget = if items.is_empty() {
         Padding::new(
             PAGE_PADDING,

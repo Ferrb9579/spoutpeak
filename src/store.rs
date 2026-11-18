@@ -124,6 +124,13 @@ pub struct Settings {
     pub download_format: DownloadFormat,
     pub volume: f32,
     pub hardware_decoding: bool,
+    /// The rotating Spotlight at the top of the Board.
+    pub show_spotlight: bool,
+    /// Catalog keys (`CatalogRef::key`) it takes turns between, up to
+    /// three; empty = the first two catalogs.
+    pub spotlight_catalogs: Vec<String>,
+    /// Also show the Spotlight's catalogs as rows on the Board.
+    pub spotlight_rows_on_board: bool,
     /// Most recent first.
     pub recent_searches: Vec<String>,
     /// The name others in a watch-together room see.
@@ -157,6 +164,9 @@ impl Default for Settings {
             download_format: DownloadFormat::Original,
             volume: 1.0,
             hardware_decoding: true,
+            show_spotlight: true,
+            spotlight_catalogs: Vec::new(),
+            spotlight_rows_on_board: true,
             recent_searches: Vec::new(),
             watch_name: String::new(),
         }

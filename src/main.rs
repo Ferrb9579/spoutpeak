@@ -15,6 +15,7 @@ mod player;
 mod state;
 mod store;
 mod streaming;
+mod suggest;
 mod theme;
 mod branding;
 mod together;

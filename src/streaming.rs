@@ -340,6 +340,23 @@ pub struct DownloadProgress {
     pub total: u64,
     /// Bytes per second.
     pub speed: f64,
+    /// The swarm right now; `None` while the torrent is not live.
+    pub swarm: Option<Swarm>,
+}
+
+/// Who a torrent is connected to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Swarm {
+    /// Peers sending or able to send data.
+    pub peers: u32,
+    /// Of `peers`, those holding the whole torrent.
+    pub seeders: u32,
+    /// Connections being opened.
+    pub connecting: u32,
+    /// Every address heard of (DHT, trackers, peer exchange).
+    pub discovered: u32,
+    /// The per-torrent connection limit, `None` = unlimited.
+    pub limit: Option<u32>,
 }
 
 /// A torrent file downloaded in full by [`download_file`].
@@ -401,8 +418,20 @@ pub async fn download_file(
             return Err(format!("torrent error: {error}"));
         }
         let received = stats.file_progress.get(index).copied().unwrap_or(0);
-        let speed = stats.live.as_ref().map_or(0.0, |l| l.download_speed.as_bytes() as f64);
-        progress(DownloadProgress { received, total, speed });
+        let live = stats.live.as_ref();
+        let speed = live.map_or(0.0, |l| l.download_speed.as_bytes() as f64);
+        let swarm = live.map(|l| {
+            let peers = &l.snapshot.peer_stats;
+            let limit = config().lock().unwrap().max_connections;
+            Swarm {
+                peers: peers.live as u32,
+                seeders: peers.live_seeders as u32,
+                connecting: peers.connecting as u32,
+                discovered: peers.seen as u32,
+                limit: (limit > 0).then_some(limit),
+            }
+        });
+        progress(DownloadProgress { received, total, speed, swarm });
         if received >= total {
             break;
         }

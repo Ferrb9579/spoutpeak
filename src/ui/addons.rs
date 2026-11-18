@@ -216,7 +216,7 @@ pub fn screen(app: &App) -> Widget {
                 notice(format!("Couldn't load community addons: {error}"), DANGER),
             )
             .into(),
-            _ => Padding::new(PAGE_PADDING, notice("Loading community addons…", MUTED)).into(),
+            _ => loading_page("Loading community addons…"),
         },
     };
 

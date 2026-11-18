@@ -184,11 +184,16 @@ pub struct CatalogRow {
     pub title: String,
     pub addon_name: String,
     pub items: Load<Vec<Meta>>,
+    /// Shown as a row on the Board (a Spotlight catalog may be fetched only
+    /// for the Spotlight).
+    pub on_board: bool,
 }
 
 #[derive(Default)]
 pub struct BoardState {
     pub rows: Vec<CatalogRow>,
+    /// Catalog keys the Spotlight takes turns between, in order.
+    pub spotlight: Vec<String>,
     pub featured: Vec<(Meta, String)>,
     pub generation: u64,
     pub carousel: FeaturedCarousel,
@@ -321,19 +326,39 @@ mod carousel_tests {
     }
 }
 
-/// Append a small selection from each completed catalog, regardless of provider.
-/// Existing slides retain their positions as slower catalogs arrive.
-fn append_featured_titles(featured: &mut Vec<(Meta, String)>, row: &CatalogRow) {
-    let Load::Ready(items) = &row.items else { return };
-    let mut seen: HashSet<_> = featured.iter()
-        .map(|(meta, _)| (meta.kind.clone(), meta.id().to_owned())).collect();
-    featured.extend(items.iter()
+/// Titles per Spotlight catalog.
+pub const SPOTLIGHT_TITLES: usize = 6;
+/// Catalogs the Spotlight can take turns between.
+pub const SPOTLIGHT_MAX: usize = 3;
+
+/// A catalog's titles the Spotlight can show: with an id and artwork.
+pub fn spotlight_candidates(items: &[Meta]) -> impl Iterator<Item = &Meta> {
+    items.iter()
         .filter(|meta| [meta.background.as_ref(), meta.poster.as_ref()].into_iter()
             .flatten().any(|url| !url.trim().is_empty()))
-        .filter(|meta| !meta.id().trim().is_empty()
-            && seen.insert((meta.kind.clone(), meta.id().to_owned())))
-        .take(2)
-        .map(|meta| (meta.clone(), row.title.clone())));
+        .filter(|meta| !meta.id().trim().is_empty())
+}
+
+/// The Spotlight slides: up to [`SPOTLIGHT_TITLES`] titles with artwork from
+/// each catalog in `keys` that has loaded, taking turns in `keys` order. A
+/// title already taken by an earlier catalog is skipped.
+fn featured_titles(rows: &[CatalogRow], keys: &[String]) -> Vec<(Meta, String)> {
+    let mut seen = HashSet::new();
+    let picks: Vec<Vec<(Meta, String)>> = keys.iter()
+        .filter_map(|key| rows.iter().find(|row| &row.key == key))
+        .map(|row| match &row.items {
+            Load::Ready(items) => spotlight_candidates(items)
+                .filter(|meta| seen.insert((meta.kind.clone(), meta.id().to_owned())))
+                .take(SPOTLIGHT_TITLES)
+                .map(|meta| (meta.clone(), row.title.clone()))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    let longest = picks.iter().map(Vec::len).max().unwrap_or(0);
+    (0..longest)
+        .flat_map(|turn| picks.iter().filter_map(move |pick| pick.get(turn).cloned()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -350,38 +375,47 @@ mod featured_catalog_tests {
                 background: Some(format!("https://example.test/{id}.jpg")),
                 ..Meta::default()
             }).collect()),
+            on_board: true,
         }
     }
 
+    fn ids(featured: &[(Meta, String)]) -> Vec<&str> {
+        featured.iter().map(|(m, _)| m.id()).collect()
+    }
+
+    fn keys(keys: &[&str]) -> Vec<String> {
+        keys.iter().map(|k| (*k).to_owned()).collect()
+    }
+
     #[test]
-    fn late_catalogs_append_without_replacing_existing_slides() {
-        let rows = [row("alpha", &["a1", "a2", "a3"]),
-            row("beta", &["b1", "b2", "b3"]), row("custom-addon", &["c1"])];
-        for order in [[1, 0, 2], [0, 2, 1]] {
-            let mut featured = Vec::new();
-            for index in order {
-                let before: Vec<_> = featured.iter().map(|(m, _): &(Meta, String)| m.id().to_owned()).collect();
-                append_featured_titles(&mut featured, &rows[index]);
-                assert_eq!(featured[..before.len()].iter().map(|(m, _)| m.id()).collect::<Vec<_>>(), before);
-            }
-            assert_eq!(featured.len(), 5);
-            for source in &rows {
-                assert!(featured.iter().any(|(_, title)| title == &source.title));
-            }
-        }
+    fn chosen_catalogs_take_turns_in_their_order() {
+        let rows = [row("alpha", &["a1", "a2", "a3"]), row("beta", &["b1"]), row("gamma", &["g1", "g2"])];
+        assert_eq!(ids(&featured_titles(&rows, &keys(&["gamma", "alpha", "beta"]))),
+            ["g1", "a1", "b1", "g2", "a2", "a3"]);
+        assert_eq!(ids(&featured_titles(&rows, &keys(&["beta"]))), ["b1"]);
+        // Unknown and unloaded catalogs add nothing.
+        let mut loading = row("beta", &[]);
+        loading.items = Load::Loading;
+        assert!(featured_titles(&[loading], &keys(&["beta", "missing"])).is_empty());
+    }
+
+    #[test]
+    fn each_catalog_gives_at_most_six_titles() {
+        let many: Vec<String> = (0..10).map(|i| format!("m{i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let featured = featured_titles(&[row("many", &many)], &keys(&["many"]));
+        assert_eq!(featured.len(), SPOTLIGHT_TITLES);
+        assert!(featured.iter().all(|(_, title)| title == "many catalog"));
     }
 
     #[test]
     fn duplicates_do_not_use_another_catalogs_selection() {
-        let mut featured = Vec::new();
-        append_featured_titles(&mut featured, &row("first", &["same", "a"]));
-        append_featured_titles(&mut featured, &row("other", &["same", "same", "b", "c"]));
-        assert_eq!(featured.iter().map(|(m, _)| m.id()).collect::<Vec<_>>(), ["same", "a", "b", "c"]);
+        let rows = [row("first", &["same", "a"]), row("other", &["same", "b"])];
+        assert_eq!(ids(&featured_titles(&rows, &keys(&["first", "other"]))), ["same", "b", "a"]);
         // A different media type with the same ID remains a separate title.
         let mut series = row("series", &["same"]);
         if let Load::Ready(items) = &mut series.items { items[0].kind = "series".into(); }
-        append_featured_titles(&mut featured, &series);
-        assert_eq!(featured.len(), 5);
+        assert_eq!(featured_titles(&[rows[0].clone(), series], &keys(&["first", "series"])).len(), 3);
     }
 
     #[test]
@@ -393,14 +427,7 @@ mod featured_catalog_tests {
             items[3].background = None;
             items[3].poster = Some("https://example.test/poster.jpg".into());
         }
-        let mut featured = Vec::new();
-        append_featured_titles(&mut featured, &catalog);
-        assert_eq!(featured.iter().map(|(m, _)| m.id()).collect::<Vec<_>>(), ["poster", "background"]);
-        catalog.items = Load::Loading;
-        append_featured_titles(&mut featured, &catalog);
-        catalog.items = Load::Failed("unavailable".into());
-        append_featured_titles(&mut featured, &catalog);
-        assert_eq!(featured.len(), 2);
+        assert_eq!(ids(&featured_titles(&[catalog], &keys(&["any-provider"]))), ["poster", "background"]);
     }
 }
 
@@ -559,6 +586,8 @@ pub struct Controllers {
     pub player_menu: ScrollController,
     pub season_search: TextEditingController,
     pub season_list: ScrollController,
+    pub spotlight_search: TextEditingController,
+    pub spotlight_list: ScrollController,
     pub downloads: ScrollController,
     pub addons: ScrollController,
     pub settings: ScrollController,
@@ -593,6 +622,8 @@ impl Controllers {
             player_menu: ScrollController::new(),
             season_search: TextEditingController::new(),
             season_list: ScrollController::new(),
+            spotlight_search: TextEditingController::new(),
+            spotlight_list: ScrollController::new(),
             downloads: ScrollController::new(),
             addons: ScrollController::new(),
             settings: ScrollController::new(),
@@ -630,6 +661,15 @@ pub struct App {
     /// Built-in torrent engine: `None` while starting, then whether it runs.
     pub server_online: Signal<Option<bool>>,
     search_typing: Rc<std::cell::Cell<u64>>,
+    /// The history and suggestions dropdown under a search field.
+    pub search_menu: Signal<bool>,
+    pub search_suggestions: Signal<Vec<crate::suggest::Suggestion>>,
+    search_feed: Rc<RefCell<Load<Rc<Vec<crate::suggest::Entry>>>>>,
+    /// The Spotlight catalog picker (a dialog over the app), its search
+    /// text, and each catalog's titles for the picker's previews.
+    pub spotlight_picker: Signal<bool>,
+    pub spotlight_filter: Signal<String>,
+    pub spotlight_preview: Shared<HashMap<String, Load<Vec<Meta>>>>,
     pub player: PlayerUi,
     pub ai: crate::ai::LocalAi,
     pub downloads: Shared<Vec<crate::downloads::Download>>,
@@ -680,6 +720,12 @@ impl App {
             }),
             server_online: Signal::new(None),
             search_typing: Rc::new(std::cell::Cell::new(0)),
+            search_menu: Signal::new(false),
+            search_suggestions: Signal::new(Vec::new()),
+            search_feed: Rc::new(RefCell::new(Load::Idle)),
+            spotlight_picker: Signal::new(false),
+            spotlight_filter: Signal::new(String::new()),
+            spotlight_preview: Shared::new(HashMap::new()),
             downloads: Shared::new(crate::downloads::load()),
             controllers,
         }
@@ -708,6 +754,7 @@ impl App {
         }
         self.start_streaming();
         self.downloads.peek(|list| crate::downloads::clean_staging(list));
+        self.resume_interrupted_downloads();
         // Find the video encoder off the UI thread (it test-encodes a clip).
         std::thread::spawn(|| {
             let _ = crate::convert::encoder();
@@ -791,19 +838,124 @@ impl App {
             title: reference.title(),
             addon_name: reference.addon.manifest.name.clone(),
             items: Load::Loading,
+            on_board: true,
+        }
+    }
+
+    /// Catalogs the Spotlight can use: every browsable one.
+    pub fn spotlight_catalogs(&self) -> Vec<CatalogRef> {
+        let addons = self.profile.peek(|p| p.addons.clone());
+        addons::all_catalogs(&addons).into_iter().filter(|c| c.catalog.is_browsable()).collect()
+    }
+
+    /// The Spotlight's catalogs when none are chosen: the first two.
+    pub fn default_spotlight_keys(catalogs: &[CatalogRef]) -> Vec<String> {
+        catalogs.iter().take(2).map(CatalogRef::key).collect()
+    }
+
+    /// The chosen Spotlight catalogs that are still installed, else the
+    /// defaults.
+    pub fn spotlight_keys(&self) -> Vec<String> {
+        let catalogs = self.spotlight_catalogs();
+        let chosen: Vec<String> = self.profile.peek(|p| p.settings.spotlight_catalogs.clone())
+            .into_iter()
+            .filter(|key| catalogs.iter().any(|c| &c.key() == key))
+            .take(SPOTLIGHT_MAX)
+            .collect();
+        if chosen.is_empty() { Self::default_spotlight_keys(&catalogs) } else { chosen }
+    }
+
+    pub fn set_spotlight_catalogs(&self, keys: Vec<String>) {
+        self.update_settings(|s| s.spotlight_catalogs = keys);
+        self.load_board();
+    }
+
+    /// Adds `key` to the Spotlight, or takes it out.
+    pub fn toggle_spotlight_catalog(&self, key: String) {
+        let mut keys = self.spotlight_keys();
+        if let Some(index) = keys.iter().position(|k| *k == key) {
+            if keys.len() == 1 {
+                self.notify("The Spotlight needs a catalog. Turn the Spotlight off instead.");
+                return;
+            }
+            keys.remove(index);
+        } else if keys.len() < SPOTLIGHT_MAX {
+            keys.push(key);
+        } else {
+            self.notify(format!("The Spotlight takes up to {SPOTLIGHT_MAX} catalogs. Remove one first."));
+            return;
+        }
+        self.set_spotlight_catalogs(keys);
+    }
+
+    /// Opens the catalog picker and fetches every catalog the Board has
+    /// not loaded, for the previews.
+    pub fn open_spotlight_picker(&self) {
+        self.controllers.spotlight_search.set_text("");
+        self.spotlight_filter.set(String::new());
+        let loaded: HashMap<String, Load<Vec<Meta>>> = self.board.peek(|b| {
+            b.rows.iter().filter(|r| matches!(r.items, Load::Ready(_))).map(|r| (r.key.clone(), r.items.clone())).collect()
+        });
+        let catalogs = self.spotlight_catalogs();
+        let missing: Vec<CatalogRef> = self.spotlight_preview.write(|preview| {
+            preview.extend(loaded);
+            let missing: Vec<CatalogRef> = catalogs.into_iter()
+                .filter(|c| !matches!(preview.get(&c.key()), Some(Load::Ready(_) | Load::Loading)))
+                .collect();
+            for c in &missing {
+                preview.insert(c.key(), Load::Loading);
+            }
+            missing
+        });
+        for reference in missing {
+            let key = reference.key();
+            spawn(
+                async move {
+                    addons::catalog(&reference.addon, &reference.catalog.kind, &reference.catalog.id, &[]).await
+                },
+                move |app, result| {
+                    app.spotlight_preview.write(|preview| {
+                        preview.insert(key, match result {
+                            Ok(items) => Load::Ready(items),
+                            Err(error) => Load::Failed(error),
+                        });
+                    });
+                },
+            );
+        }
+        self.spotlight_picker.set(true);
+    }
+
+    pub fn close_spotlight_picker(&self) {
+        if self.spotlight_picker.get_untracked() {
+            self.spotlight_picker.set(false);
         }
     }
 
     pub fn load_board(&self) {
-        let addons = self.profile.peek(|p| p.addons.clone());
-        let refs: Vec<CatalogRef> = addons::all_catalogs(&addons)
-            .into_iter()
-            .filter(|c| c.catalog.is_browsable())
-            .take(40)
-            .collect();
+        let (show_spotlight, spotlight_rows) =
+            self.profile.peek(|p| (p.settings.show_spotlight, p.settings.spotlight_rows_on_board));
+        let catalogs = self.spotlight_catalogs();
+        let spotlight = if show_spotlight { self.spotlight_keys() } else { Vec::new() };
+        let mut refs: Vec<CatalogRef> = catalogs.iter().take(40).cloned().collect();
+        // A Spotlight catalog past the Board's first 40 is fetched too.
+        for key in &spotlight {
+            if !refs.iter().any(|r| &r.key() == key)
+                && let Some(reference) = catalogs.iter().find(|c| &c.key() == key)
+            {
+                refs.push(reference.clone());
+            }
+        }
+        let rows: Vec<CatalogRow> = refs.iter().enumerate().map(|(index, reference)| {
+            let mut row = Self::row_for(reference);
+            let featured = spotlight.contains(&row.key);
+            row.on_board = index < 40 && !(featured && !spotlight_rows);
+            row
+        }).collect();
         let generation = self.board.write(|board| {
             board.generation += 1;
-            board.rows = refs.iter().map(Self::row_for).collect();
+            board.rows = rows;
+            board.spotlight = spotlight.clone();
             board.featured.clear();
             board.carousel.select(0);
             board.carousel.hover(false);
@@ -832,7 +984,18 @@ impl App {
                                 Ok(items) => Load::Ready(items),
                                 Err(error) => Load::Failed(error),
                             };
-                            append_featured_titles(&mut board.featured, row);
+                        }
+                        if board.spotlight.contains(&key) {
+                            let current = board.featured.get(board.carousel.index.get_untracked())
+                                .map(|(meta, _)| (meta.kind.clone(), meta.id().to_owned()));
+                            board.featured = featured_titles(&board.rows, &board.spotlight);
+                            // Keep the slide on screen while later catalogs slot in.
+                            if let Some(index) = current.and_then(|current| board.featured.iter()
+                                .position(|(meta, _)| (meta.kind.clone(), meta.id().to_owned()) == current))
+                                && index != board.carousel.index.get_untracked()
+                            {
+                                board.carousel.index.set(index);
+                            }
                         }
                     });
                 },
@@ -1025,8 +1188,59 @@ impl App {
         );
     }
 
+    pub fn open_search_menu(&self) {
+        let idle = matches!(*self.search_feed.borrow(), Load::Idle | Load::Failed(_));
+        if idle {
+            *self.search_feed.borrow_mut() = Load::Loading;
+            spawn(crate::suggest::load(), |app, entries| {
+                *app.search_feed.borrow_mut() = match entries {
+                    Some(entries) => Load::Ready(Rc::new(entries)),
+                    None => Load::Failed("unavailable".into()),
+                };
+                app.refresh_suggestions(&app.controllers.search.text());
+            });
+        }
+        self.refresh_suggestions(&self.controllers.search.text());
+        if !self.search_menu.get_untracked() {
+            self.search_menu.set(true);
+        }
+    }
+
+    pub fn close_search_menu(&self) {
+        if self.search_menu.get_untracked() {
+            self.search_menu.set(false);
+        }
+    }
+
+    /// Typing in a search field: open the dropdown and match again.
+    pub fn search_menu_typed(&self, text: &str) {
+        self.refresh_suggestions(text);
+        if !self.search_menu.get_untracked() {
+            self.open_search_menu();
+        }
+    }
+
+    fn refresh_suggestions(&self, text: &str) {
+        let found = match &*self.search_feed.borrow() {
+            Load::Ready(entries) => crate::suggest::suggest(entries, text, 5),
+            _ => Vec::new(),
+        };
+        if self.search_suggestions.get_untracked() != found {
+            self.search_suggestions.set(found);
+        }
+    }
+
+    /// A history entry or suggestion picked from the dropdown.
+    pub fn pick_search(&self, query: String) {
+        self.submit_search(query);
+        if self.current_route() != Route::Search {
+            self.go(Route::Search);
+        }
+    }
+
     /// An explicit search (Enter, button, recent chip): also remembered.
     pub fn submit_search(&self, query: String) {
+        self.close_search_menu();
         let query = query.trim().to_owned();
         self.search_typing.set(self.search_typing.get() + 1);
         if self.controllers.search.text() != query {

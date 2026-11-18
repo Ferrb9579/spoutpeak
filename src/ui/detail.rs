@@ -124,7 +124,7 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
 
     if loading {
         children.push(gap(20.0));
-        children.push(muted("Loading details…"));
+        children.push(loading_line("Loading details…"));
     }
     if let Some(failure) = failure {
         children.push(gap(20.0));
@@ -424,7 +424,7 @@ fn streams_pane(app: &App, groups: &[StreamGroup], video: &Video, is_series: boo
         }
     }
     if loading > 0 {
-        children.push(muted(format!(
+        children.push(loading_line(format!(
             "Asking {loading} addon{}…",
             if loading == 1 { "" } else { "s" }
         )));
@@ -832,7 +832,8 @@ pub fn screen(app: &App) -> Widget {
     let panel: Widget = match (&video, is_series) {
         (Some(video), _) => streams_pane(app, &groups, video, is_series),
         (None, true) => episodes_pane(app, &meta, season),
-        (None, false) => Padding::all(20.0, muted(if loading { "Loading…" } else { "Nothing to play." })).into(),
+        (None, false) if loading => loading_page("Loading…"),
+        (None, false) => Padding::all(20.0, muted("Nothing to play.")).into(),
     };
 
     let back = {

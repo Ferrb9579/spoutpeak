@@ -411,10 +411,12 @@ pub fn board(app: &App) -> Widget {
     let had_rows = !rows.is_empty();
     sections.extend(rows.iter().filter_map(|row| catalog_section(app, row)));
     if !had_rows {
-        sections.push(notice(
-            "Loading your addons… If this stays empty, install an addon with catalogs.",
-            MUTED,
-        ));
+        sections.push(
+            SizedBox::new()
+                .height(360.0)
+                .child(loading_page("Loading your addons… If this stays empty, install an addon with catalogs."))
+                .into(),
+        );
     }
     smooth(
         &app.controllers.board,
@@ -503,15 +505,10 @@ pub fn discover(app: &App) -> Widget {
         Padding::new(PAGE_PADDING, notice("No installed addon offers catalogs.", MUTED)).into()
     } else if let Some(error) = error {
         Padding::new(PAGE_PADDING, notice(format!("Couldn't load: {error}"), DANGER)).into()
+    } else if items.is_empty() && loading {
+        loading_page("Loading…")
     } else if items.is_empty() {
-        Padding::new(
-            PAGE_PADDING,
-            notice(
-                if loading { "Loading…" } else { "Nothing here." },
-                MUTED,
-            ),
-        )
-        .into()
+        Padding::new(PAGE_PADDING, notice("Nothing here.", MUTED)).into()
     } else {
         poster_grid(
             app,
@@ -643,14 +640,18 @@ pub fn search(app: &App) -> Widget {
         460.0,
         move |value| submit.submit_search(value),
     )
-    .on_changed(move |value| typed.search_typed(value));
+    .on_changed(move |value| {
+        typed.search_menu_typed(&value);
+        typed.search_typed(value);
+    });
     let go = {
         let app = app.clone();
         button("Search", Tone::Primary, move || {
             app.submit_search(app.controllers.search.text())
         })
     };
-    let mut bar: Vec<Widget> = vec![field.into(), hgap(10.0), go];
+    let field = super::search_menu::field(app, field.into(), 460.0);
+    let mut bar: Vec<Widget> = vec![field, hgap(10.0), go];
     if !query.is_empty() {
         let app = app.clone();
         bar.push(hgap(8.0));

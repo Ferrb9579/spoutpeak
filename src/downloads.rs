@@ -27,11 +27,21 @@ pub enum DownloadStatus {
     Done,
     Failed(String),
     Cancelled,
+    /// Stopped by the user; Resume continues from what is on disk.
+    Paused,
 }
+
+/// Why a download stopped: the app closed while it ran.
+const INTERRUPTED: &str = "Interrupted";
 
 impl DownloadStatus {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Preparing | Self::Downloading | Self::Converting)
+    }
+
+    /// Stopped with its partial file kept, so Resume can continue it.
+    pub fn can_resume(&self) -> bool {
+        matches!(self, Self::Paused | Self::Cancelled | Self::Failed(_))
     }
 }
 
@@ -58,6 +68,9 @@ pub struct Download {
     pub format: DownloadFormat,
     #[serde(skip)]
     pub speed: f64,
+    /// Torrent peers while downloading.
+    #[serde(skip)]
+    pub swarm: Option<crate::streaming::Swarm>,
     /// Share of the conversion done, 0 to 1.
     #[serde(skip)]
     pub converted: f32,
@@ -66,6 +79,9 @@ pub struct Download {
     pub encoder: Option<&'static str>,
     #[serde(skip)]
     cancel: Arc<AtomicBool>,
+    /// The running task was stopped by Pause (rather than Cancel).
+    #[serde(skip)]
+    pausing: bool,
 }
 
 impl Download {
@@ -158,7 +174,7 @@ pub fn load() -> Vec<Download> {
     for item in &mut list {
         // The app closed mid-download; the .part file lets Retry resume.
         if item.status.is_active() {
-            item.status = DownloadStatus::Failed("Interrupted".into());
+            item.status = DownloadStatus::Failed(INTERRUPTED.into());
         }
     }
     list
@@ -239,7 +255,7 @@ fn unique_file(stem: &str, ext: &str) -> PathBuf {
 
 enum Progress {
     Started { total: Option<u64>, received: u64 },
-    Tick { received: u64, speed: f64 },
+    Tick { received: u64, speed: f64, swarm: Option<crate::streaming::Swarm> },
 }
 
 /// Streams `url` into `part`, resuming when the file already has bytes and
@@ -313,7 +329,7 @@ async fn fetch(
         window_bytes += chunk.len() as u64;
         if last_report.elapsed() >= Duration::from_millis(500) {
             let elapsed = window_start.elapsed().as_secs_f64().max(0.001);
-            report(Progress::Tick { received, speed: window_bytes as f64 / elapsed });
+            report(Progress::Tick { received, speed: window_bytes as f64 / elapsed, swarm: None });
             last_report = Instant::now();
             if elapsed > 3.0 {
                 window_bytes = 0;
@@ -325,7 +341,7 @@ async fn fetch(
     if total.is_some_and(|t| received < t) {
         return Err("The connection closed early".into());
     }
-    report(Progress::Tick { received, speed: 0.0 });
+    report(Progress::Tick { received, speed: 0.0, swarm: None });
     Ok(content_type)
 }
 
@@ -386,9 +402,11 @@ impl App {
             status: DownloadStatus::Preparing,
             format: self.profile.peek(|p| p.settings.download_format),
             speed: 0.0,
+            swarm: None,
             converted: 0.0,
             encoder: None,
             cancel: Arc::new(AtomicBool::new(false)),
+            pausing: false,
         };
         self.downloads.write(|list| list.insert(0, item));
         self.save_downloads();
@@ -442,9 +460,10 @@ impl App {
                                 d.total = total;
                                 d.received = received;
                             }
-                            Progress::Tick { received, speed } => {
+                            Progress::Tick { received, speed, swarm } => {
                                 d.received = received;
                                 d.speed = speed;
+                                d.swarm = swarm;
                             }
                         })
                     })
@@ -474,7 +493,11 @@ impl App {
                                 if !started.swap(true, Ordering::Relaxed) {
                                     report(Progress::Started { total: Some(p.total), received: p.received });
                                 } else {
-                                    report(Progress::Tick { received: p.received, speed: p.speed });
+                                    report(Progress::Tick {
+                                        received: p.received,
+                                        speed: p.speed,
+                                        swarm: p.swarm,
+                                    });
                                 }
                             },
                         )
@@ -499,6 +522,7 @@ impl App {
                     app.update_download(id, |d| {
                         d.file = Some(target.clone());
                         d.speed = 0.0;
+                        d.swarm = None;
                     });
                     if format == DownloadFormat::Original {
                         app.download_done(id);
@@ -570,6 +594,7 @@ impl App {
         self.update_download(id, |d| {
             d.status = DownloadStatus::Done;
             d.speed = 0.0;
+            d.swarm = None;
         });
         let title = self.downloads.peek(|l| l.iter().find(|d| d.id == id).map(|d| d.title.clone()));
         self.notify(format!("Downloaded {}", title.unwrap_or_default()));
@@ -579,7 +604,10 @@ impl App {
     fn download_failed(&self, id: u64, error: String) {
         self.update_download(id, |d| {
             d.speed = 0.0;
-            d.status = if error == "cancelled" {
+            d.swarm = None;
+            d.status = if error == "cancelled" && d.pausing {
+                DownloadStatus::Paused
+            } else if error == "cancelled" {
                 DownloadStatus::Cancelled
             } else {
                 DownloadStatus::Failed(error)
@@ -596,12 +624,74 @@ impl App {
         });
     }
 
+    /// Stops a running download, keeping what is on disk for Resume. A
+    /// conversion can't be paused, so it is cancelled.
+    pub fn pause_download(&self, id: u64) {
+        self.update_download(id, |d| {
+            if d.status.is_active() {
+                d.pausing = d.status != DownloadStatus::Converting;
+                d.cancel.store(true, Ordering::Release);
+            }
+        });
+    }
+
+    pub fn pause_all_downloads(&self) {
+        let ids: Vec<u64> = self.downloads.peek(|l| {
+            l.iter()
+                .filter(|d| matches!(d.status, DownloadStatus::Preparing | DownloadStatus::Downloading))
+                .map(|d| d.id)
+                .collect()
+        });
+        for id in ids {
+            self.pause_download(id);
+        }
+    }
+
+    /// Resumes every paused, cancelled or failed download.
+    pub fn resume_all_downloads(&self) {
+        let ids: Vec<u64> = self.downloads.peek(|l| {
+            l.iter().filter(|d| d.status.can_resume()).map(|d| d.id).collect()
+        });
+        for id in ids {
+            self.retry_download(id);
+        }
+    }
+
+    /// Picks up downloads the app was running when it last closed.
+    pub fn resume_interrupted_downloads(&self) {
+        let ids: Vec<u64> = self.downloads.peek(|l| {
+            l.iter()
+                .filter(|d| matches!(&d.status, DownloadStatus::Failed(r) if r == INTERRUPTED))
+                .map(|d| d.id)
+                .collect()
+        });
+        for id in ids {
+            self.retry_download(id);
+        }
+    }
+
+    /// Takes finished downloads off the list. Their files stay.
+    pub fn clear_finished_downloads(&self) {
+        self.downloads.write(|l| l.retain(|d| d.status != DownloadStatus::Done));
+        self.save_downloads();
+    }
+
+    /// Plays a download that is still coming in, from the torrent engine
+    /// (which shares pieces with the download) or the original link.
+    pub fn watch_download(&self, id: u64) {
+        if let Some(stream) = self.downloads.peek(|l| l.iter().find(|d| d.id == id).map(|d| d.stream.clone())) {
+            self.play_with(&stream, None, None);
+        }
+    }
+
     /// Restarts a failed or cancelled download, continuing its partial file.
     pub fn retry_download(&self, id: u64) {
         self.update_download(id, |d| {
             d.cancel = Arc::new(AtomicBool::new(false));
+            d.pausing = false;
             d.status = DownloadStatus::Preparing;
             d.speed = 0.0;
+            d.swarm = None;
         });
         self.save_downloads();
         self.run_download(id);

@@ -11,8 +11,8 @@ pub const SURFACE: Color = Color::rgba(30, 30, 30, 255);
 pub const SURFACE_HI: Color = Color::rgba(42, 42, 42, 255);
 pub const LINE: Color = Color::rgba(51, 51, 51, 255);
 pub const TEXT: Color = Color::rgba(241, 241, 241, 255);
-pub const MUTED: Color = Color::rgba(159, 159, 159, 255);
-pub const FAINT: Color = Color::rgba(109, 109, 109, 255);
+pub const MUTED: Color = Color::rgba(178, 178, 178, 255);
+pub const FAINT: Color = Color::rgba(138, 138, 138, 255);
 pub const CONTROL_TINT: Color = Color::rgba(0, 0, 0, 77);
 // Monochrome: the interface is black and white; colour comes only from the
 // artwork on screen (the ambient backdrop, posters, the video itself).
@@ -309,9 +309,25 @@ pub fn frosted_glass(child: impl Into<Widget>, radius: f32, sigma: f32) -> Widge
     ClipRRect::new(radius, incular::widgets::BackdropFilter::blur(sigma, child)).into()
 }
 
-/// Shared background for player controls and tooltips: 30% black opacity.
+/// Shared background for player controls: 30% black opacity.
 pub fn translucent_surface(child: impl Into<Widget>, radius: f32) -> Widget {
     ClipRRect::new(radius, Container::new().radius(radius).color(CONTROL_TINT).child(child)).into()
+}
+
+/// Background for tooltips: what lies behind is blurred, then darkened, so
+/// the text never mixes with text or bright art underneath.
+pub fn acrylic_surface(child: impl Into<Widget>, radius: f32) -> Widget {
+    frosted_glass(Container::new().radius(radius).color(Color::rgba(12, 12, 12, 150)).child(child), radius, 18.0)
+}
+
+/// Text fields that sit straight on the ambient backdrop (the title bar):
+/// a dark, blurred glass, so text and placeholder read over light art too.
+pub fn backdrop_field_style() -> TextFieldStyle {
+    TextFieldStyle {
+        background: Some(Color::rgba(0, 0, 0, 80)),
+        placeholder_color: Some(Color::rgba(255, 255, 255, 165)),
+        ..field_style()
+    }
 }
 
 pub fn divider() -> Widget {
