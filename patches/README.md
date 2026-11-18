@@ -1,5 +1,30 @@
 # Patched dependencies
 
+## incular-accessibility 0.1.4
+
+`patches/incular-accessibility` contains the crates.io release and its Apache-2.0
+license. The desktop AccessKit projection now attaches every parentless semantic
+node to the native window, keeping the designated root first and the remaining
+roots in ID order. Incular permits a semantic forest under layout-only widgets;
+upstream published the entire forest but attached only `SemanticsTree::root()`.
+`accesskit_consumer` 0.38.0 then panicked with `TreeUpdate includes ... nodes which are
+neither in the current tree nor a child of another node from the update`.
+
+The host's cached projection includes all root IDs, so adding, removing, or
+reparenting a root also updates the native window's children. Accessibility
+remains enabled. Tests validate full and incremental updates with the actual
+AccessKit consumer, including a reproduction using the original single-root
+host, focus, reactivation, empty trees, and generational slot reuse.
+
+Run from the repository root:
+
+```powershell
+cargo test --manifest-path patches/incular-accessibility/Cargo.toml --target-dir target/accessibility-tests
+```
+
+When upgrading Incular, drop this patch if the native host handles semantic
+forests, or reapply it and rerun these tests.
+
 ## librqbit 9.1.0
 
 `patches/librqbit` is librqbit 9.1.0 from crates.io, with peer encryption

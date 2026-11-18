@@ -67,3 +67,4 @@ debug = 1
 # See patches/README.md.
 [patch.crates-io]
 librqbit = { path = "patches/librqbit" }
+incular-accessibility = { path = "patches/incular-accessibility" }
