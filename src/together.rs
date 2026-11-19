@@ -117,13 +117,53 @@ pub struct TogetherState {
     pub host_online: bool,
     /// The room has a password.
     pub protected: bool,
+    /// The password this app joined or created the room with (empty when
+    /// it has none), to show and copy.
+    pub password: String,
     pub chat: Vec<ChatLine>,
     /// Chat lines that arrived while the room panel was closed.
     pub unread: usize,
     /// Viewers whose player is waiting for data: (id, name).
     pub waiting: Vec<(u64, String)>,
-    /// What the room is watching: (title, episode), for the room page.
-    pub now_playing: Option<(String, String)>,
+    /// What the room is watching, for the room page.
+    pub now_playing: Option<NowPlaying>,
+    /// Where the room's playback was at a moment, to work out where it is
+    /// now without the player open.
+    pub clock: Option<RoomClock>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NowPlaying {
+    pub title: String,
+    pub episode: String,
+    pub poster: Option<String>,
+    /// Year, runtime and the like.
+    pub facts: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RoomClock {
+    pub position: f64,
+    pub paused: bool,
+    pub speed: f64,
+    /// Length of the video, when someone in the room knows it.
+    pub duration: Option<f64>,
+    pub at: Instant,
+}
+
+impl RoomClock {
+    /// Seconds into the video now.
+    pub fn now(&self) -> f64 {
+        let position = if self.paused {
+            self.position
+        } else {
+            self.position + self.at.elapsed().as_secs_f64() * self.speed
+        };
+        match self.duration {
+            Some(duration) if duration > 0.0 => position.min(duration),
+            _ => position,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -164,6 +204,9 @@ struct Inner {
     last_probe: Cell<Instant>,
     /// Smoothed one-way delay to the server, in seconds.
     half_rtt: Cell<f64>,
+    /// Chat this app cleared for itself: lines sent before this unix time
+    /// stay hidden, also when a reconnect brings the history back.
+    chat_cleared_at: Cell<u64>,
 }
 
 #[derive(Clone)]
@@ -191,6 +234,7 @@ impl Together {
                 ping_sent: Cell::new(None),
                 last_probe: Cell::new(Instant::now()),
                 half_rtt: Cell::new(0.05),
+                chat_cleared_at: Cell::new(0),
             }),
         }
     }
@@ -313,6 +357,7 @@ impl App {
         together.inner.media.borrow_mut().take();
         together.inner.pending.set(None);
         together.inner.leader.set(false);
+        together.inner.chat_cleared_at.set(0);
         if together.inner.auto_paused.replace(false) {
             self.together_resume_after_wait();
         }
@@ -393,6 +438,16 @@ impl App {
                 }
             }
             "members" => self.together_members(&message),
+            "chat_cleared" => {
+                let by_me = message["id"].as_u64() == Some(together.state.peek(|s| s.me));
+                together.state.write(|s| {
+                    s.chat.clear();
+                    s.unread = 0;
+                });
+                if !by_me {
+                    self.notify(format!("{from} cleared the chat"));
+                }
+            }
             "chat" | "notice" => {
                 let line = chat_line(&message, together.state.peek(|s| s.me));
                 let open = self.player.state.peek(|s| s.menu == Menu::Together);
@@ -414,6 +469,7 @@ impl App {
             }
             "media" => {
                 together.inner.leader.set(false);
+                together.state.write(|s| s.clock = None);
                 self.together_play_media(&message["media"]);
             }
             "state" => {
@@ -422,6 +478,7 @@ impl App {
                     together.inner.leader.set(false);
                 }
                 if let Some(mut state) = parse_state(&message) {
+                    self.together_set_clock(&message, state);
                     // It was sent this long ago: the sender's trip to the
                     // server, plus ours from it.
                     let delay = message["lat"].as_f64().unwrap_or(0.0).clamp(0.0, 2.0)
@@ -467,19 +524,23 @@ impl App {
         let room = message["room"].as_str().unwrap_or_default().to_owned();
         let role = Role::parse(&message["role"]);
         let me = message["you"].as_u64().unwrap_or(0);
-        {
+        let protected = message["protected"].as_bool().unwrap_or(false);
+        let password = {
             let mut ticket = together.inner.ticket.borrow_mut();
             ticket.room = room.clone();
             ticket.token = message["token"].as_str().unwrap_or_default().to_owned();
-        }
+            if protected { ticket.password.clone() } else { String::new() }
+        };
+        let cleared_at = together.inner.chat_cleared_at.get();
         together.inner.retries.set(0);
         let chat: Vec<ChatLine> = message["chat"]
             .as_array()
             .map(|lines| {
                 lines
                     .iter()
-                    .map(|line| {
-                        let mut line = chat_line(line, me);
+                    .map(|line| chat_line(line, me))
+                    .filter(|line| line.at >= cleared_at)
+                    .map(|mut line| {
                         // History, not news: no floating bubble.
                         line.received = Instant::now()
                             .checked_sub(Duration::from_secs(3600))
@@ -496,13 +557,19 @@ impl App {
             s.role = role;
             s.members = members(&message["members"]);
             s.host_online = message["host_online"].as_bool().unwrap_or(false);
-            s.protected = message["protected"].as_bool().unwrap_or(false);
+            s.protected = protected;
+            s.password = password;
             s.chat = chat;
             s.waiting.clear();
         });
 
         let media = &message["media"];
         self.together_remember_media(media);
+        let clock = parse_state(&message["state"]);
+        together.state.write(|s| s.clock = None);
+        if let Some(state) = clock {
+            self.together_set_clock(&message["state"], state);
+        }
         if media.is_null() {
             // A new room, or nobody has picked anything yet: share what is
             // playing here.
@@ -597,8 +664,18 @@ impl App {
                 .or_else(|| media.stream.title.clone())
                 .or_else(|| media.stream.name.clone())
                 .unwrap_or_else(|| "A video".to_owned());
-            let episode = media.video.as_ref().and_then(|v| v.title.clone()).unwrap_or_default();
-            (title, episode)
+            let episode = media.video.as_ref().map(|v| v.label()).unwrap_or_default();
+            let poster = media
+                .meta
+                .as_ref()
+                .and_then(|m| m.poster.clone())
+                .or_else(|| media.video.as_ref().and_then(|v| v.thumbnail.clone()));
+            let mut facts: Vec<String> = Vec::new();
+            if let Some(meta) = &media.meta {
+                facts.extend(meta.release_line());
+                facts.extend(meta.runtime.clone());
+            }
+            NowPlaying { title, episode, poster, facts: facts.join(" · ") }
         });
         self.together.state.write(|s| s.now_playing = now);
     }
@@ -660,6 +737,25 @@ impl App {
             return;
         }
         self.together.send(json!({ "t": "chat", "text": text }));
+    }
+
+    /// Empties this app's copy of the chat; others keep theirs.
+    pub fn together_clear_chat_here(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.together.inner.chat_cleared_at.set(now);
+        self.together.state.write(|s| {
+            s.chat.clear();
+            s.unread = 0;
+        });
+    }
+
+    /// Host and co-hosts: empties the chat for everyone in the room.
+    pub fn together_clear_chat_everywhere(&self) {
+        if self.together.state.peek(|s| s.role.controls()) {
+            self.together.send(json!({ "t": "clear_chat" }));
+        }
     }
 
     pub fn together_set_role(&self, id: u64, role: Role) {
@@ -733,17 +829,44 @@ impl App {
     }
 
     fn together_send_state(&self, heartbeat: bool) {
-        let (paused, speed) = self.player.state.peek(|s| (s.paused, s.speed));
+        let (paused, speed, duration) = self.player.state.peek(|s| (s.paused, s.speed, s.duration));
         let position = self.player.precise_position().unwrap_or_else(|| self.player.position.get_untracked());
         self.together.inner.last_beat.set(Instant::now());
-        self.together.send(json!({
+        let message = json!({
             "t": "state",
             "position": position,
             "paused": paused,
             "speed": speed,
+            "duration": duration,
             "hb": heartbeat,
             "lat": self.together.inner.half_rtt.get(),
-        }));
+        });
+        if let Some(state) = parse_state(&message) {
+            self.together_set_clock(&message, state);
+        }
+        self.together.send(message);
+    }
+
+    /// Remembers the room's playback position (for the room page).
+    fn together_set_clock(&self, message: &Value, state: Pending) {
+        let duration = message["duration"].as_f64().filter(|d| d.is_finite() && *d > 0.0);
+        let changed = self.together.state.peek(|s| match &s.clock {
+            Some(old) => old.paused != state.paused || (old.now() - state.position).abs() > 1.5 || duration.is_some() != old.duration.is_some(),
+            None => true,
+        });
+        let clock = RoomClock {
+            position: state.position,
+            paused: state.paused,
+            speed: state.speed,
+            duration: duration.or_else(|| self.together.state.peek(|s| s.clock.and_then(|c| c.duration))),
+            at: state.received,
+        };
+        // Heartbeats only move the clock along: no rebuild for those.
+        if changed {
+            self.together.state.write(|s| s.clock = Some(clock));
+        } else {
+            self.together.state.write_silent(|s| s.clock = Some(clock));
+        }
     }
 
     /// The player opened the stream and knows its length.

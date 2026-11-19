@@ -3,7 +3,7 @@
 use super::motion;
 use super::widgets::*;
 use crate::state::{App, FeaturedCarousel, LibrarySort, Load, ui};
-use crate::addons::types::{LibraryItem, Meta};
+use crate::addons::types::{LibraryItem, Meta, WatchStatus};
 use crate::theme::*;
 use incular::prelude::*;
 use std::collections::HashMap;
@@ -18,6 +18,32 @@ fn capitalized(value: &str) -> String {
 }
 
 /// A single line of chips that scrolls sideways when it does not fit.
+/// A [`chip`] with a leading icon.
+fn pick_chip(glyph: Glyph, label: String, selected: bool, on_click: impl Fn() + 'static) -> Widget {
+    use incular::controls::{Button, ButtonStyle, StateColor};
+    let (background, hover, foreground) =
+        if selected { (SELECTED, SELECTED, ON_SELECTED) } else { (GLASS, GLASS_HOVER, MUTED) };
+    Button::with_child(row(vec![
+        icon(glyph, 13.0, foreground),
+        hgap(6.0),
+        text(label, 12.5, if selected { FontWeight::W600 } else { FontWeight::W500 }, foreground).into(),
+    ]))
+    .style(ButtonStyle {
+        background: Some(background),
+        background_states: Some(StateColor::new(background).hovered(hover)),
+        foreground: Some(foreground),
+        border: Some(Border::new(0.0, Color::TRANSPARENT)),
+        border_radius: Some(15.0),
+        padding: Some(EdgeInsets::only(10.0, 0.0, 13.0, 0.0)),
+        height: Some(30.0),
+        overlay_color: Some(Color::TRANSPARENT.into()),
+        animation_duration: Some(std::time::Duration::ZERO),
+        ..ButtonStyle::default()
+    })
+    .on_click(on_click)
+    .into()
+}
+
 fn chip_bar(app: &App, key: &str, chips: Vec<Widget>) -> Widget {
     let mut spaced = Vec::with_capacity(chips.len() * 2);
     for chip in chips {
@@ -538,10 +564,86 @@ pub fn discover(app: &App) -> Widget {
 // ----------------------------------------------------------------- library
 
 pub fn library(app: &App) -> Widget {
-    let (kind, sort) = app.library_view.read(|v| (v.kind.clone(), v.sort));
-    let mut all: Vec<LibraryItem> = app
-        .library
-        .read(|library| library.values().filter(|i| !i.removed).cloned().collect());
+    let (kind, sort, status, playlist) =
+        app.library_view.read(|v| (v.kind.clone(), v.sort, v.status, v.playlist.clone()));
+    let playlists = app.playlists.read(|all| all.clone());
+    // A playlist that was deleted meanwhile falls back to the library.
+    let playlist = playlist.and_then(|id| playlists.iter().find(|p| p.id == id).cloned());
+    let mut all: Vec<LibraryItem> = match &playlist {
+        // Playlist entries, with what the library knows about each.
+        Some(list) => app.library.read(|library| {
+            list.items
+                .iter()
+                .map(|entry| {
+                    library.get(&entry.id).cloned().unwrap_or_else(|| LibraryItem {
+                        id: entry.id.clone(),
+                        name: entry.name.clone(),
+                        kind: entry.kind.clone(),
+                        poster: entry.poster.clone(),
+                        poster_shape: entry.poster_shape.clone(),
+                        ..LibraryItem::default()
+                    })
+                })
+                .collect()
+        }),
+        None => app.library.read(|library| library.values().filter(|i| !i.removed).cloned().collect()),
+    };
+
+    // Library / playlists, and making a playlist.
+    let mut list_chips = vec![{
+        let app = app.clone();
+        pick_chip(icons::bookmark(), "Library".to_owned(), playlist.is_none(), move || {
+            app.library_view.write(|v| v.playlist = None)
+        })
+    }];
+    for list in &playlists {
+        let (app, id) = (app.clone(), list.id.clone());
+        let selected = playlist.as_ref().is_some_and(|p| p.id == list.id);
+        list_chips.push(pick_chip(
+            icons::playlist(),
+            format!("{}  {}", list.name, list.items.len()),
+            selected,
+            move || app.library_view.write(|v| v.playlist = Some(id.clone())),
+        ));
+    }
+    {
+        let (submit, click) = (app.clone(), app.clone());
+        let create = |app: &App| {
+            if let Some(id) = app.create_playlist(&app.controllers.playlist_name.text()) {
+                app.controllers.playlist_name.set_text("");
+                app.library_view.write(|v| v.playlist = Some(id));
+            }
+        };
+        list_chips.push(hgap(8.0));
+        list_chips.push(
+            input(&app.controllers.playlist_name, "New playlist", 170.0, move |_| create(&submit))
+                .size(Size::new(170.0, 30.0))
+                .into(),
+        );
+        list_chips.push(small_icon_button(icons::plus(), None, Tone::Neutral, move || create(&click)));
+    }
+
+    // Status filter, with how many titles each has.
+    let mut status_chips = vec![{
+        let app = app.clone();
+        chip("Any status", status.is_none(), move || app.library_view.write(|v| v.status = None))
+    }];
+    for option in WatchStatus::ALL {
+        let count = all.iter().filter(|i| i.status == Some(option)).count();
+        if count == 0 && status != Some(option) {
+            continue;
+        }
+        let app = app.clone();
+        status_chips.push(pick_chip(
+            super::detail::status_glyph(option),
+            format!("{}  {count}", option.label()),
+            status == Some(option),
+            move || app.library_view.write(|v| v.status = Some(option)),
+        ));
+    }
+    if let Some(status) = status {
+        all.retain(|i| i.status == Some(status));
+    }
 
     let mut kinds: Vec<String> = all.iter().map(|i| i.kind.clone()).collect();
     kinds.sort();
@@ -598,27 +700,44 @@ pub fn library(app: &App) -> Widget {
     );
     let metas: Rc<Vec<Meta>> = Rc::new(all.iter().map(LibraryItem::as_meta).collect());
 
+    let statuses: Rc<HashMap<String, WatchStatus>> =
+        Rc::new(all.iter().filter_map(|i| Some((i.id.clone(), i.status?))).collect());
+    let empty = match (&playlist, status) {
+        (Some(_), _) => "This playlist is empty. Add titles from their details page.",
+        (None, Some(_)) => "No titles with this status.",
+        (None, None) => "Your library is empty. Add something from its details page.",
+    };
     let body: Widget = if metas.is_empty() {
-        Padding::new(
-            PAGE_PADDING,
-            notice("Your library is empty. Add something from its details page.", MUTED),
-        )
-        .into()
+        Padding::new(PAGE_PADDING, notice(empty, MUTED)).into()
     } else {
         poster_grid(
             app,
             metas,
             &app.controllers.library,
-            |meta| Some(capitalized(&meta.kind)),
+            move |meta| {
+                Some(match statuses.get(meta.id()) {
+                    Some(status) => format!("{} · {}", capitalized(&meta.kind), status.label()),
+                    None => capitalized(&meta.kind),
+                })
+            },
             move |meta| progress.get(meta.id()).copied(),
             || {},
         )
     };
 
+    let mut trailing: Vec<Widget> = Vec::new();
+    if let Some(list) = &playlist {
+        let (app, id) = (app.clone(), list.id.clone());
+        trailing.push(icon_text_button(icons::trash_2(), "Delete playlist", Tone::Danger, move || {
+            app.delete_playlist(&id)
+        }));
+    }
     page(
-        "Library",
-        vec![],
+        playlist.as_ref().map_or("Library", |p| p.name.as_str()),
+        trailing,
         vcol(vec![
+            chip_bar(app, "chips:library-lists", list_chips),
+            chip_bar(app, "chips:library-status", status_chips),
             chip_bar(app, "chips:library-kind", kind_chips),
             chip_bar(app, "chips:library-sort", sort_chips),
             Expanded::new(body).into(),
@@ -640,18 +759,16 @@ pub fn search(app: &App) -> Widget {
         460.0,
         move |value| submit.submit_search(value),
     )
-    .on_changed(move |value| {
-        typed.search_menu_typed(&value);
-        typed.search_typed(value);
-    });
+    // No suggestion dropdown here: the page itself lists results as you
+    // type, and the recent searches above them.
+    .on_changed(move |value| typed.search_typed(value));
     let go = {
         let app = app.clone();
         button("Search", Tone::Primary, move || {
             app.submit_search(app.controllers.search.text())
         })
     };
-    let field = super::search_menu::field(app, field.into(), 460.0);
-    let mut bar: Vec<Widget> = vec![field, hgap(10.0), go];
+    let mut bar: Vec<Widget> = vec![field.into(), hgap(10.0), go];
     if !query.is_empty() {
         let app = app.clone();
         bar.push(hgap(8.0));

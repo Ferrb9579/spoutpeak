@@ -22,6 +22,8 @@
 //!   the host and co-hosts only.
 //! - `buffering {on}`: this viewer is waiting for data.
 //! - `chat {text}`: a chat line.
+//! - `clear_chat`: host and co-hosts; empties everyone's chat and the
+//!   history new joiners get.
 //! - `role {id, role}`: host only; `role` is `cohost`, `viewer` or `host`
 //!   (hands the host role over).
 //! - `kick {id}`: host only.
@@ -30,7 +32,7 @@
 //! Server to client: `welcome {room, you, token, role, members, media,
 //! state, chat, host_online, protected}`, `members {members, host_online}`,
 //! `notice {text}` (also kept in the chat history), `chat {from, id, role,
-//! text, at}`, `kicked`, `replaced`, `error {code, message}`, and the
+//! text, at}`, `chat_cleared {from, id}`, `kicked`, `replaced`, `error {code, message}`, and the
 //! `media` / `state` / `buffering` messages of others with `from` and `id`.
 //!
 //! The server speaks plain HTTP. Put it behind an HTTPS reverse proxy (or a
@@ -368,11 +370,14 @@ fn in_room(all: &mut Rooms, me: &Joined, kind: &str, message: &Value, tx: &mpsc:
                 // A new video starts from its own beginning.
                 room.state = None;
             } else {
-                let state = json!({
+                let mut state = json!({
                     "position": message["position"].as_f64().unwrap_or(0.0),
                     "paused": message["paused"].as_bool().unwrap_or(true),
                     "speed": message["speed"].as_f64().unwrap_or(1.0),
                 });
+                if let Some(duration) = message["duration"].as_f64().filter(|d| d.is_finite() && *d > 0.0) {
+                    state["duration"] = json!(duration);
+                }
                 room.state = Some((state, Instant::now()));
             }
             room.broadcast(Some(id), &out);
@@ -397,6 +402,15 @@ fn in_room(all: &mut Rooms, me: &Joined, kind: &str, message: &Value, tx: &mpsc:
                 room.remember(line.clone());
                 room.broadcast(None, &line);
             }
+        }
+        "clear_chat" => {
+            if !role.controls() {
+                error(tx, "forbidden", "Only the host and co-hosts can clear the chat");
+                return true;
+            }
+            room.chat.clear();
+            room.broadcast(None, &json!({ "t": "chat_cleared", "from": name, "id": id }));
+            room.notice(format!("{name} cleared the chat"));
         }
         "role" => {
             if role != Role::Host {

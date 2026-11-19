@@ -763,8 +763,94 @@ pub struct LibraryItem {
     pub mtime: Option<String>,
     #[serde(default, deserialize_with = "lenient_default")]
     pub state: LibraryState,
+    /// Where the title stands for the viewer (Spoutpeak's own field).
+    #[serde(
+        default,
+        rename = "spoutpeakStatus",
+        deserialize_with = "lenient_default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub status: Option<WatchStatus>,
+    /// Episodes marked watched, by video id (Spoutpeak's own field).
+    #[serde(
+        default,
+        rename = "spoutpeakWatched",
+        deserialize_with = "lenient_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub watched_videos: Vec<String>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
+}
+
+/// A title's place in the viewer's list, as in anime and TV trackers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WatchStatus {
+    Watching,
+    PlanToWatch,
+    OnHold,
+    Watched,
+    Dropped,
+}
+
+impl WatchStatus {
+    pub const ALL: [WatchStatus; 5] =
+        [Self::Watching, Self::PlanToWatch, Self::OnHold, Self::Watched, Self::Dropped];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Watching => "Watching",
+            Self::PlanToWatch => "Plan to watch",
+            Self::OnHold => "On hold",
+            Self::Watched => "Watched",
+            Self::Dropped => "Dropped",
+        }
+    }
+}
+
+/// A named, ordered list of titles made by the viewer.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Playlist {
+    pub id: String,
+    pub name: String,
+    pub items: Vec<PlaylistEntry>,
+}
+
+/// Enough of a title to show its poster and open it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlaylistEntry {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub poster: Option<String>,
+    pub poster_shape: Option<String>,
+}
+
+impl PlaylistEntry {
+    pub fn of(meta: &Meta) -> Self {
+        Self {
+            id: meta.id().to_owned(),
+            name: meta.title().to_owned(),
+            kind: meta.kind.clone(),
+            poster: meta.poster.clone(),
+            poster_shape: meta.poster_shape.clone(),
+        }
+    }
+
+    pub fn as_meta(&self) -> Meta {
+        Meta {
+            id: Some(self.id.clone()),
+            kind: self.kind.clone(),
+            name: Some(self.name.clone()),
+            poster: self.poster.clone(),
+            poster_shape: self.poster_shape.clone(),
+            ..Meta::default()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -804,6 +890,13 @@ impl LibraryItem {
         } else {
             0.0
         }
+    }
+    /// The whole title is marked watched.
+    pub fn is_watched(&self) -> bool {
+        self.state.flagged_watched > 0.0 || self.status == Some(WatchStatus::Watched)
+    }
+    pub fn video_watched(&self, video_id: &str) -> bool {
+        self.watched_videos.iter().any(|id| id == video_id)
     }
     /// Which items belong in the Continue Watching row.
     pub fn is_in_continue_watching(&self) -> bool {

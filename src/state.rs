@@ -554,6 +554,10 @@ pub enum LibrarySort {
 pub struct LibraryView {
     pub kind: Option<String>,
     pub sort: LibrarySort,
+    /// Only titles with this status.
+    pub status: Option<WatchStatus>,
+    /// A playlist (by id) shown instead of the library.
+    pub playlist: Option<String>,
 }
 
 /// Text controllers and scroll positions must outlive rebuilds.
@@ -585,6 +589,8 @@ pub struct Controllers {
     /// The player's audio / subtitle / speed panels.
     pub player_menu: ScrollController,
     pub season_search: TextEditingController,
+    /// Name of a new playlist (Library page and detail page).
+    pub playlist_name: TextEditingController,
     pub season_list: ScrollController,
     pub spotlight_search: TextEditingController,
     pub spotlight_list: ScrollController,
@@ -621,6 +627,7 @@ impl Controllers {
             sync_list: ScrollController::new(),
             player_menu: ScrollController::new(),
             season_search: TextEditingController::new(),
+            playlist_name: TextEditingController::new(),
             season_list: ScrollController::new(),
             spotlight_search: TextEditingController::new(),
             spotlight_list: ScrollController::new(),
@@ -648,6 +655,7 @@ pub struct App {
     pub profile: Shared<Profile>,
     pub library: Shared<HashMap<String, LibraryItem>>,
     pub library_view: Shared<LibraryView>,
+    pub playlists: Shared<Vec<Playlist>>,
     pub board: Shared<BoardState>,
     pub discover: Shared<DiscoverState>,
     pub search: Shared<SearchState>,
@@ -708,7 +716,10 @@ impl App {
             library_view: Shared::new(LibraryView {
                 kind: None,
                 sort: LibrarySort::Recent,
+                status: None,
+                playlist: None,
             }),
+            playlists: Shared::new(store::load_playlists()),
             board: Shared::new(BoardState::default()),
             discover: Shared::new(DiscoverState::default()),
             search: Shared::new(SearchState::default()),
@@ -1560,6 +1571,174 @@ impl App {
         });
     }
 
+    /// Changes `meta`'s library item (made, temporary, when there is none)
+    /// and saves the library.
+    fn edit_library_item(&self, meta: &Meta, edit: impl FnOnce(&mut LibraryItem)) {
+        let id = meta.id().to_owned();
+        if id.is_empty() {
+            return;
+        }
+        let now = now_iso();
+        self.library.write(|library| {
+            let item = library.entry(id.clone()).or_insert_with(|| LibraryItem {
+                id: id.clone(),
+                removed: true,
+                temp: true,
+                ctime: Some(now.clone()),
+                ..LibraryItem::default()
+            });
+            item.name = meta.title().to_owned();
+            item.kind = meta.kind.clone();
+            item.poster = meta.poster.clone();
+            item.poster_shape = meta.poster_shape.clone();
+            item.mtime = Some(now);
+            edit(item);
+        });
+        self.library.peek(store::save_library);
+    }
+
+    pub fn watch_status(&self, id: &str) -> Option<WatchStatus> {
+        self.library.read(|l| l.get(id).and_then(|i| i.status))
+    }
+
+    /// Sets (or clears) where `meta` stands. A status puts the title in the
+    /// library.
+    pub fn set_watch_status(&self, meta: &Meta, status: Option<WatchStatus>) {
+        self.edit_library_item(meta, |item| {
+            item.status = status;
+            if status.is_some() {
+                item.removed = false;
+                item.temp = false;
+            }
+        });
+        self.notify(match status {
+            Some(status) => format!("Marked as {}", status.label().to_lowercase()),
+            None => "Status cleared".to_owned(),
+        });
+    }
+
+    pub fn is_watched(&self, id: &str) -> bool {
+        self.library.read(|l| l.get(id).is_some_and(LibraryItem::is_watched))
+    }
+
+    /// Marks the whole title watched (every episode of a series too), or
+    /// takes the mark off again.
+    pub fn toggle_watched(&self, meta: &Meta) {
+        let watched = !self.is_watched(meta.id());
+        let episodes: Vec<String> = meta.videos.iter().map(|v| v.id().to_owned()).collect();
+        self.edit_library_item(meta, |item| {
+            if watched {
+                item.state.flagged_watched = 1.0;
+                item.state.times_watched = item.state.times_watched.max(1.0);
+                // Nothing left to continue.
+                item.state.time_offset = 0.0;
+                for episode in &episodes {
+                    if !item.watched_videos.contains(episode) {
+                        item.watched_videos.push(episode.clone());
+                    }
+                }
+                if !item.removed {
+                    item.status = Some(WatchStatus::Watched);
+                }
+            } else {
+                item.state.flagged_watched = 0.0;
+                item.watched_videos.clear();
+                if item.status == Some(WatchStatus::Watched) {
+                    item.status = None;
+                }
+            }
+        });
+        self.notify(if watched { "Marked as watched" } else { "Marked as not watched" });
+    }
+
+    pub fn video_watched(&self, meta_id: &str, video_id: &str) -> bool {
+        self.library.read(|l| l.get(meta_id).is_some_and(|i| i.video_watched(video_id)))
+    }
+
+    /// Marks one episode watched or not.
+    pub fn toggle_video_watched(&self, meta: &Meta, video_id: &str) {
+        let video_id = video_id.to_owned();
+        self.edit_library_item(meta, |item| {
+            if let Some(at) = item.watched_videos.iter().position(|v| *v == video_id) {
+                item.watched_videos.remove(at);
+                item.state.flagged_watched = 0.0;
+                if item.status == Some(WatchStatus::Watched) {
+                    item.status = Some(WatchStatus::Watching);
+                }
+            } else {
+                item.watched_videos.push(video_id);
+            }
+        });
+    }
+
+    // ---------------------------------------------------------- playlists
+
+    fn save_playlists(&self) {
+        self.playlists.peek(store::save_playlists);
+    }
+
+    /// A new, empty playlist; returns its id.
+    pub fn create_playlist(&self, name: &str) -> Option<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            self.notify("Name the playlist first");
+            return None;
+        }
+        if self.playlists.peek(|all| all.iter().any(|p| p.name.eq_ignore_ascii_case(name))) {
+            self.notify("There is already a playlist with that name");
+            return None;
+        }
+        let id = format!("pl-{}", chrono::Utc::now().timestamp_millis());
+        self.playlists.write(|all| {
+            all.push(Playlist { id: id.clone(), name: name.to_owned(), items: Vec::new() })
+        });
+        self.save_playlists();
+        Some(id)
+    }
+
+    pub fn delete_playlist(&self, id: &str) {
+        let name = self.playlists.peek(|all| all.iter().find(|p| p.id == id).map(|p| p.name.clone()));
+        self.playlists.write(|all| all.retain(|p| p.id != id));
+        if self.library_view.peek(|v| v.playlist.as_deref() == Some(id)) {
+            self.library_view.write(|v| v.playlist = None);
+        }
+        self.save_playlists();
+        if let Some(name) = name {
+            self.notify(format!("Deleted playlist {name}"));
+        }
+    }
+
+    pub fn in_playlist(&self, playlist: &str, meta_id: &str) -> bool {
+        self.playlists
+            .read(|all| all.iter().any(|p| p.id == playlist && p.items.iter().any(|i| i.id == meta_id)))
+    }
+
+    /// Adds `meta` to the playlist, or takes it out when it is there.
+    pub fn toggle_in_playlist(&self, playlist: &str, meta: &Meta) {
+        if meta.id().is_empty() {
+            return;
+        }
+        let mut added = None;
+        self.playlists.write(|all| {
+            if let Some(list) = all.iter_mut().find(|p| p.id == playlist) {
+                match list.items.iter().position(|i| i.id == meta.id()) {
+                    Some(at) => {
+                        list.items.remove(at);
+                        added = Some((false, list.name.clone()));
+                    }
+                    None => {
+                        list.items.push(PlaylistEntry::of(meta));
+                        added = Some((true, list.name.clone()));
+                    }
+                }
+            }
+        });
+        self.save_playlists();
+        if let Some((added, name)) = added {
+            self.notify(if added { format!("Added to {name}") } else { format!("Removed from {name}") });
+        }
+    }
+
     pub fn dismiss_continue_watching(&self, id: &str) {
         let now = now_iso();
         self.library.write(|library| {
@@ -1611,9 +1790,22 @@ impl App {
             state.time_watched += watched_delta_ms;
             state.overall_time_watched += watched_delta_ms;
             state.last_watched = Some(now.clone());
+            // A library title being played is being watched.
+            if !item.removed && matches!(item.status, None | Some(WatchStatus::PlanToWatch)) {
+                item.status = Some(WatchStatus::Watching);
+            }
+            let state = &mut item.state;
             if ended {
+                if !video_id.is_empty() && video_id != id && !item.watched_videos.iter().any(|v| v == video_id) {
+                    item.watched_videos.push(video_id.to_owned());
+                }
                 state.times_watched += 1.0;
-                state.flagged_watched = 1.0;
+                if next.is_none() {
+                    state.flagged_watched = 1.0;
+                    if item.status == Some(WatchStatus::Watching) {
+                        item.status = Some(WatchStatus::Watched);
+                    }
+                }
                 match next {
                     Some(next) => {
                         state.video_id = Some(next.id().to_owned());

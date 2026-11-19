@@ -31,7 +31,14 @@ pub fn field(app: &App, field: Widget, width: f32) -> Widget {
     let region = TapRegion::new(field)
         .group_id(GROUP)
         .on_tap_inside(move |_| open.open_search_menu())
-        .on_tap_outside(move |_| close.close_search_menu());
+        .on_tap_outside(move |_| {
+            close.close_search_menu();
+            // Clicking elsewhere (the title bar too) also leaves the field,
+            // so typing no longer goes into it.
+            if !close.controllers.focus.has_primary_focus() {
+                close.controllers.focus.request_focus();
+            }
+        });
     CompositedTransformTarget::new(LINK.with(|l| l.clone()), region).into()
 }
 

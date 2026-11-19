@@ -17,16 +17,125 @@ fn role_color(role: Role) -> Color {
     }
 }
 
-fn badge(role: Role) -> Widget {
+fn role_glyph(role: Role) -> Glyph {
+    match role {
+        Role::Host => icons::crown(),
+        Role::Cohost => icons::play_circle(),
+        Role::Viewer => icons::eye(),
+    }
+}
+
+/// What a role may do, for the badge's tooltip.
+fn role_hint(role: Role, mine: bool) -> &'static str {
+    match (role, mine) {
+        (Role::Host, true) => "You're the host: you control playback and manage the room",
+        (Role::Cohost, true) => "You're a co-host: you can control playback",
+        (Role::Viewer, true) => "You're a viewer: playback follows the host",
+        (Role::Host, false) => "Host: controls playback and manages the room",
+        (Role::Cohost, false) => "Co-host: can control playback",
+        (Role::Viewer, false) => "Viewer: follows the host",
+    }
+}
+
+fn badge(role: Role, mine: bool) -> Widget {
     let color = role_color(role);
-    Container::new()
-        .padding(EdgeInsets::symmetric(7.0, 2.0))
-        .decoration(
-            BoxDecoration::new()
-                .color(Color::rgba(255, 255, 255, 14))
-                .border_radius(BorderRadius::all(Radius::circular(8.0))),
-        )
-        .child(text(role.label(), 10.5, FontWeight::W700, color))
+    super::tooltip::tooltip(
+        role_hint(role, mine),
+        Container::new()
+            .padding(EdgeInsets::only(6.0, 3.0, 8.0, 3.0))
+            .decoration(
+                BoxDecoration::new()
+                    .color(Color::rgba(255, 255, 255, 14))
+                    .border_radius(BorderRadius::all(Radius::circular(9.0))),
+            )
+            .child(row(vec![
+                icon(role_glyph(role), 11.0, color),
+                hgap(4.0),
+                text(role.label(), 10.5, FontWeight::W700, color).into(),
+            ])),
+    )
+}
+
+thread_local! {
+    static CHAT_SELECTION: incular::widgets::SelectionAreaController =
+        incular::widgets::SelectionAreaController::new();
+    /// The room password is shown in plain text.
+    static PASSWORD_SHOWN: Signal<bool> = Signal::new(false);
+}
+
+/// A small icon-only button with a tooltip.
+fn tool(glyph: Glyph, tip: &str, on_click: impl Fn() + 'static) -> Widget {
+    super::tooltip::tooltip(
+        tip,
+        Widget::from(small_icon_button(glyph, None, Tone::Ghost, on_click)).accessibility_label(tip),
+    )
+}
+
+fn copy_code(room: &str) -> Widget {
+    let room = room.to_owned();
+    tool(icons::copy(), "Copy room code", move || {
+        crate::state::copy_text(room.clone(), "Room code copied".into())
+    })
+}
+
+/// The room password: masked until the eye is clicked, with a copy button.
+/// Only this pill rebuilds when it is revealed.
+fn password_pill(password: String, size: f32) -> Widget {
+    Builder::new(move |_| {
+        let shown = PASSWORD_SHOWN.with(|s| s.get());
+        let value = if shown {
+            password.clone()
+        } else {
+            "\u{2022}".repeat(password.chars().count().clamp(6, 12))
+        };
+        let copied = password.clone();
+        Container::new()
+            .padding(EdgeInsets::only(9.0, 0.0, 2.0, 0.0))
+            .decoration(
+                BoxDecoration::new()
+                    .color(Color::rgba(255, 255, 255, 14))
+                    .border_radius(BorderRadius::all(Radius::circular(10.0))),
+            )
+            .child(row(vec![
+                super::tooltip::tooltip("Password", icon(icons::lock(), 13.0, MUTED)),
+                hgap(7.0),
+                text(value, size, FontWeight::W600, TEXT).max_lines(Some(1)).into(),
+                hgap(4.0),
+                tool(
+                    if shown { icons::eye_closed() } else { icons::eye() },
+                    if shown { "Hide password" } else { "Show password" },
+                    move || {
+                        PASSWORD_SHOWN.with(|s| {
+                            s.set(!shown);
+                        })
+                    },
+                ),
+                tool(icons::copy(), "Copy password", move || {
+                    crate::state::copy_text(copied.clone(), "Password copied".into())
+                }),
+            ]))
+            .into()
+    })
+    .into()
+}
+
+/// "Chat" with its clear buttons: for this app, and (host and co-hosts)
+/// for everyone in the room.
+fn chat_title(app: &App, title: Widget, width: f32) -> Widget {
+    let role = app.together.state.peek(|s| s.role);
+    let mut children = vec![title, Spacer::new().into()];
+    let here = app.clone();
+    children.push(tool(icons::eraser(), "Clear chat for me", move || here.together_clear_chat_here()));
+    if role.controls() {
+        let everyone = app.clone();
+        children.push(hgap(2.0));
+        children.push(tool(icons::trash_2(), "Clear chat for everyone", move || {
+            everyone.together_clear_chat_everywhere()
+        }));
+    }
+    SizedBox::new()
+        .width(width)
+        .child(hrow(children).cross_axis_alignment(CrossAxisAlignment::Center))
         .into()
 }
 
@@ -56,7 +165,7 @@ fn members(app: &App, width: f32) -> Widget {
             ))
             .into(),
             hgap(8.0),
-            badge(member.role),
+            badge(member.role, member.id == me),
         ];
         if my_role == Role::Host && member.id != me {
             line.push(Spacer::new().into());
@@ -141,6 +250,10 @@ fn chat(app: &App, width: f32, height: f32) -> Widget {
     }
     // Newest at the bottom: keep the view there.
     let controller = app.controllers.watch_chat_scroll.clone();
+    // Lines can be selected with the mouse and copied (Ctrl+C, or the
+    // right-click menu).
+    let selection = CHAT_SELECTION.with(Clone::clone);
+    let rows: Widget = incular::material::SelectionArea::with_controller(selection, col(rows)).into();
     controller.deferred_jump_to(f32::MAX / 4.0);
     Container::new()
         .width(width)
@@ -151,7 +264,7 @@ fn chat(app: &App, width: f32, height: f32) -> Widget {
                 .color(Color::rgba(0, 0, 0, 60))
                 .border_radius(BorderRadius::all(Radius::circular(10.0))),
         )
-        .child(SingleChildScrollView::new(col(rows)).controller(controller))
+        .child(SingleChildScrollView::new(rows).controller(controller))
         .into()
 }
 
@@ -164,34 +277,40 @@ fn composer(app: &App, width: f32) -> Widget {
         }
     };
     let (submit, click) = (app.clone(), app.clone());
-    row(vec![
-        input(&app.controllers.watch_chat, "Message the room", width - 82.0, move |_| send(&submit)).into(),
-        hgap(8.0),
-        button("Send", Tone::Primary, move || send(&click)),
-    ])
-    .into()
+    // The field takes what the button leaves, so the row ends exactly at
+    // `width` and the button keeps the chat box's margin.
+    SizedBox::new()
+        .width(width)
+        .child(
+            hrow(vec![
+                Expanded::new(input(&app.controllers.watch_chat, "Message the room", width - 90.0, move |_| {
+                    send(&submit)
+                }))
+                .into(),
+                hgap(10.0),
+                button("Send", Tone::Primary, move || send(&click)),
+            ])
+            .cross_axis_alignment(CrossAxisAlignment::Center),
+        )
+        .into()
 }
 
 /// Room header, people and chat. `width` is the inner width.
 pub fn room_view(app: &App, width: f32, chat_height: f32) -> Widget {
-    let (room, role, protected, link) =
-        app.together.state.read(|s| (s.room.clone(), s.role, s.protected, s.link.clone()));
+    let (room, role, password, link) =
+        app.together.state.read(|s| (s.room.clone(), s.role, s.password.clone(), s.link.clone()));
     let leave = app.clone();
-    let mut header: Vec<Widget> = vec![
-        icon(icons::users(), 16.0, ACCENT),
+    let header: Vec<Widget> = vec![
+        super::tooltip::tooltip("Room code", icon(icons::users(), 16.0, ACCENT)),
         hgap(8.0),
-        text("Room", 13.0, FontWeight::W500, MUTED).into(),
+        text(room.clone(), 18.0, FontWeight::W700, ACCENT).into(),
+        hgap(2.0),
+        copy_code(&room),
         hgap(8.0),
-        text(room, 18.0, FontWeight::W700, ACCENT).into(),
+        badge(role, true),
+        Spacer::new().into(),
+        chip("Leave", false, move || leave.together_leave()),
     ];
-    if protected {
-        header.push(hgap(8.0));
-        header.push(text("password", 10.5, FontWeight::W600, FAINT).into());
-    }
-    header.push(hgap(10.0));
-    header.push(badge(role));
-    header.push(Spacer::new().into());
-    header.push(chip("Leave", false, move || leave.together_leave()));
 
     let mut children: Vec<Widget> = vec![
         SizedBox::new()
@@ -200,30 +319,21 @@ pub fn room_view(app: &App, width: f32, chat_height: f32) -> Widget {
             .into(),
         gap(6.0),
     ];
+    if !password.is_empty() {
+        children.push(password_pill(password, 12.5));
+        children.push(gap(8.0));
+    }
     if link == Link::Reconnecting {
         children.push(text("Reconnecting to the room…", 12.0, FontWeight::W600, ACCENT).into());
         children.push(gap(6.0));
     }
-    children.push(
-        text(
-            match role {
-                Role::Host => "You're the host: you control playback and can make others co-hosts.",
-                Role::Cohost => "You're a co-host: you can control playback too.",
-                Role::Viewer => "You're a viewer: playback follows the host.",
-            },
-            11.5,
-            FontWeight::W400,
-            FAINT,
-        )
-        .into(),
-    );
-    children.push(gap(12.0));
+    children.push(gap(6.0));
     children.push(text("People", 12.0, FontWeight::W600, FAINT).into());
     children.push(gap(6.0));
     children.push(members(app, width));
-    children.push(gap(8.0));
-    children.push(text("Chat", 12.0, FontWeight::W600, FAINT).into());
-    children.push(gap(6.0));
+    children.push(gap(2.0));
+    children.push(chat_title(app, text("Chat", 12.0, FontWeight::W600, FAINT).into(), width));
+    children.push(gap(4.0));
     children.push(chat(app, width, chat_height));
     children.push(gap(8.0));
     children.push(composer(app, width));
@@ -454,34 +564,42 @@ fn lobby(app: &App, width: f32) -> Widget {
 }
 
 fn room_header(app: &App, width: f32) -> Widget {
-    let (room, role, protected, link, count) = app
+    let (room, role, password, link, count) = app
         .together
         .state
-        .read(|s| (s.room.clone(), s.role, s.protected, s.link.clone(), s.members.len()));
+        .read(|s| (s.room.clone(), s.role, s.password.clone(), s.link.clone(), s.members.len()));
     let mut actions: Vec<Widget> = Vec::new();
     let leave = app.clone();
     actions.push(button("Leave room", Tone::Ghost, move || leave.together_leave()));
 
-    let mut facts = vec![format!("{count} {}", if count == 1 { "person" } else { "people" })];
-    if protected {
-        facts.push("password protected".into());
+    let people = format!("{count} {}", if count == 1 { "person" } else { "people" });
+    let mut facts: Vec<Widget> = vec![super::tooltip::tooltip(
+        people.clone(),
+        Widget::from(row(vec![
+            icon(icons::users(), 14.0, MUTED),
+            hgap(6.0),
+            text(count.to_string(), 13.0, FontWeight::W600, MUTED).into(),
+        ]))
+        .accessibility_label(people),
+    )];
+    if !password.is_empty() {
+        facts.push(hgap(12.0));
+        facts.push(password_pill(password, 13.0));
     }
-    facts.push(
-        match role {
-            Role::Host => "you control playback",
-            Role::Cohost => "you can control playback",
-            Role::Viewer => "playback follows the host",
-        }
-        .into(),
-    );
     let mut info: Vec<Widget> = vec![
         text("ROOM CODE", 10.5, FontWeight::W700, FAINT).into(),
         gap(4.0),
-        hrow(vec![text(room, 30.0, FontWeight::W800, ACCENT).into(), hgap(14.0), badge(role)])
-            .cross_axis_alignment(CrossAxisAlignment::Center)
-            .into(),
-        gap(6.0),
-        text(facts.join(" · "), 12.5, FontWeight::W500, MUTED).into(),
+        hrow(vec![
+            text(room.clone(), 30.0, FontWeight::W800, ACCENT).into(),
+            hgap(6.0),
+            copy_code(&room),
+            hgap(10.0),
+            badge(role, true),
+        ])
+        .cross_axis_alignment(CrossAxisAlignment::Center)
+        .into(),
+        gap(8.0),
+        hrow(facts).cross_axis_alignment(CrossAxisAlignment::Center).into(),
     ];
     if link == Link::Reconnecting {
         info.push(gap(6.0));
@@ -501,18 +619,28 @@ fn room_header(app: &App, width: f32) -> Widget {
 fn now_playing(app: &App, width: f32) -> Widget {
     let (now, role) = app.together.state.read(|s| (s.now_playing.clone(), s.role));
     let body: Vec<Widget> = match now {
-        Some((title, episode)) => {
+        Some(now) => {
             let watch = app.clone();
             let mut lines = vec![
                 text("NOW PLAYING", 10.5, FontWeight::W700, FAINT).into(),
                 gap(6.0),
-                text(title, 18.0, FontWeight::W700, TEXT).into(),
+                text(now.title.clone(), 18.0, FontWeight::W700, TEXT).max_lines(Some(1)).into(),
             ];
-            if !episode.is_empty() {
+            if !now.episode.is_empty() {
                 lines.push(gap(2.0));
-                lines.push(text(episode, 13.0, FontWeight::W500, MUTED).into());
+                lines.push(text(now.episode.clone(), 13.0, FontWeight::W500, MUTED).max_lines(Some(1)).into());
             }
+            if !now.facts.is_empty() {
+                lines.push(gap(2.0));
+                lines.push(text(now.facts.clone(), 12.0, FontWeight::W400, FAINT).into());
+            }
+            // Poster, button and gaps take this much of the card.
+            let bar = (width - 40.0 - 64.0 - 16.0 - 16.0 - 110.0).clamp(140.0, 520.0);
+            lines.push(gap(12.0));
+            lines.push(position_line(app, bar));
             vec![
+                super::widgets::net_image(now.poster.as_deref(), 64.0, 96.0, 8.0, 185, &now.title),
+                hgap(16.0),
                 Expanded::new(col(lines).cross_axis_alignment(CrossAxisAlignment::Start)).into(),
                 hgap(16.0),
                 icon_text_button(icons::play(), "Watch", Tone::Primary, move || watch.together_watch()),
@@ -543,6 +671,72 @@ fn now_playing(app: &App, width: f32) -> Widget {
     card(hrow(body).cross_axis_alignment(CrossAxisAlignment::Center)).width(width).into()
 }
 
+thread_local! {
+    /// Bumped once a second while the room is playing, rebuilding only the
+    /// position line (not the chat or the rest of the page).
+    static TICK: Signal<u64> = Signal::new(0);
+    static TICK_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Playing or paused, where the room is (`12:04 / 1:52:10`), a progress
+/// bar, and who the room is waiting for.
+fn position_line(app: &App, width: f32) -> Widget {
+    let app = app.clone();
+    Builder::new(move |_| {
+        TICK.with(|t| t.get());
+        let (clock, waiting) = app.together.state.peek(|s| (s.clock, s.waiting.clone()));
+        let Some(clock) = clock else {
+            return text("Starting…", 12.5, FontWeight::W500, MUTED).into();
+        };
+        if !clock.paused && !TICK_PENDING.with(|p| p.replace(true)) {
+            crate::state::spawn(async { tokio::time::sleep(Duration::from_secs(1)).await }, |_, ()| {
+                TICK_PENDING.with(|p| p.set(false));
+                TICK.with(|t| t.set(t.get_untracked().wrapping_add(1)));
+            });
+        }
+        let at = clock.now();
+        let mut time = crate::util::format_time(at);
+        if let Some(duration) = clock.duration {
+            time = format!("{time} / {}", crate::util::format_time(duration));
+        }
+        let mut state = vec![
+            icon(if clock.paused { icons::pause() } else { icons::play() }, 13.0, TEXT),
+            hgap(6.0),
+            text(if clock.paused { "Paused" } else { "Playing" }, 12.5, FontWeight::W600, TEXT).into(),
+            hgap(10.0),
+            text(time, 12.5, FontWeight::W500, MUTED).into(),
+        ];
+        if (clock.speed - 1.0).abs() > 0.01 {
+            state.push(hgap(10.0));
+            state.push(text(format!("{}×", (clock.speed * 100.0).round() / 100.0), 12.5, FontWeight::W500, MUTED).into());
+        }
+        if let Some(duration) = clock.duration {
+            let left = (duration - at).max(0.0);
+            state.push(hgap(10.0));
+            state.push(text(format!("{} left", crate::util::format_time(left)), 12.5, FontWeight::W400, FAINT).into());
+        }
+        let mut lines = vec![row(state).into()];
+        if let Some(duration) = clock.duration {
+            let fraction = (at / duration).clamp(0.0, 1.0) as f32;
+            lines.push(gap(8.0));
+            lines.push(
+                layers(vec![
+                    Container::new().width(width).height(4.0).radius(2.0).color(Color::rgba(255, 255, 255, 40)).into(),
+                    Container::new().width((width * fraction).max(4.0)).height(4.0).radius(2.0).color(ACCENT).into(),
+                ])
+                .into(),
+            );
+        }
+        if !waiting.is_empty() {
+            let names: Vec<String> = waiting.into_iter().map(|(_, name)| name).collect();
+            lines.push(gap(8.0));
+            lines.push(text(format!("Waiting for {} to load", names.join(", ")), 12.0, FontWeight::W500, ACCENT).into());
+        }
+        col(lines).into()
+    })
+    .into()
+}
+
 fn titled(glyph: Glyph, title: &str) -> Widget {
     hrow(vec![icon(glyph, 15.0, MUTED), hgap(8.0), text(title, 14.0, FontWeight::W700, TEXT).into()])
         .cross_axis_alignment(CrossAxisAlignment::Center)
@@ -562,8 +756,8 @@ fn chat_card(app: &App, width: f32, height: f32) -> Widget {
     let inner = width - 40.0;
     card(
         col(vec![
-            titled(icons::message_square(), "Chat"),
-            gap(12.0),
+            chat_title(app, titled(icons::message_square(), "Chat"), inner),
+            gap(10.0),
             chat(app, inner, height),
             gap(10.0),
             composer(app, inner),

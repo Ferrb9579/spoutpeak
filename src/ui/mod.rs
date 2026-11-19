@@ -368,6 +368,9 @@ pub fn root(app: &App) -> Widget {
             Container::new().color(BG).child(layered),
         ),
     );
+    // Tap regions (the search dropdown) only learn about taps outside
+    // them under a surface; this one spans the window, title bar included.
+    let themed = incular::widgets::TapRegionSurface::new(themed);
     Directionality::new(
         TextDirection::Ltr,
         KeyboardListener::new(themed)

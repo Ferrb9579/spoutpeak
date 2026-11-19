@@ -3,7 +3,7 @@
 use super::motion;
 use super::widgets::*;
 use crate::state::{App, Load, Quality, StreamGroup};
-use crate::addons::types::{Meta, Stream, StreamSource, Video};
+use crate::addons::types::{Meta, Stream, StreamSource, Video, WatchStatus};
 use crate::theme::*;
 use incular::prelude::*;
 use incular::controls::{Button, ButtonStyle, StateColor};
@@ -83,6 +83,8 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
     }
 
     let in_library = app.in_library(meta.id());
+    let watched = app.is_watched(meta.id());
+    let status = app.watch_status(meta.id());
     let mut actions: Vec<Widget> = vec![{
         let (app, meta) = (app.clone(), meta.clone());
         icon_text_button(
@@ -92,6 +94,30 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
             move || app.toggle_library(&meta),
         )
     }];
+    {
+        let (app, meta) = (app.clone(), meta.clone());
+        actions.push(icon_text_button(
+            if watched { icons::check_circle() } else { icons::eye() },
+            if watched { "Watched" } else { "Mark as watched" },
+            Tone::Glass,
+            move || app.toggle_watched(&meta),
+        ));
+    }
+    for (panel, glyph, label) in [
+        (
+            DetailPanel::Status,
+            status.map_or(icons::bookmark(), status_glyph),
+            status.map_or("Status", WatchStatus::label),
+        ),
+        (DetailPanel::Playlists, icons::playlist(), "Playlists"),
+    ] {
+        actions.push(icon_text_button(glyph, label, Tone::Glass, move || {
+            DETAIL_PANEL.with(|open| {
+                let next = if open.get_untracked() == Some(panel) { None } else { Some(panel) };
+                open.set(next);
+            });
+        }));
+    }
     let trailer = meta
         .trailer_streams
         .iter()
@@ -99,7 +125,6 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
         .or_else(|| meta.trailers.first().map(|t| t.source.clone()))
         .filter(|id| !id.is_empty());
     if let Some(id) = trailer {
-        actions.push(hgap(10.0));
         let app = app.clone();
         actions.push(button("Trailer", Tone::Glass, move || {
             app.play_stream(&Stream {
@@ -110,7 +135,6 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
     }
     // The page shows the art only blurred; this opens it sharp.
     if let Some(art) = meta.background.clone().or_else(|| meta.poster.clone()).filter(|u| u.starts_with("http")) {
-        actions.push(hgap(10.0));
         let app = app.clone();
         actions.push(super::tooltip::tooltip(
             "View artwork",
@@ -119,7 +143,6 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
         ));
     }
     if meta.id().starts_with("tt") {
-        actions.push(hgap(10.0));
         let url = format!("https://www.imdb.com/title/{}/", meta.id());
         let app = app.clone();
         actions.push(button("IMDb", Tone::Glass, move || {
@@ -130,7 +153,8 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
         }));
     }
     children.push(gap(22.0));
-    children.push(row(actions).into());
+    children.push(Wrap::new(actions).spacing(10.0).run_spacing(10.0).into());
+    children.push(detail_panel(app, meta));
 
     if loading {
         children.push(gap(20.0));
@@ -193,6 +217,138 @@ fn info_pane(app: &App, meta: &Meta, loading: bool, failure: Option<&str>) -> Wi
         .physics(motion::APP_SCROLLED)
         .controller(app.controllers.detail.clone()),
     )
+}
+
+/// The pickers that open under the title's buttons.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetailPanel {
+    Status,
+    Playlists,
+}
+
+thread_local! {
+    static DETAIL_PANEL: Signal<Option<DetailPanel>> = Signal::new(None);
+}
+
+pub(super) fn status_glyph(status: WatchStatus) -> Glyph {
+    match status {
+        WatchStatus::Watching => icons::play_circle(),
+        WatchStatus::PlanToWatch => icons::clock_circle(),
+        WatchStatus::OnHold => icons::pause_circle(),
+        WatchStatus::Watched => icons::check_circle(),
+        WatchStatus::Dropped => icons::close_circle(),
+    }
+}
+
+/// A pill with an icon: a status or a playlist to pick.
+fn pick(glyph: Glyph, label: String, selected: bool, on_click: impl Fn() + 'static) -> Widget {
+    let (background, hover, foreground) = if selected {
+        (SELECTED, SELECTED, ON_SELECTED)
+    } else {
+        (Color::rgba(255, 255, 255, 22), Color::rgba(255, 255, 255, 40), TEXT)
+    };
+    Button::with_child(row(vec![
+        icon(glyph, 14.0, foreground),
+        hgap(6.0),
+        text(label, 12.5, FontWeight::W600, foreground).into(),
+    ]))
+    .style(ButtonStyle {
+        background: Some(background),
+        background_states: Some(StateColor::new(background).hovered(hover)),
+        foreground: Some(foreground),
+        border: Some(Border::new(0.0, Color::TRANSPARENT)),
+        border_radius: Some(15.0),
+        padding: Some(EdgeInsets::only(10.0, 0.0, 13.0, 0.0)),
+        height: Some(30.0),
+        overlay_color: Some(Color::TRANSPARENT.into()),
+        animation_duration: Some(std::time::Duration::ZERO),
+        ..ButtonStyle::default()
+    })
+    .on_click(on_click)
+    .into()
+}
+
+/// The open status or playlist picker. Its own builder: opening it does
+/// not rebuild the page.
+fn detail_panel(app: &App, meta: &Meta) -> Widget {
+    let (app, meta) = (app.clone(), meta.clone());
+    Builder::new(move |_| {
+        let Some(panel) = DETAIL_PANEL.with(|open| open.get()) else {
+            return SizedBox::shrink().into();
+        };
+        let mut picks: Vec<Widget> = Vec::new();
+        let title = match panel {
+            DetailPanel::Status => {
+                let current = app.watch_status(meta.id());
+                for status in WatchStatus::ALL {
+                    let (app, meta) = (app.clone(), meta.clone());
+                    let selected = current == Some(status);
+                    picks.push(pick(status_glyph(status), status.label().to_owned(), selected, move || {
+                        app.set_watch_status(&meta, if selected { None } else { Some(status) });
+                    }));
+                }
+                "Where are you with it?"
+            }
+            DetailPanel::Playlists => {
+                let lists = app.playlists.read(|all| {
+                    all.iter().map(|p| (p.id.clone(), p.name.clone(), p.items.len())).collect::<Vec<_>>()
+                });
+                for (id, name, _) in lists {
+                    let inside = app.in_playlist(&id, meta.id());
+                    let (app, meta) = (app.clone(), meta.clone());
+                    picks.push(pick(
+                        if inside { icons::check() } else { icons::plus() },
+                        name,
+                        inside,
+                        move || app.toggle_in_playlist(&id, &meta),
+                    ));
+                }
+                "Add to a playlist"
+            }
+        };
+        let mut children: Vec<Widget> = vec![
+            text(title, 12.0, FontWeight::W600, FAINT).into(),
+            gap(10.0),
+        ];
+        if !picks.is_empty() {
+            children.push(Wrap::new(picks).spacing(8.0).run_spacing(8.0).into());
+        }
+        if panel == DetailPanel::Playlists {
+            let (submit, click) = ((app.clone(), meta.clone()), (app.clone(), meta.clone()));
+            let create = |app: &App, meta: &Meta| {
+                if let Some(id) = app.create_playlist(&app.controllers.playlist_name.text()) {
+                    app.controllers.playlist_name.set_text("");
+                    app.toggle_in_playlist(&id, meta);
+                }
+            };
+            if !children.is_empty() {
+                children.push(gap(12.0));
+            }
+            children.push(
+                row(vec![
+                    input(&app.controllers.playlist_name, "New playlist", 220.0, move |_| create(&submit.0, &submit.1))
+                        .size(Size::new(220.0, 32.0))
+                        .into(),
+                    hgap(8.0),
+                    small_icon_button(icons::plus(), Some("Create"), Tone::Glass, move || create(&click.0, &click.1)),
+                ])
+                .into(),
+            );
+        }
+        Padding::new(
+            EdgeInsets::only(0.0, 14.0, 0.0, 0.0),
+            Container::new()
+                .padding(EdgeInsets::all(14.0))
+                .decoration(
+                    BoxDecoration::new()
+                        .color(Color::rgba(0, 0, 0, 70))
+                        .border_radius(BorderRadius::all(Radius::circular(14.0))),
+                )
+                .child(col(children)),
+        )
+        .into()
+    })
+    .into()
 }
 
 trait Pipe: Sized {
@@ -288,10 +444,15 @@ fn breakable(value: &str) -> String {
 }
 
 const DOWNLOAD_BUTTON: f32 = 40.0;
+const WATCHED_BUTTON: f32 = 40.0;
 
 fn download_button(on_click: impl Fn() + 'static) -> Widget {
-    use incular::controls::{Button, ButtonStyle, StateColor};
-    Button::with_child(icon(icons::download(), 18.0, MUTED))
+    side_button(icon(icons::download(), 18.0, MUTED), on_click)
+}
+
+/// A square glass button beside a list tile.
+fn side_button(child: Widget, on_click: impl Fn() + 'static) -> Widget {
+    Button::with_child(child)
         .style(ButtonStyle {
             background: Some(GLASS),
             background_states: Some(StateColor::new(GLASS).hovered(GLASS_HOVER)),
@@ -543,16 +704,22 @@ fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
             .as_deref()
             .map(|r| r.chars().take(10).collect::<String>())
             .unwrap_or_default();
+        let watched = app.video_watched(meta.id(), video.id());
         let caption = if is_resume {
             "Continue here".to_owned()
+        } else if watched {
+            if released.is_empty() { "Watched".to_owned() } else { format!("Watched · {released}") }
         } else {
             released
         };
+        // The watched toggle sits beside the tile, not inside it (a nested
+        // button would also open the episode).
+        let tile_width = PANEL_INNER - WATCHED_BUTTON - 8.0;
         let tile = hrow(vec![
             net_image(video.thumbnail.as_deref(), 112.0, 63.0, 8.0, 320, &video.label()),
             hgap(12.0),
             SizedBox::new()
-                .width(PANEL_INNER - 112.0 - 40.0)
+                .width(tile_width - 112.0 - 40.0)
                 .child(col(vec![
                     Text::new(video.label())
                         .style(style(13.5, FontWeight::W600, TEXT))
@@ -572,14 +739,27 @@ fn episodes_pane(app: &App, meta: &Meta, season: Option<u32>) -> Widget {
         ])
         .main_axis_size(MainAxisSize::Min)
         .cross_axis_alignment(CrossAxisAlignment::Center);
-        let app = app.clone();
+        let (open, mark, marked_meta, video_id) = (app.clone(), app.clone(), meta.clone(), video.id().to_owned());
         let label = video.label();
-        children.push(list_button(
-            super::tooltip::tooltip(label, tile),
-            PANEL_INNER,
-            is_resume,
-            move || app.select_video(video.clone()),
-        ));
+        let tip = if watched { "Mark as not watched" } else { "Mark as watched" };
+        children.push(
+            hrow(vec![
+                list_button(super::tooltip::tooltip(label, tile), tile_width, is_resume, move || {
+                    open.select_video(video.clone())
+                }),
+                hgap(8.0),
+                super::tooltip::tooltip(
+                    tip,
+                    Widget::from(side_button(
+                        icon(icons::check_circle(), 20.0, if watched { GOOD } else { Color::rgba(255, 255, 255, 70) }),
+                        move || mark.toggle_video_watched(&marked_meta, &video_id),
+                    ))
+                    .accessibility_label(tip),
+                ),
+            ])
+            .cross_axis_alignment(CrossAxisAlignment::Center)
+            .into(),
+        );
         children.push(gap(8.0));
     }
     let list: Widget = smooth(

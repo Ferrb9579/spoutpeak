@@ -52,11 +52,13 @@ impl Rail {
     const THIN: Rail = Rail { height: 8.0, radius: 1.5, thumb: 6.0 };
 }
 
-/// Played: near-white. Downloaded but not played: grey. The rest: the black
-/// rail showing through.
+/// Played: near-white. Downloaded but not played: grey. The rest: a
+/// translucent mid grey, so the empty track still shows over black video
+/// and over the dark control backdrop, yet stays darker than `LOADED` over
+/// bright pictures.
 const PLAYED: Color = Color::rgba(244, 244, 244, 255);
 const LOADED: Color = Color::rgba(184, 184, 184, 255);
-const RAIL: Color = CONTROL_TINT;
+const RAIL: Color = Color::rgba(120, 120, 120, 120);
 /// How far above the rail the time bubble floats (outside the bar's box).
 const BUBBLE_WIDTH: f32 = 78.0;
 const BUBBLE_HEIGHT: f32 = 24.0;

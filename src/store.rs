@@ -1,6 +1,6 @@
 //! On-disk profile: installed addons, settings and the library.
 
-use crate::addons::types::{Descriptor, LibraryItem};
+use crate::addons::types::{Descriptor, LibraryItem, Playlist};
 use crate::util::data_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -318,6 +318,23 @@ pub fn last_stream_key(meta_id: &str, video_id: Option<&str>) -> String {
 
 fn profile_path() -> PathBuf {
     data_dir().join("profile.json")
+}
+
+fn playlists_path() -> PathBuf {
+    data_dir().join("playlists.json")
+}
+
+pub fn load_playlists() -> Vec<Playlist> {
+    std::fs::read(playlists_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_playlists(playlists: &Vec<Playlist>) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(playlists) {
+        write_atomic(playlists_path(), bytes);
+    }
 }
 
 fn library_path() -> PathBuf {

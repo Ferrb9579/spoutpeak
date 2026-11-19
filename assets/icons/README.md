@@ -21,5 +21,8 @@ preserved by the native renderer.
 The navigation uses MingCute Home7Fill, Search3Fill, BookmarksFill and
 Settings4Fill, matching Liner's navigation choices. Playback uses Solar Bold
 Play, Pause, RewindBack, RewindForward and SkipNext. Secondary controls use the
-corresponding Solar Bold or Outline variants. Only the icon libraries are
+corresponding Solar Bold or Outline variants. Room and library actions use
+Solar Bold Copy, Eye, EyeClosed, LockKeyhole, Crown, Eraser,
+PlaylistMinimalistic, CheckCircle, CloseCircle, PauseCircle, PlayCircle and
+ClockCircle. Only the icon libraries are
 vendored; no Liner application code is included.
