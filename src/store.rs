@@ -135,6 +135,8 @@ pub struct Settings {
     pub recent_searches: Vec<String>,
     /// The name others in a watch-together room see.
     pub watch_name: String,
+    /// Voice chat: echo cancellation, noise suppression, gain, gate.
+    pub voice: crate::voice_processing::VoiceSettings,
 }
 
 impl Default for Settings {
@@ -169,6 +171,7 @@ impl Default for Settings {
             spotlight_rows_on_board: true,
             recent_searches: Vec::new(),
             watch_name: String::new(),
+            voice: crate::voice_processing::VoiceSettings::default(),
         }
     }
 }
@@ -296,6 +299,9 @@ pub struct Profile {
     pub settings: Settings,
     /// The stream last played per title / episode, most recent first.
     pub last_streams: Vec<LastStream>,
+    /// The signed-in Spoutpeak account (see `crate::account`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<crate::account::Account>,
 }
 
 /// The stream picked for one title or episode.
@@ -347,8 +353,8 @@ pub fn load_profile() -> Profile {
         .as_deref()
         .and_then(|bytes| serde_json::from_slice(bytes).ok())
         .unwrap_or_default();
-    // Older versions stored an online-account login token; rewrite the file
-    // without it now that accounts are gone.
+    // Much older versions stored a third-party login under "auth"; rewrite
+    // the file without it. (Spoutpeak's own account lives under "account".)
     let has_old_login = bytes
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .is_some_and(|value| value.get("auth").is_some());

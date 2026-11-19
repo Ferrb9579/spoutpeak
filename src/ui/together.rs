@@ -5,7 +5,7 @@ use super::motion;
 use super::widgets::{PAGE_PADDING, page, smooth};
 use crate::state::App;
 use crate::theme::*;
-use crate::together::{BUBBLE_SECONDS, ChatLine, Link, Role};
+use crate::together::{BUBBLE_SECONDS, ChatLine, Link, Member, Role};
 use incular::prelude::*;
 use std::time::Duration;
 
@@ -67,8 +67,13 @@ thread_local! {
 fn tool(glyph: Glyph, tip: &str, on_click: impl Fn() + 'static) -> Widget {
     super::tooltip::tooltip(
         tip,
-        Widget::from(small_icon_button(glyph, None, Tone::Ghost, on_click)).accessibility_label(tip),
+        small_icon_button(glyph, None, Tone::Ghost, on_click).accessibility_label(tip),
     )
+}
+
+/// [`tool`] around an arbitrary icon widget.
+fn tool_widget(child: Widget, tip: &str, on_click: impl Fn() + 'static) -> Widget {
+    super::tooltip::tooltip(tip, icon_button(child, 28.0, on_click).accessibility_label(tip))
 }
 
 fn copy_code(room: &str) -> Widget {
@@ -139,9 +144,68 @@ fn chat_title(app: &App, title: Widget, width: f32) -> Widget {
         .into()
 }
 
+/// `glyph` crossed out in red: muted or deafened.
+fn struck(glyph: Glyph, size: f32, color: Color) -> Widget {
+    struct Slash;
+    impl CustomPainter for Slash {
+        fn paint(&self, size: Size) -> DisplayList {
+            let mut canvas = Canvas::default();
+            let mut path = Path::builder();
+            path.move_to(Offset::new(size.width * 0.18, size.height * 0.12));
+            path.line_to(Offset::new(size.width * 0.82, size.height * 0.88));
+            let path = std::sync::Arc::new(path.build());
+            let stroke = |width: f32| Stroke { width, cap: LineCap::Round, ..Stroke::default() };
+            // A dark edge keeps the slash apart from the glyph under it.
+            canvas.draw_path(
+                path.clone(),
+                &Paint::new().color(Color::rgba(0, 0, 0, 200)).stroke().stroke_settings(stroke(size.width * 0.2)),
+                FillRule::NonZero,
+            );
+            canvas.draw_path(
+                path,
+                &Paint::new().color(DANGER).stroke().stroke_settings(stroke(size.width * 0.1)),
+                FillRule::NonZero,
+            );
+            canvas.finish()
+        }
+        fn should_repaint(&self, _: &Self) -> bool {
+            false
+        }
+    }
+    layers(vec![icon(glyph, size, color), CustomPaint::from_painter(Size::new(size, size), Slash).into()]).into()
+}
+
+/// Mic and headphones beside someone in voice: green while talking,
+/// crossed out when muted or deafened (red when the host did it).
+fn voice_marks(member: &Member, speaking: bool) -> Widget {
+    let mut marks: Vec<Widget> = Vec::new();
+    let muted = member.muted || member.mod_muted || member.deafened || member.mod_deafened;
+    let mic: Widget = if muted {
+        struck(icons::microphone(), 13.0, if member.mod_muted { DANGER } else { MUTED })
+    } else {
+        icon(icons::microphone(), 13.0, if speaking { GOOD } else { MUTED })
+    };
+    let tip = match (member.mod_muted, member.muted || member.deafened, speaking) {
+        (true, _, _) => "Muted by the host",
+        (_, true, _) => "Muted",
+        (_, _, true) => "Talking",
+        _ => "In voice",
+    };
+    marks.push(super::tooltip::tooltip(tip, mic));
+    if member.deafened || member.mod_deafened {
+        marks.push(hgap(4.0));
+        marks.push(super::tooltip::tooltip(
+            if member.mod_deafened { "Deafened by the host" } else { "Deafened" },
+            struck(icons::headphones(), 13.0, if member.mod_deafened { DANGER } else { MUTED }),
+        ));
+    }
+    row(marks).into()
+}
+
 fn members(app: &App, width: f32) -> Widget {
-    let (list, me, my_role, host_online) =
-        app.together.state.peek(|s| (s.members.clone(), s.me, s.role, s.host_online));
+    let (list, me, my_role, host_online, speaking, talking) = app.together.state.peek(|s| {
+        (s.members.clone(), s.me, s.role, s.host_online, s.voice.speaking.clone(), s.voice.talking)
+    });
     let mut rows: Vec<Widget> = Vec::new();
     if !host_online {
         rows.push(
@@ -167,20 +231,44 @@ fn members(app: &App, width: f32) -> Widget {
             hgap(8.0),
             badge(member.role, member.id == me),
         ];
+        if member.in_voice {
+            let talking_now = if member.id == me { talking } else { speaking.contains(&member.id) };
+            line.push(hgap(8.0));
+            line.push(voice_marks(&member, talking_now));
+        }
+        let mut tools: Vec<Widget> = Vec::new();
+        let id = member.id;
+        // Host and co-hosts moderate voice; co-hosts can't touch the host.
+        let can_moderate =
+            my_role.controls() && member.id != me && !(member.role == Role::Host && my_role != Role::Host);
+        if can_moderate && member.in_voice {
+            let (mute, deafen) = (app.clone(), app.clone());
+            let (muted, deafened) = (member.mod_muted, member.mod_deafened);
+            tools.push(tool_widget(
+                if muted { icon(icons::microphone(), 15.0, MUTED) } else { struck(icons::microphone(), 15.0, MUTED) },
+                if muted { "Unmute for the room" } else { "Mute for the room" },
+                move || mute.together_moderate(id, Some(!muted), None),
+            ));
+            tools.push(tool_widget(
+                if deafened { icon(icons::headphones(), 15.0, MUTED) } else { struck(icons::headphones(), 15.0, MUTED) },
+                if deafened { "Undeafen for the room" } else { "Deafen for the room" },
+                move || deafen.together_moderate(id, None, Some(!deafened)),
+            ));
+        }
         if my_role == Role::Host && member.id != me {
-            line.push(Spacer::new().into());
-            let id = member.id;
             let (toggle, promote, kick) = (app.clone(), app.clone(), app.clone());
-            let (label, next) = if member.role == Role::Cohost {
-                ("Make viewer", Role::Viewer)
+            let (glyph, tip, next) = if member.role == Role::Cohost {
+                (icons::eye(), "Make viewer", Role::Viewer)
             } else {
-                ("Make co-host", Role::Cohost)
+                (icons::play_circle(), "Make co-host", Role::Cohost)
             };
-            line.push(chip(label, false, move || toggle.together_set_role(id, next)));
-            line.push(hgap(6.0));
-            line.push(chip("Make host", false, move || promote.together_set_role(id, Role::Host)));
-            line.push(hgap(6.0));
-            line.push(chip("Remove", false, move || kick.together_kick(id)));
+            tools.push(tool(glyph, tip, move || toggle.together_set_role(id, next)));
+            tools.push(tool(icons::crown(), "Make host", move || promote.together_set_role(id, Role::Host)));
+            tools.push(tool(icons::x(), "Remove from the room", move || kick.together_kick(id)));
+        }
+        if !tools.is_empty() {
+            line.push(Spacer::new().into());
+            line.extend(tools);
         }
         rows.push(
             SizedBox::new()
@@ -200,31 +288,103 @@ fn clock(at: u64) -> String {
         .unwrap_or_default()
 }
 
-fn chat_row(line: &ChatLine, width: f32) -> Widget {
+thread_local! {
+    /// The chat line under the pointer (its id), for its edit/delete buttons.
+    static HOVERED_LINE: Signal<u64> = Signal::new(0);
+    /// The line being edited in the composer.
+    static EDITING: Signal<Option<u64>> = Signal::new(None);
+}
+
+/// Edit / delete for a chat line, shown while the pointer is on it. Its own
+/// builder: hovering rebuilds only these buttons, not the chat.
+fn line_actions(app: &App, line: &ChatLine) -> Widget {
+    let (mid, mine, text_now) = (line.mid, line.mine, line.text.clone());
+    let controls = app.together.state.peek(|s| s.role.controls());
+    if mid == 0 || !(mine || controls) {
+        return SizedBox::shrink().into();
+    }
+    let app = app.clone();
+    Builder::new(move |_| {
+        let shown = HOVERED_LINE.with(|h| h.get()) == mid || EDITING.with(|e| e.get()) == Some(mid);
+        if !shown {
+            // Same width either way, so text doesn't reflow on hover.
+            return SizedBox::new().width(if mine { 56.0 } else { 28.0 }).height(1.0).into();
+        }
+        let mut buttons: Vec<Widget> = Vec::new();
+        if mine {
+            let (edit, text) = (app.clone(), text_now.clone());
+            buttons.push(tool(icons::pen(), "Edit", move || {
+                edit.controllers.watch_chat.set_text(&text);
+                EDITING.with(|e| e.set(Some(mid)));
+            }));
+        }
+        let delete = app.clone();
+        buttons.push(tool(icons::trash_2(), if mine { "Delete" } else { "Delete for everyone" }, move || {
+            if EDITING.with(|e| e.get_untracked()) == Some(mid) {
+                EDITING.with(|e| e.set(None));
+                delete.controllers.watch_chat.set_text("");
+            }
+            delete.together_delete_chat(mid);
+        }));
+        row(buttons).into()
+    })
+    .into()
+}
+
+fn chat_row(app: Option<&App>, line: &ChatLine, width: f32) -> Widget {
     match &line.from {
         None => SizedBox::new()
             .width(width)
             .child(text(line.text.clone(), 11.5, FontWeight::W500, FAINT))
             .into(),
-        Some(from) => SizedBox::new()
-            .width(width)
-            .child(
-                hrow(vec![
-                    text(clock(line.at), 11.0, FontWeight::W500, FAINT).into(),
-                    hgap(6.0),
-                    text(
-                        from.clone(),
-                        12.5,
-                        FontWeight::W700,
-                        if line.mine { ACCENT } else { role_color(line.role).with_alpha_if_faint() },
-                    )
-                    .into(),
-                    hgap(8.0),
-                    Expanded::new(text(line.text.clone(), 12.5, FontWeight::W400, TEXT)).into(),
-                ])
-                .cross_axis_alignment(CrossAxisAlignment::Start),
+        Some(from) => {
+            let mut body = vec![
+                text(clock(line.at), 11.0, FontWeight::W500, FAINT).into(),
+                hgap(6.0),
+                text(
+                    from.clone(),
+                    12.5,
+                    FontWeight::W700,
+                    if line.mine { ACCENT } else { role_color(line.role).with_alpha_if_faint() },
+                )
+                .into(),
+                hgap(8.0),
+                Expanded::new(if line.edited {
+                    Widget::from(col(vec![
+                        text(line.text.clone(), 12.5, FontWeight::W400, TEXT).into(),
+                        text("(edited)", 10.5, FontWeight::W400, FAINT).into(),
+                    ]))
+                } else {
+                    text(line.text.clone(), 12.5, FontWeight::W400, TEXT).into()
+                })
+                .into(),
+            ];
+            let Some(app) = app else {
+                return SizedBox::new()
+                    .width(width)
+                    .child(hrow(body).cross_axis_alignment(CrossAxisAlignment::Start))
+                    .into();
+            };
+            body.push(hgap(4.0));
+            body.push(line_actions(app, line));
+            let mid = line.mid;
+            MouseRegion::new(
+                SizedBox::new().width(width).child(hrow(body).cross_axis_alignment(CrossAxisAlignment::Start)),
             )
-            .into(),
+            .on_enter(move |_| {
+                HOVERED_LINE.with(|h| {
+                    h.set(mid);
+                })
+            })
+            .on_exit(move |_| {
+                HOVERED_LINE.with(|h| {
+                    if h.get_untracked() == mid {
+                        h.set(0);
+                    }
+                })
+            })
+            .into()
+        }
     }
 }
 
@@ -245,7 +405,7 @@ fn chat(app: &App, width: f32, height: f32) -> Widget {
         rows.push(muted("No messages yet. Say hi!"));
     }
     for line in &lines {
-        rows.push(chat_row(line, width - 16.0));
+        rows.push(chat_row(Some(app), line, width - 16.0));
         rows.push(gap(6.0));
     }
     // Newest at the bottom: keep the view there.
@@ -271,27 +431,126 @@ fn chat(app: &App, width: f32, height: f32) -> Widget {
 fn composer(app: &App, width: f32) -> Widget {
     let send = |app: &App| {
         let value = app.controllers.watch_chat.text();
-        if !value.trim().is_empty() {
-            app.together_chat(&value);
-            app.controllers.watch_chat.set_text("");
+        if value.trim().is_empty() {
+            return;
         }
+        match EDITING.with(|e| e.get_untracked()) {
+            Some(mid) => {
+                app.together_edit_chat(mid, &value);
+                EDITING.with(|e| e.set(None));
+            }
+            None => app.together_chat(&value),
+        }
+        app.controllers.watch_chat.set_text("");
     };
     let (submit, click) = (app.clone(), app.clone());
+    let field = input(&app.controllers.watch_chat, "Message the room", width - 90.0, move |_| send(&submit));
     // The field takes what the button leaves, so the row ends exactly at
-    // `width` and the button keeps the chat box's margin.
+    // `width` and the button keeps the chat box's margin. Only the banner
+    // and button follow the edit mode, so typing keeps its focus.
+    let banner = {
+        let app = app.clone();
+        Builder::new(move |_| {
+            if EDITING.with(|e| e.get()).is_none() {
+                return SizedBox::shrink().into();
+            }
+            let cancel = app.clone();
+            Padding::new(
+                EdgeInsets::only(0.0, 0.0, 0.0, 6.0),
+                row(vec![
+                    icon(icons::pen(), 12.0, MUTED),
+                    hgap(6.0),
+                    text("Editing your message", 11.5, FontWeight::W600, MUTED).into(),
+                    hgap(8.0),
+                    small_button("Cancel", Tone::Ghost, move || {
+                        EDITING.with(|e| e.set(None));
+                        cancel.controllers.watch_chat.set_text("");
+                    }),
+                ]),
+            )
+            .into()
+        })
+    };
+    let action = Builder::new(move |_| {
+        let editing = EDITING.with(|e| e.get()).is_some();
+        let click = click.clone();
+        button(if editing { "Save" } else { "Send" }, Tone::Primary, move || send(&click))
+    });
+    col(vec![
+        banner.into(),
+        SizedBox::new()
+            .width(width)
+            .child(
+                hrow(vec![Expanded::new(field).into(), hgap(10.0), action.into()])
+                    .cross_axis_alignment(CrossAxisAlignment::Center),
+            )
+            .into(),
+    ])
+    .into()
+}
+
+/// Join voice, or (in voice) mute, deafen and leave.
+fn voice_bar(app: &App, width: f32) -> Widget {
+    let voice = app.together.state.peek(|s| s.voice.clone());
+    let mut children: Vec<Widget> = Vec::new();
+    if !voice.joined {
+        let join = app.clone();
+        children.push(icon_text_button(icons::phone(), "Join voice", Tone::Neutral, move || {
+            join.together_voice_join()
+        }));
+        children.push(hgap(10.0));
+        children.push(
+            Flexible::new(text("Echo cancellation and noise suppression: Settings › Voice chat", 11.5, FontWeight::W400, FAINT))
+                .into(),
+        );
+    } else {
+        let (mute, deafen, leave) = (app.clone(), app.clone(), app.clone());
+        let pill = |child: Widget, active: bool| -> Widget {
+            Container::new()
+                .radius(16.0)
+                .color(if active { Color::rgba(240, 96, 104, 40) } else { Color::rgba(255, 255, 255, 18) })
+                .child(child)
+                .into()
+        };
+        let muted = voice.muted || voice.deafened;
+        children.push(pill(
+            tool_widget(
+                if muted {
+                    struck(icons::microphone(), 16.0, TEXT)
+                } else {
+                    icon(icons::microphone(), 16.0, if voice.talking { GOOD } else { TEXT })
+                },
+                if muted { "Unmute" } else { "Mute" },
+                move || mute.together_toggle_mute(),
+            ),
+            muted,
+        ));
+        children.push(hgap(6.0));
+        children.push(pill(
+            tool_widget(
+                if voice.deafened { struck(icons::headphones(), 16.0, TEXT) } else { icon(icons::headphones(), 16.0, TEXT) },
+                if voice.deafened { "Undeafen" } else { "Deafen" },
+                move || deafen.together_toggle_deafen(),
+            ),
+            voice.deafened,
+        ));
+        children.push(hgap(10.0));
+        let status = match &voice.problem {
+            Some(problem) => text(problem.clone(), 11.5, FontWeight::W500, DANGER),
+            None if voice.deafened => text("Deafened", 11.5, FontWeight::W600, MUTED),
+            None if voice.muted => text("Muted", 11.5, FontWeight::W600, MUTED),
+            None if voice.talking => text("Talking", 11.5, FontWeight::W600, GOOD),
+            None => text("Voice connected", 11.5, FontWeight::W600, GOOD),
+        };
+        children.push(Flexible::new(status.max_lines(Some(2))).into());
+        children.push(Spacer::new().into());
+        children.push(small_icon_button(icons::end_call(), Some("Leave voice"), Tone::Danger, move || {
+            leave.together_voice_leave()
+        }));
+    }
     SizedBox::new()
         .width(width)
-        .child(
-            hrow(vec![
-                Expanded::new(input(&app.controllers.watch_chat, "Message the room", width - 90.0, move |_| {
-                    send(&submit)
-                }))
-                .into(),
-                hgap(10.0),
-                button("Send", Tone::Primary, move || send(&click)),
-            ])
-            .cross_axis_alignment(CrossAxisAlignment::Center),
-        )
+        .child(hrow(children).cross_axis_alignment(CrossAxisAlignment::Center))
         .into()
 }
 
@@ -327,7 +586,9 @@ pub fn room_view(app: &App, width: f32, chat_height: f32) -> Widget {
         children.push(text("Reconnecting to the room…", 12.0, FontWeight::W600, ACCENT).into());
         children.push(gap(6.0));
     }
-    children.push(gap(6.0));
+    children.push(gap(4.0));
+    children.push(voice_bar(app, width));
+    children.push(gap(10.0));
     children.push(text("People", 12.0, FontWeight::W600, FAINT).into());
     children.push(gap(6.0));
     children.push(members(app, width));
@@ -367,7 +628,7 @@ pub fn bubbles(app: &App) -> Option<Widget> {
                             .color(Color::rgba(16, 16, 16, 215))
                             .border_radius(BorderRadius::all(Radius::circular(12.0))),
                     )
-                    .child(chat_row(line, 320.0)),
+                    .child(chat_row(None, line, 320.0)),
             )
             .into()
         })
@@ -462,8 +723,34 @@ fn panel_title(glyph: Glyph, title: &str, subtitle: &str) -> Widget {
     .into()
 }
 
+/// Signed out: rooms need an account.
+fn sign_in_first(app: &App, width: f32) -> Widget {
+    let go = app.clone();
+    card(
+        hrow(vec![
+            panel_title(icons::log_in(), "Sign in to watch together", "Rooms show everyone by their account name"),
+            Spacer::new().into(),
+            button("Sign in", Tone::Primary, move || go.go(crate::state::Route::Account)),
+        ])
+        .cross_axis_alignment(CrossAxisAlignment::Center),
+    )
+    .width(width)
+    .into()
+}
+
 /// Not in a room: create one or join one.
 fn lobby(app: &App, width: f32) -> Widget {
+    if !app.signed_in() {
+        // Read, so signing in elsewhere rebuilds this page.
+        app.profile.read(|_| ());
+        return col(vec![
+            muted("Watch in sync with friends: the room keeps play, pause, seeking and the video in step."),
+            gap(20.0),
+            sign_in_first(app, width),
+        ])
+        .cross_axis_alignment(CrossAxisAlignment::Start)
+        .into();
+    }
     let connecting = app.together.state.read(|s| s.link == Link::Connecting);
     let side_by_side = width >= 2.0 * 340.0 + 16.0;
     let panel = if side_by_side { (width - 16.0) / 2.0 } else { width };
@@ -474,12 +761,6 @@ fn lobby(app: &App, width: f32) -> Widget {
         col(vec![
             panel_title(icons::plus(), "Start a room", "You'll be the host and control playback"),
             gap(22.0),
-            field(
-                "Your name",
-                "What others in the room see",
-                input(&app.controllers.watch_name, "Guest", field_width, |_| {}).into(),
-            ),
-            gap(16.0),
             field(
                 "Password",
                 "Optional. Only people who know it can join",
@@ -500,12 +781,6 @@ fn lobby(app: &App, width: f32) -> Widget {
         col(vec![
             panel_title(icons::log_in(), "Join a room", "Use the code a friend shared with you"),
             gap(22.0),
-            field(
-                "Your name",
-                "What others in the room see",
-                input(&app.controllers.watch_name, "Guest", field_width, |_| {}).into(),
-            ),
-            gap(16.0),
             field(
                 "Room code",
                 "Six letters and digits, like K7MQ2P",
@@ -745,7 +1020,13 @@ fn titled(glyph: Glyph, title: &str) -> Widget {
 
 fn people_card(app: &App, width: f32) -> Widget {
     card(
-        col(vec![titled(icons::users(), "People"), gap(12.0), members(app, width - 40.0)])
+        col(vec![
+            titled(icons::users(), "People"),
+            gap(12.0),
+            voice_bar(app, width - 40.0),
+            gap(14.0),
+            members(app, width - 40.0),
+        ])
             .cross_axis_alignment(CrossAxisAlignment::Start),
     )
     .width(width)

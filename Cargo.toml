@@ -35,6 +35,9 @@ zip = { version = "6.0", default-features = false, features = ["deflate-flate2-z
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
+opus = "0.4"
+cpal = "0.18.2"
+sonora = "0.3.0"
 
 [target.'cfg(windows)'.dependencies]
 # Size on disk of sparse torrent files (the cache limit). Same version

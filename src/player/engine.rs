@@ -660,6 +660,7 @@ impl Inner {
                     cursor: 0,
                     generation: 0,
                     frame_count: 0,
+                    tap: crate::voice_processing::TapWriter::new(&crate::voice_processing::FILM, 2),
                 });
                 let _ = ready_tx.send(true);
                 while inner.alive.load(Ordering::Acquire) {
@@ -1348,6 +1349,8 @@ struct QueueSource {
     cursor: usize,
     generation: u64,
     frame_count: u64,
+    /// What is played goes to voice chat's echo canceller too.
+    tap: crate::voice_processing::TapWriter,
 }
 
 /// One frame in this many is skipped or repeated while slewing: about 4 %
@@ -1358,6 +1361,14 @@ impl Iterator for QueueSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
+        let sample = self.next_sample()?;
+        self.tap.sample(sample);
+        Some(sample)
+    }
+}
+
+impl QueueSource {
+    fn next_sample(&mut self) -> Option<f32> {
         let inner = &self.inner;
         if !inner.alive.load(Ordering::Relaxed) {
             return None;
@@ -1913,6 +1924,7 @@ mod seek_tests {
         // Drive the real PCM queue without requiring a sound device in CI.
         let mut audio = QueueSource {
             inner: inner.clone(), local: Vec::new(), cursor: 0, generation: 0, frame_count: 0,
+            tap: crate::voice_processing::TapWriter::new(&crate::voice_processing::FILM, 2),
         };
         engine.set_paused(false);
         let mut pictures = std::collections::HashSet::new();

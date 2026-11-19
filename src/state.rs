@@ -174,6 +174,7 @@ pub enum Route {
     Addons,
     Settings,
     Together,
+    Account,
     Detail,
     Player,
 }
@@ -573,10 +574,14 @@ pub struct Controllers {
     pub player_path: TextEditingController,
     pub download_dir: TextEditingController,
     pub watch_name: TextEditingController,
+    pub account_email: TextEditingController,
+    pub account_name: TextEditingController,
+    pub account_password: TextEditingController,
     pub watch_code: TextEditingController,
     pub watch_password: TextEditingController,
     pub watch_join_password: TextEditingController,
     pub together: ScrollController,
+    pub account: ScrollController,
     pub watch_chat: TextEditingController,
     pub watch_chat_scroll: ScrollController,
     pub board: ScrollController,
@@ -612,10 +617,14 @@ impl Controllers {
             player_path: TextEditingController::with_text(&profile.settings.custom_player_path),
             download_dir: TextEditingController::with_text(&profile.settings.download_dir),
             watch_name: TextEditingController::with_text(&profile.settings.watch_name),
+            account_email: TextEditingController::new(),
+            account_name: TextEditingController::new(),
+            account_password: TextEditingController::new(),
             watch_code: TextEditingController::new(),
             watch_password: TextEditingController::new(),
             watch_join_password: TextEditingController::new(),
             together: ScrollController::new(),
+            account: ScrollController::new(),
             watch_chat: TextEditingController::new(),
             watch_chat_scroll: ScrollController::new(),
             board: ScrollController::new(),
@@ -661,6 +670,8 @@ pub struct App {
     pub search: Shared<SearchState>,
     pub detail: Shared<DetailState>,
     pub together: crate::together::Together,
+    /// The Account page's sign-in / sign-up progress.
+    pub auth: Shared<crate::account::AuthState>,
     /// Season combobox on the detail page. Separate signals so typing in
     /// its search field rebuilds only the result list, not the field.
     pub season_open: Signal<bool>,
@@ -725,6 +736,7 @@ impl App {
             search: Shared::new(SearchState::default()),
             detail: Shared::new(DetailState::default()),
             together: crate::together::Together::new(),
+            auth: Shared::new(crate::account::AuthState::default()),
             season_open: Signal::new(false),
             season_filter: Signal::new(String::new()),
             addons: Shared::new(AddonsState {
@@ -770,6 +782,7 @@ impl App {
             });
         }
         self.start_streaming();
+        self.refresh_account();
         self.downloads.peek(|list| crate::downloads::clean_staging(list));
         self.resume_interrupted_downloads();
         // Find the video encoder off the UI thread (it test-encodes a clip).

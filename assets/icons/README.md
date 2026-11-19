@@ -24,5 +24,6 @@ Play, Pause, RewindBack, RewindForward and SkipNext. Secondary controls use the
 corresponding Solar Bold or Outline variants. Room and library actions use
 Solar Bold Copy, Eye, EyeClosed, LockKeyhole, Crown, Eraser,
 PlaylistMinimalistic, CheckCircle, CloseCircle, PauseCircle, PlayCircle and
-ClockCircle. Only the icon libraries are
+ClockCircle. Voice and chat editing use Solar Bold Microphone, HeadphonesRound,
+Pen, PhoneCallingRounded and EndCallRounded. Only the icon libraries are
 vendored; no Liner application code is included.

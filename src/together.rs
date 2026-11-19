@@ -92,6 +92,14 @@ pub struct Member {
     pub id: u64,
     pub name: String,
     pub role: Role,
+    /// In the room's voice chat.
+    pub in_voice: bool,
+    /// Their own mute / deafen.
+    pub muted: bool,
+    pub deafened: bool,
+    /// Imposed by the host or a co-host.
+    pub mod_muted: bool,
+    pub mod_deafened: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -105,6 +113,9 @@ pub struct ChatLine {
     /// This app's clock when it arrived (for the floating bubbles).
     pub received: Instant,
     pub mine: bool,
+    /// The line's id in the room (for editing and deleting); 0 when unknown.
+    pub mid: u64,
+    pub edited: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -130,7 +141,32 @@ pub struct TogetherState {
     /// Where the room's playback was at a moment, to work out where it is
     /// now without the player open.
     pub clock: Option<RoomClock>,
+    pub voice: VoiceState,
 }
+
+/// This app's place in the room's voice chat.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VoiceState {
+    pub joined: bool,
+    pub muted: bool,
+    pub deafened: bool,
+    /// Room ids of the people talking now.
+    pub speaking: Vec<u64>,
+    /// Our own microphone is sending speech.
+    pub talking: bool,
+    /// Why the microphone or speakers don't work.
+    pub problem: Option<String>,
+}
+
+/// What goes out on the room connection.
+enum Out {
+    Text(String),
+    /// A voice frame.
+    Binary(Vec<u8>),
+}
+
+type NetSlot = std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<Out>>>>;
+type VoiceSlot = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<crate::voice::Voice>>>>;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NowPlaying {
@@ -185,7 +221,12 @@ struct Ticket {
 struct Inner {
     /// The room's current video, to open it again from the room page.
     media: RefCell<Option<Value>>,
-    tx: RefCell<Option<mpsc::UnboundedSender<String>>>,
+    /// The current connection's outgoing queue; shared with the voice
+    /// thread, which sends its frames through it.
+    tx: NetSlot,
+    /// The running voice session, shared with the network thread that
+    /// hands it incoming frames.
+    voice: VoiceSlot,
     /// Bumped per connection, so messages of an old one are ignored.
     connection: Cell<u64>,
     ticket: RefCell<Ticket>,
@@ -221,7 +262,8 @@ impl Together {
             state: Shared::new(TogetherState::default()),
             inner: Rc::new(Inner {
                 media: RefCell::new(None),
-                tx: RefCell::new(None),
+                tx: NetSlot::default(),
+                voice: VoiceSlot::default(),
                 connection: Cell::new(0),
                 ticket: RefCell::new(Ticket::default()),
                 retries: Cell::new(0),
@@ -244,8 +286,8 @@ impl Together {
     }
 
     fn send(&self, message: Value) {
-        if let Some(tx) = self.inner.tx.borrow().as_ref() {
-            let _ = tx.send(message.to_string());
+        if let Some(tx) = self.inner.tx.lock().unwrap().as_ref() {
+            let _ = tx.send(Out::Text(message.to_string()));
         }
     }
 
@@ -286,24 +328,33 @@ impl App {
     }
 
     fn together_connect(&self) {
-        let name = self.profile.peek(|p| p.settings.watch_name.trim().to_owned());
+        let (name, auth) = self.profile.peek(|p| {
+            let account = p.account.as_ref();
+            (
+                account.map_or_else(|| p.settings.watch_name.trim().to_owned(), |a| a.name.clone()),
+                account.map(|a| a.token.clone()).unwrap_or_default(),
+            )
+        });
         let Some(handle) = crate::state::tokio() else { return };
         let together = &self.together;
         let connection = together.inner.connection.get() + 1;
         together.inner.connection.set(connection);
         let ticket = together.inner.ticket.borrow().clone();
-        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-        let _ = tx.send(
+        let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
+        let _ = tx.send(Out::Text(
             json!({
                 "t": "hello",
                 "name": name,
                 "room": ticket.room,
                 "password": ticket.password,
                 "token": ticket.token,
+                // The server names us after the account it belongs to.
+                "auth": auth,
             })
             .to_string(),
-        );
-        *together.inner.tx.borrow_mut() = Some(tx);
+        ));
+        *together.inner.tx.lock().unwrap() = Some(tx);
+        let voice = together.inner.voice.clone();
 
         handle.spawn(async move {
             let socket = match tokio::time::timeout(Duration::from_secs(45), connect(SERVER_URL)).await {
@@ -321,8 +372,12 @@ impl App {
             };
             let (mut sink, mut stream) = socket.split();
             let writer = tokio::spawn(async move {
-                while let Some(line) = rx.recv().await {
-                    if sink.send(Message::Text(line.into())).await.is_err() {
+                while let Some(out) = rx.recv().await {
+                    let message = match out {
+                        Out::Text(line) => Message::Text(line.into()),
+                        Out::Binary(frame) => Message::Binary(frame.into()),
+                    };
+                    if sink.send(message).await.is_err() {
                         break;
                     }
                 }
@@ -333,6 +388,13 @@ impl App {
                     Message::Text(text) => {
                         if let Ok(message) = serde_json::from_str::<Value>(text.as_str()) {
                             ui(move |app| app.together_message(connection, message));
+                        }
+                    }
+                    // Voice: decoded right here, off the UI thread.
+                    Message::Binary(frame) => {
+                        let session = voice.lock().unwrap().clone();
+                        if let Some(session) = session {
+                            session.receive(&frame);
                         }
                     }
                     Message::Close(_) => break,
@@ -352,7 +414,8 @@ impl App {
         let together = &self.together;
         together.inner.connection.set(together.inner.connection.get() + 1);
         // Dropping the sender ends the writer, which closes the socket.
-        together.inner.tx.borrow_mut().take();
+        together.inner.tx.lock().unwrap().take();
+        self.together_stop_voice();
         *together.inner.ticket.borrow_mut() = Ticket::default();
         together.inner.media.borrow_mut().take();
         together.inner.pending.set(None);
@@ -376,7 +439,7 @@ impl App {
         if together.inner.connection.get() != connection {
             return;
         }
-        together.inner.tx.borrow_mut().take();
+        together.inner.tx.lock().unwrap().take();
         let can_retry = !together.inner.ticket.borrow().token.is_empty();
         let attempt = together.inner.retries.get();
         if !can_retry || attempt >= RETRY_WAITS.len() {
@@ -438,6 +501,22 @@ impl App {
                 }
             }
             "members" => self.together_members(&message),
+            "chat_edited" => {
+                let mid = message["mid"].as_u64().unwrap_or(0);
+                let text = message["text"].as_str().unwrap_or_default().to_owned();
+                together.state.write(|s| {
+                    if let Some(line) = s.chat.iter_mut().find(|l| l.mid == mid) {
+                        line.text = text;
+                        line.edited = true;
+                    }
+                });
+            }
+            "chat_deleted" => {
+                let mid = message["mid"].as_u64().unwrap_or(0);
+                if together.state.peek(|s| s.chat.iter().any(|l| l.mid == mid)) {
+                    together.state.write(|s| s.chat.retain(|l| l.mid != mid));
+                }
+            }
             "chat_cleared" => {
                 let by_me = message["id"].as_u64() == Some(together.state.peek(|s| s.me));
                 together.state.write(|s| {
@@ -550,6 +629,7 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
+        let voice = together.state.peek(|s| s.voice.clone());
         together.state.write(|s| {
             s.link = Link::Connected;
             s.room = room.clone();
@@ -562,6 +642,12 @@ impl App {
             s.chat = chat;
             s.waiting.clear();
         });
+
+        if voice.joined {
+            // Back in the room after a dropped connection: back in voice too.
+            together.send(json!({ "t": "voice_join" }));
+            together.send(json!({ "t": "voice_state", "muted": voice.muted, "deafened": voice.deafened }));
+        }
 
         let media = &message["media"];
         self.together_remember_media(media);
@@ -617,6 +703,15 @@ impl App {
             // Someone who left is no longer holding anyone up.
             s.waiting.retain(|(id, _)| list.iter().any(|m| m.id == *id));
         });
+        let mine = list.iter().find(|m| m.id == me).cloned();
+        if let Some(mine) = mine {
+            let session = together.inner.voice.lock().unwrap().clone();
+            if let Some(session) = session {
+                let (muted, deafened) = together.state.peek(|s| (s.voice.muted, s.voice.deafened));
+                session.set_muted(muted || mine.mod_muted);
+                session.set_deafened(deafened || mine.mod_deafened);
+            }
+        }
         if role != before {
             self.notify(match role {
                 Role::Host => "You are now the host",
@@ -737,6 +832,151 @@ impl App {
             return;
         }
         self.together.send(json!({ "t": "chat", "text": text }));
+    }
+
+    /// Changes the text of one of our own chat lines.
+    pub fn together_edit_chat(&self, mid: u64, text: &str) {
+        let text = text.trim();
+        if mid != 0 && !text.is_empty() {
+            self.together.send(json!({ "t": "chat_edit", "mid": mid, "text": text }));
+        }
+    }
+
+    /// Deletes a chat line (our own; anyone's for the host and co-hosts).
+    pub fn together_delete_chat(&self, mid: u64) {
+        if mid != 0 {
+            self.together.send(json!({ "t": "chat_delete", "mid": mid }));
+        }
+    }
+
+    // ------------------------------------------------------------ voice
+
+    pub fn together_voice_join(&self) {
+        let together = &self.together;
+        if !together.connected() || together.state.peek(|s| s.voice.joined) {
+            return;
+        }
+        let net = together.inner.tx.clone();
+        let outbox: crate::voice::Outbox = Box::new(move |frame| {
+            if let Some(tx) = net.lock().unwrap().as_ref() {
+                let _ = tx.send(Out::Binary(frame));
+            }
+        });
+        let (muted, deafened) = together
+            .state
+            .peek(|s| s.members.iter().find(|m| m.id == s.me).map(|m| (m.mod_muted, m.mod_deafened)))
+            .unwrap_or_default();
+        let settings = self.profile.peek(|p| p.settings.voice);
+        let session = std::sync::Arc::new(crate::voice::Voice::start(outbox, muted, deafened, settings));
+        *together.inner.voice.lock().unwrap() = Some(session);
+        together.state.write(|s| {
+            s.voice = VoiceState { joined: true, ..VoiceState::default() };
+        });
+        together.send(json!({ "t": "voice_join" }));
+        self.together_voice_tick();
+    }
+
+    /// Voice preferences changed: the running session picks them up.
+    pub fn together_voice_settings(&self, settings: crate::voice_processing::VoiceSettings) {
+        self.update_settings(|s| s.voice = settings);
+        if let Some(session) = self.together.inner.voice.lock().unwrap().as_ref() {
+            session.set_settings(settings);
+        }
+    }
+
+    pub fn together_voice_leave(&self) {
+        if self.together.state.peek(|s| s.voice.joined) {
+            self.together.send(json!({ "t": "voice_leave" }));
+        }
+        self.together_stop_voice();
+    }
+
+    fn together_stop_voice(&self) {
+        if let Some(session) = self.together.inner.voice.lock().unwrap().take() {
+            session.stop();
+        }
+        if self.together.state.peek(|s| s.voice != VoiceState::default()) {
+            self.together.state.write(|s| s.voice = VoiceState::default());
+        }
+    }
+
+    /// Our own moderation, as the members list says.
+    fn together_moderation(&self) -> (bool, bool) {
+        self.together
+            .state
+            .peek(|s| s.members.iter().find(|m| m.id == s.me).map(|m| (m.mod_muted, m.mod_deafened)))
+            .unwrap_or_default()
+    }
+
+    pub fn together_toggle_mute(&self) {
+        let (mod_muted, mod_deafened) = self.together_moderation();
+        let (muted, deafened) = self.together.state.peek(|s| (s.voice.muted, s.voice.deafened));
+        if muted && (mod_muted || mod_deafened) {
+            self.notify("The host muted you for this room");
+            return;
+        }
+        // Unmuting also undeafens: you can't talk without hearing.
+        let (muted, deafened) = if muted { (false, false) } else { (true, deafened) };
+        self.together_set_voice(muted, deafened);
+    }
+
+    pub fn together_toggle_deafen(&self) {
+        let (_, mod_deafened) = self.together_moderation();
+        let deafened = self.together.state.peek(|s| s.voice.deafened);
+        if deafened && mod_deafened {
+            self.notify("The host deafened you for this room");
+            return;
+        }
+        // Deafening also mutes, as in most voice apps.
+        if deafened { self.together_set_voice(false, false) } else { self.together_set_voice(true, true) }
+    }
+
+    fn together_set_voice(&self, muted: bool, deafened: bool) {
+        let together = &self.together;
+        let (mod_muted, mod_deafened) = self.together_moderation();
+        if let Some(session) = together.inner.voice.lock().unwrap().as_ref() {
+            session.set_muted(muted || mod_muted);
+            session.set_deafened(deafened || mod_deafened);
+        }
+        together.state.write(|s| {
+            s.voice.muted = muted;
+            s.voice.deafened = deafened;
+        });
+        together.send(json!({ "t": "voice_state", "muted": muted, "deafened": deafened }));
+    }
+
+    /// Host and co-hosts: mutes or deafens someone (or lifts it).
+    pub fn together_moderate(&self, id: u64, muted: Option<bool>, deafened: Option<bool>) {
+        let mut message = json!({ "t": "voice_mod", "id": id });
+        if let Some(muted) = muted {
+            message["muted"] = json!(muted);
+        }
+        if let Some(deafened) = deafened {
+            message["deafened"] = json!(deafened);
+        }
+        self.together.send(message);
+    }
+
+    /// While in voice: who is talking, five times a second.
+    fn together_voice_tick(&self) {
+        let session = self.together.inner.voice.lock().unwrap().clone();
+        let Some(session) = session else { return };
+        let mut speaking = session.speaking();
+        speaking.sort_unstable();
+        let (talking, problem) = (session.talking(), session.problem());
+        let changed = self.together.state.peek(|s| {
+            s.voice.speaking != speaking || s.voice.talking != talking || s.voice.problem != problem
+        });
+        if changed {
+            self.together.state.write(|s| {
+                s.voice.speaking = speaking;
+                s.voice.talking = talking;
+                s.voice.problem = problem;
+            });
+        }
+        crate::state::spawn(async { tokio::time::sleep(Duration::from_millis(200)).await }, |app, ()| {
+            app.together_voice_tick()
+        });
     }
 
     /// Empties this app's copy of the chat; others keep theirs.
@@ -927,6 +1167,11 @@ fn members(value: &Value) -> Vec<Member> {
                     id: m["id"].as_u64().unwrap_or(0),
                     name: m["name"].as_str().unwrap_or("Guest").to_owned(),
                     role: Role::parse(&m["role"]),
+                    in_voice: m["voice"].as_bool().unwrap_or(false),
+                    muted: m["muted"].as_bool().unwrap_or(false),
+                    deafened: m["deafened"].as_bool().unwrap_or(false),
+                    mod_muted: m["mod_muted"].as_bool().unwrap_or(false),
+                    mod_deafened: m["mod_deafened"].as_bool().unwrap_or(false),
                 })
                 .collect()
         })
@@ -941,7 +1186,10 @@ fn chat_line(value: &Value, me: u64) -> ChatLine {
         text: value["text"].as_str().unwrap_or_default().to_owned(),
         at: value["at"].as_u64().unwrap_or(0),
         received: Instant::now(),
-        mine: !notice && value["id"].as_u64() == Some(me),
+        // History says whose lines are ours (our id changes on reconnect).
+        mine: !notice && (value["mine"].as_bool() == Some(true) || value["id"].as_u64() == Some(me)),
+        mid: value["mid"].as_u64().unwrap_or(0),
+        edited: value["edited"].as_bool().unwrap_or(false),
     }
 }
 

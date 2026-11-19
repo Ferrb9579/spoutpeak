@@ -1,0 +1,30 @@
+# The watch-together server with accounts, on a pgrust database.
+#   cd watch-server
+#   POSTGRES_PASSWORD=<a long random password> docker compose up -d --build
+# Put HTTPS in front of port 7878 (a reverse proxy or your platform's TLS):
+# the app only signs in over https:// / wss://.
+
+services:
+  db:
+    # pgrust: a Postgres-compatible database written in Rust (beta).
+    image: malisper/pgrust:v0.4-beta
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: spoutpeak
+    volumes:
+      - pgrust-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  watch:
+    build: .
+    environment:
+      PORT: "7878"
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/spoutpeak
+    ports:
+      - "7878:7878"
+    depends_on:
+      - db
+    restart: unless-stopped
+
+volumes:
+  pgrust-data:

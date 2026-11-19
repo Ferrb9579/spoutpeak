@@ -68,4 +68,5 @@ glyphs! {
     log_in, message_square, window_maximize, window_restore, more_horizontal,
     copy, eye, eye_closed, lock, crown, eraser, playlist, check_circle,
     close_circle, pause_circle, play_circle, clock_circle,
+    microphone, headphones, pen, phone, end_call,
 }

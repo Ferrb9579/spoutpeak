@@ -4,6 +4,7 @@
     windows_subsystem = "windows"
 )]
 
+mod account;
 mod addons;
 mod ai;
 mod convert;
@@ -21,6 +22,8 @@ mod branding;
 mod together;
 mod ui;
 mod util;
+mod voice;
+mod voice_processing;
 mod window;
 
 #[cfg(test)]

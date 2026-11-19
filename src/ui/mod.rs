@@ -13,6 +13,7 @@ mod player;
 mod search_menu;
 pub(crate) use player::hide_tooltips as hide_player_tooltips;
 mod together;
+mod account;
 pub mod tooltip;
 mod settings;
 mod spotlight;
@@ -101,6 +102,11 @@ fn sidebar(app: &App, current: Route) -> Widget {
         items.push(nav_button(app, label, glyph, route, route == current));
         items.push(gap(4.0));
     }
+    // Who is signed in, or the way to sign in.
+    let account = app.profile.read(|p| p.account.as_ref().map(|a| a.name.clone()));
+    let label = account.unwrap_or_else(|| "Sign in".to_owned());
+    items.push(nav_button(app, &label, icons::log_in(), Route::Account, current == Route::Account));
+    items.push(gap(4.0));
     items.push(Spacer::new().into());
 
     let footer = {
@@ -342,6 +348,7 @@ pub fn root(app: &App) -> Widget {
                 Route::Addons => island(app, addons::screen),
                 Route::Downloads => island(app, downloads::screen),
                 Route::Together => island(app, together::screen),
+                Route::Account => island(app, account::screen),
                 _ => island(app, settings::screen),
             };
             hrow(vec![sidebar(app, base), Expanded::new(page.wrap(screen)).into()])

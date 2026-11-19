@@ -288,6 +288,41 @@ pub fn input(
         .on_submit(on_submit)
 }
 
+/// [`input`] for passwords: the characters are shown as dots.
+/// The controls' `TextField` has no such option, so this builds the same
+/// field around a masked editor.
+pub fn password_input(
+    controller: &TextEditingController,
+    placeholder: &str,
+    width: f32,
+    on_submit: impl Fn(String) + 'static,
+) -> Widget {
+    let field = field_style();
+    let padding = field.padding.unwrap_or(EdgeInsets::ZERO);
+    let radius = field.border_radius.unwrap_or(10.0);
+    let mut editor = incular::widgets::EditableText::new(controller.clone())
+        .size(Size::new(width - padding.left - padding.right, 40.0))
+        .content_padding(EdgeInsets::all(8.0))
+        .placeholder(placeholder.to_owned())
+        .placeholder_color(field.placeholder_color.unwrap_or(MUTED))
+        .style(style(14.0, FontWeight::W400, TEXT))
+        .obscure_text(true)
+        .on_submit(on_submit);
+    if let Some(focused) = field.border_focused {
+        editor = editor.focused_border(focused, radius).focused_border_outset(padding);
+    }
+    Container::new()
+        .width(width)
+        .padding(padding)
+        .decoration(
+            BoxDecoration::new()
+                .color(field.background.unwrap_or(GLASS_HI))
+                .border_radius(BorderRadius::all(Radius::circular(radius))),
+        )
+        .child(editor)
+        .into()
+}
+
 /// A rounded glass panel: a dark translucent tint over the ambient
 /// backdrop. No outline; the fill alone sets it apart.
 pub fn card(child: impl Into<Widget>) -> Container {

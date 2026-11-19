@@ -7,6 +7,7 @@ use crate::store::{DownloadFormat, PlayerKind, ReadAhead, Settings};
 use crate::streaming::TorrentProfile;
 use crate::theme::*;
 use crate::util::language_name;
+use crate::voice_processing::{NoiseLevel, VoiceSettings};
 use incular::prelude::*;
 
 const LANGUAGES: &[&str] = &[
@@ -228,6 +229,73 @@ fn autoplay_card(app: &App, settings: &Settings) -> Widget {
             "Resume playback",
             "Start where you stopped last time",
             toggle(app, settings.resume_playback, |s, v| s.resume_playback = v),
+        ),
+    ];
+    card(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
+}
+
+/// Chips that change one voice preference; a call in progress picks the
+/// change up at once.
+fn voice_choices<T: Copy + PartialEq + 'static>(
+    app: &App,
+    options: Vec<(String, T)>,
+    current: T,
+    apply: fn(&mut VoiceSettings, T),
+) -> Widget {
+    Wrap::new(options.into_iter().map(|(label, value)| {
+        let app = app.clone();
+        chip(label, value == current, move || {
+            let mut voice = app.profile.peek(|p| p.settings.voice);
+            apply(&mut voice, value);
+            app.together_voice_settings(voice);
+        })
+    }))
+    .spacing(8.0)
+    .run_spacing(8.0)
+    .into()
+}
+
+fn voice_card(app: &App, settings: &Settings) -> Widget {
+    let voice = settings.voice;
+    let on_off = || vec![("On".to_owned(), true), ("Off".to_owned(), false)];
+    let children: Vec<Widget> = vec![
+        titled(icons::microphone(), "Voice chat"),
+        gap(6.0),
+        setting_row(
+            "Echo cancellation",
+            "Keeps the film and others' voices out of your microphone, even without headphones",
+            voice_choices(app, on_off(), voice.echo_cancellation, |v, on| v.echo_cancellation = on),
+        ),
+        setting_row(
+            "Noise suppression",
+            "Removes fans, typing and background hum",
+            voice_choices(
+                app,
+                NoiseLevel::ALL.iter().map(|level| (level.label().to_owned(), *level)).collect(),
+                voice.noise_suppression,
+                |v, level| v.noise_suppression = level,
+            ),
+        ),
+        setting_row(
+            "Automatic gain",
+            "Evens out your volume whether you're near the microphone or not",
+            voice_choices(app, on_off(), voice.auto_gain, |v, on| v.auto_gain = on),
+        ),
+        setting_row(
+            "Microphone sensitivity",
+            "How loud you must speak to be heard. Lower it if you get cut off",
+            voice_choices(
+                app,
+                vec![
+                    ("Most sensitive".to_owned(), -55.0),
+                    ("Sensitive".to_owned(), -50.0),
+                    ("Normal".to_owned(), -45.0),
+                    ("Less".to_owned(), -38.0),
+                    ("Least".to_owned(), -30.0),
+                ],
+                voice.gate_db,
+                |v, db| v.gate_db = db,
+            ),
         ),
     ];
     card(col(children).cross_axis_alignment(CrossAxisAlignment::Stretch)).into()
@@ -939,6 +1007,8 @@ pub fn screen(app: &App) -> Widget {
                 controls_card(app, &settings),
                 gap(16.0),
                 autoplay_card(app, &settings),
+                gap(16.0),
+                voice_card(app, &settings),
                 gap(16.0),
                 streaming_card(app, &settings),
                 gap(16.0),

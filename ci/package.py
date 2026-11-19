@@ -224,7 +224,9 @@ def macos(work, name, app_version):
                       "CFBundleIdentifier": "io.github.Ferrb9579.spoutpeak", "CFBundleExecutable": "spoutpeak",
                       "CFBundleIconFile": "spoutpeak.icns", "CFBundlePackageType": "APPL",
                       "CFBundleShortVersionString": app_version, "CFBundleVersion": app_version,
-                      "LSMinimumSystemVersion": "15.0", "NSHighResolutionCapable": True}, dest)
+                      "LSMinimumSystemVersion": "15.0", "NSHighResolutionCapable": True,
+                      # macOS asks before voice chat first opens the microphone.
+                      "NSMicrophoneUsageDescription": "Spoutpeak uses the microphone for voice chat in watch-together rooms."}, dest)
     # Ad-hoc signing makes CI bundles runnable without distribution secrets.
     for file in [binaries / "ffmpeg", binaries / "ffprobe", binaries / "spoutpeak"]:
         run("lipo", file, "-verify_arch", "arm64")
